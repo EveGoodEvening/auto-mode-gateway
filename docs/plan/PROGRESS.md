@@ -117,6 +117,7 @@ The chunk descriptions below define the execution sequence; current acceptance e
 - Frozen CLI integration: `registerTokenCommand(program: Command): void` and `registerInitCommand(program: Command): void`; token module also exports `generateToken(): string`. The entrypoint registers both real command implementations before awaiting `parseAsync()`. Unexpected action failures produce a fixed diagnostic and nonzero exit status without printing exception messages, stack traces, configuration or secrets.
 - Parent G passed: typecheck/lint/test/build exit 0, 97 tests passed. Built CLI version and init help exercised. End-to-end built init `--yes --config` in disposable temp directory loaded through real config loader: three routes, mode0600, all3 snippets present; built token new decoded32bytes. Token/config output captured privately, no credentials printed. Temp data removed.
 - Independent review underway. Snippets remain setup guidance, not agent/service connectivity evidence. All remaining chunks remain in scope.
+- C03 CLOSED: both independent security/correctness/accounting reviews CLEAN (`agent://c03-review-1`, `agent://c03-review-2`), draft `f064c9f` green, final tracker commit follows. Init/token portions verified; full P0-3 stays unchecked pending C04/C07/C12. Next C04.
 
 ### C04 — Authenticated transport and real serve (P1-1..3; P0-3 serve portion)
 
