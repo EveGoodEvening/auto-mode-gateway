@@ -105,10 +105,15 @@ export ANTHROPIC_API_KEY=""
 export CLAUDE_CODE_GATEWAY_HINT_HEADERS=1
 # Optional classifier cost hint; requires a configured trusted classifier route:
 export CLAUDE_CODE_AUTO_MODE_MODEL=claude-haiku-5-5
-Claude Desktop: Developer Mode → Configure Third-Party Inference; use
-http://127.0.0.1:8484/cc and the client token above. Desktop does not read
-ANTHROPIC_BASE_URL. If loopback is rejected, use your own HTTPS gateway.
-Desktop connection remains unverified; see docs/agents/claude-code.md.
+Claude Desktop: on platforms exposing Developer Mode → Configure Third-Party
+Inference, use http://127.0.0.1:8484/cc and the client token above. That GUI
+configuration route has not been exercised on Linux; Desktop does not read
+ANTHROPIC_BASE_URL. Official Linux Desktop 4.29 connected accountlessly in local
+mock QA using /etc/claude-desktop/managed-settings.json with gateway settings and
+the static AMP client token; the helper alternative is documented but unexercised.
+See docs/agents/claude-code.md for the validated setup.
+Select the explicit Code view; the generic home/new-chat view is not Code.
+If your installed Desktop rejects loopback, use your own HTTPS gateway.
 
 Codex CLI / Desktop (future protected rollout; setup only):
 export AMP_TOKEN='${token}'

@@ -151,7 +151,7 @@
   - `/status` 原生路径预期明确记录 `Auto mode server: Enabled`，同时记录拒绝说明回传模型与三次人工升级；辅助观察不替代 automatic fallback 请求轨迹。
   - 位置：`docs/compat.md`。
   - 完成标准：矩阵记录 Claude Code 版本 × 投递方式 × 结果；两种投递至少一种在当前版本可用。
-  - Actual349rewrite3PASS/genuineoverridehit1 retained,0classifierrequests/notfallback; native317externalstrictFAILunchanged. HistoricalPTY352 elapsedSeconds0.738, not1.738. Latestbg30/art367 ended22.71s timeoutawait-trust-transition/same8076PTYbytes/all7authTRUE/verifiedoneshotconfirmTRUE butNOobservedtransition/0models/probes/status. Boundedprivate stateSAFE/staticnotactualsuccess; protocol/CSI diagnostics preparing/no blindretry. UI/status/escalationunchecked.
+  - FinalTUI520localinvestigation COMPLETE: exactEnabled/5associatednormalUIbeforeoneprobe/3nativeauditblocks+exactthreeblockedUI/permissionUNANSWERED;2denialreturns/providerrequests/0classifier. observedThreeBlockedUiAndNativeAuditTRUE/properConsecutiveCaseExercisedFALSE(3returnsrequired) unchanged; noapproval/cancelinput/bothchildrenreaped/helper1/CLI143. ParentCURRENT09:26:42frozenG1606/27files/typecheck/lint/build ALLPASS/currentinitCLI smokePASS/26knownDesktopPIDsabsent. P3-4checkboxUNCHANGED forindependentexactcriteriaaccounting; native317FAIL/conditionalfallback0/strict3returnfalse notovermarked, nofurtherdoablePTYapprovalneeded.
 
 - [ ] P3-5 调查：改写模式的 preserved thinking 与 beta 头
   - 真实中转站改写 ≥5 轮（含拦截）；实测 signature/prefix 400 时按 DESIGN 有界兼容模式缓存 thinking 后再决定丢弃，仅处理受影响轮次与匹配 replay，不能撤回已发送块；该证据分支启用 strip_thinking_on_rewrite 默认行为并重跑。剥 safeguards 后 beta 400 验证默认删除；保留 beta 也成功则增加独立 upstream strip_beta:false（默认 true，forward_safeguards 仍是布尔），不引入矛盾 schema。
@@ -164,11 +164,11 @@
   - 位置：`test/integration/{mock-relay,mock-decision}.ts`、`test/integration/anthropic.test.ts`。
   - 完成标准：覆盖 enforce/shadow、vault/passthrough、注入拦截、并行部分拦截、全链失败 fail-closed、缓存命中、改道换凭证。
 
-- [ ] P3-7 Claude Code 接入文档
+- [x] P3-7 Claude Code 接入文档
   - CLI：`ANTHROPIC_BASE_URL=http://127.0.0.1:8484/cc`、`ANTHROPIC_AUTH_TOKEN=<amp token>`、`ANTHROPIC_API_KEY=""`、建议 `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`；Desktop：Developer Mode → Configure Third-Party Inference 填代理地址与 token；若 Desktop 不接受 loopback 地址，写明改用云端 https 地址；成本提示 `CLAUDE_CODE_AUTO_MODE_MODEL=claude-haiku-5-5`。`init` 命令打印同样片段。
   - 位置：`docs/agents/claude-code.md`、`src/cli/init.ts`。
   - 完成标准：按文档从零接入成功（CLI 与 Desktop 各一次），结果记入 `docs/compat.md`。
-  - Desktopvendoroverrideargsremoved/reviewerSAFE; X11rootcookiestagingblockerfixedUIDdropbeforecopy/independentre-reviewSAFE/helpercompilePASS, actualnativecaptureunrun. NoGUIacceptance; controlledPTY/X11investigationongoing, notblanketunavailable. CLI349/P3-2cannotcloseDesktop/P3-7/C08.
+  - IMPLEMENTED+VERIFIED sourcecriterion fromzeroCLI+Desktopeachonce: actualCLI349/TUI520 and actualLinux4.29.0MANAGEDstatic-token gateway(notDeveloperModeUI),5normalGUI+harmlessrewriteblock/noexecution/postnormal/STOPexit0/1129.61. GuidevalidatedJSON/path/security/discovery/explicitCode/model/ownedfolder matchescorrectedinitURL/token/Linuxpath/staticAMPtoken/helperunexercised/Codeguide. ParentCURRENT09:26:42typecheck/lint/27files1606tests/build ALLPASS; actualcorrectedinitCLI smokeexit0/configcreated/tokenredacted/stderrEmpty. MarkCHECKEDbeforechunkreview pertrackerworkflow; no mandatoryDesktopAuto/native/helpertested/DeveloperModeUI/realprovider/cache/beta/p95 claim.26knownDesktopPIDsabsent. C08READYFORLOCALCLOSURE/reviews+closurecommitpending/notclosed/noC09.
 
 ### Phase 4：OpenAI Decisions 适配器与 LLM 二审
 

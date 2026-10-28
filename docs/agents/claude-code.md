@@ -6,7 +6,7 @@ C08 provides the actual Anthropic Messages gate on `/cc` at GREEN DRAFT checkpoi
 
 Use `gate.mode: enforce` and the default `on_provider_failure: block` for enforcement. **Shadow does not protect you**: original response bytes and upstream results pass through without waiting for hypothetical decisions. Audit observations are not approvals. Opaque endpoints and upstream error bodies are transport paths, not tool-use enforcement.
 
-InstalledClaude2.1.311 CLIoverride349PASS is mockrewriteproof, notfallback/UI/provider/cache; realkeys/defaultconfigabsent. LatestPTY367trusttransitiontimeout22.71s/8076PTYbytes/auth7+verifiedoneshotTRUE butnoobservedtransition/0models/probes/status; privateCSI diagnostics preparing/no blindretry. Historical352elapsed0.738s. X11UIDdropbeforecookiecopyfix/re-reviewSAFE/compilePASS, nativecaptureunrun. ControlledUIavailable/noacceptance; see [compatibility evidence](../compat.md).
+PrimaryClaude2.1.311 CLI349 strictrewrite/override and finalTUI520baseline5/status/threeblockedUI are localactualclient observations; Desktop's officialCode2.1.309 is separate. LinuxDesktop4.29managedstatic-token setup completed5normalGUI rounds, harmlessrewriteblock/noexecution andpostnormal/STOPexit0/1129.61. Current09:26:42parentfull1606G and correctedinitCLI smokePASS verifyguide/init; P3-7CHECKED onCLI+Desktoponce, helper/DeveloperModeUI/nativeAuto/realprovider/cache/beta/p95 unclaimed. Native317/strictthree-returned failure remain. C08READYFORLOCALCLOSURE awaitsindependentreviews+closurecommit/noC09; see [compatibility evidence](../compat.md).
 
 ## CLI setup
 
@@ -36,11 +36,65 @@ The optional Haiku variable influences Claude's classifier model selection, not 
 - `forward_safeguards` controls forwarding the request field. Independent `strip_beta` defaults to `true` and removes only `dangerous-tool-use-2026-09-03`, retaining unrelated beta values. Do not set `strip_beta: false` for a real upstream without measured evidence that preserving that beta succeeds. Shadow preserves request fields, beta and upstream results.
 - Pure/early text/thinking immediate; after first withheld tool all later stateful content follows one bounded ordered suffix through uniqueness/decisions; native order preserved/rewrite in-place. Ping/control/errors immediate. Limits1MiB call/frame,8MiB total raw/decoded/parsed/output/temporaries,4MiB retained reasoning subset/nonstream;60scollection/30sidle/60sdecisions, suffix/ping never resets. Overflow never earlyflushes execution. Both budget corrections independently CLEAN/actual328+335PASS; parent full1606G now PASS, not wholeC08/live-provider acceptance.
 
-## Desktop setup (not yet exercised)
+## Desktop setup: tested Linux managed gateway path
 
-In Claude Code Desktop, enable **Developer Mode → Configure Third-Party Inference**, enter `http://127.0.0.1:8484/cc`, and supply the issued client token. Desktop does not use the CLI's `ANTHROPIC_BASE_URL` environment variable. If the installed Desktop rejects loopback, record its exact version/error and use your own HTTPS gateway with appropriately protected vault authentication; public HTTPS deployment is separate acceptance, not an already available workaround on this host.
+The exercised recipe is **official Linux Claude Desktop4.29.0, managed gateway configuration**, with accountless gateway setup and the actual **Code** surface. It is not a Developer Mode/menu walkthrough. Install the official app using the [Linux installation instructions](https://code.claude.com/docs/en/desktop-linux). Linux Code needs `bubblewrap` and `socat`; Cowork/QEMU/KVM are not needed for this Code-only flow. The app may download its official Code engine from `downloads.claude.ai`; QA actually installed2.1.309, distinct from the primary installed CLI2.1.311.
 
-ActualDesktopnotconnected; controlledPTY/X11investigationavailable/ongoing, notblanketunavailable. Latest367 actualtrusttransitiontimeout despiteverifiedoneshotconfirmation/0models/probes/status, privateprotocol/CSI diagnostics preparing/no blindretry. X11cookiecopyUIDdropfix/re-reviewSAFE/compilePASS is not actualcapture/GUIproof. CLI349/P3-2cannotcloseDesktop/P3-7/C08.
+### Managed configuration actually exercised
+
+An authorized operator installs this top-level JSON at **`/etc/claude-desktop/managed-settings.json`**:
+
+```json
+{
+  "inferenceProvider": "gateway",
+  "inferenceGatewayBaseUrl": "http://127.0.0.1:8484/cc",
+  "inferenceGatewayApiKey": "<amp token>"
+}
+```
+
+Replace `<amp token>` with the issued **gateway client token**, not an upstream/provider credential. The URL/token are the same as the CLI/init snippets. Desktop uses its managed configuration, not the CLI's `ANTHROPIC_BASE_URL` environment variable. Do not add a wrapper object or turn these exact keys into dotted/nested provider fields.
+
+The file must be a root-owned regular non-symlink file, not group/world-writable; `/etc/claude-desktop` must likewise be a root-owned non-symlink directory, not group/world-writable. Grant only the regular app user/group the read/traverse access required by your deployment; protect the static token and do not commit, screenshot or log it. Fully quit and reopen Desktop after changes. Managed provider settings take precedence over local provider settings. QA projected this exact managed path **privately**; it did not install policy into host `/etc`. Operator deployment and private QA namespaces are different mechanisms. Launch as a regular user with the vendor sandbox intact.
+
+### Gateway discovery, authentication and model selection
+
+The base includes `/cc`, **not** `/v1/messages`. For this example:
+
+- Required generation endpoint: `POST http://127.0.0.1:8484/cc/v1/messages`, Anthropic-compatible streaming/tool use.
+- Discovery recipe: authenticated `GET http://127.0.0.1:8484/cc/v1/models` using the same client token. Default gateway static-key authentication is `Authorization: Bearer <amp token>`; documented `inferenceGatewayAuthScheme: "x-api-key"` is an alternative, not this tested default.
+- Select a model ID actually returned by discovery. QA discovered `claude-sonnet-4-6` / display name `Claude Sonnet4.6`; that observed mock model is **not** a promise of real upstream availability. Your relay must advertise and accept its actual available IDs. The production app forwards authenticated `/cc/v1/models`; QA's private front only added correlation/capture, not URL/body/safeguards rewriting.
+- Official gateway docs make discovery optional; if absent, configure `inferenceModels` using the [exact reference schema](https://claude.com/docs/third-party/claude-desktop/configuration#inferencemodels), not an invented alias/shape. Discovery was implemented and exercised in this recipe; the explicit-model alternative was not.
+
+See the [Linux file format](https://claude.com/docs/third-party/claude-desktop/configuration-format#the-linux-configuration-file) and [gateway API/authentication reference](https://claude.com/docs/third-party/claude-desktop/gateway).
+
+### Actual Code UI flow
+
+1. Open the managed official app and choose/continue with its custom-gateway setup. Do **not** create/sign into an Anthropic account for this configured gateway path. QA saw “Connect Claude using your custom gateway / No Claude account needed.”
+2. **Explicitly click Code**. The generic/new-home greeting is not a Code session: QA's earlier wrong-view investigation was resolved by selecting Code. Confirm Code's “New session,” “Choose a folder / Needed to start,” “Describe something to build, change, or fix” composer, and “This computer / Accept edits” controls.
+3. Choose your intended owned workspace and grant only the visible one-time folder trust you intend. This is not permission to execute a blocked tool; never choose Always Allow or answer a blocked execution prompt as part of denial QA.
+4. Open/select the advertised model and confirm its visible label. QA used Sonnet4.6 and default **Accept Edits**; it did not enable/test native Auto Desktop safeguards.
+5. Send a normal message and inspect the actual Code response. Distinguish session model traffic from the initial nonstream gateway connectivity/auth ping. Parent verified five normal Code rounds individually, the frozen harmless `printf AMP_DESKTOP_GATE_PROBE` rewrite-denial with no execution/approval dialog, and a successful normal round after the block. This is local connection+rewrite evidence with mock backends, not real-provider/cache/beta/p95 proof.
+
+Official4.29.0 rejected debugging/network-override switches. Respect that vendor policy and retain its sandbox; successful visual QA used the actual app on authenticated owned X11, not forced CDP or a substitute web app. Linux loopback managed-gateway setup was actually exercised. If another platform/version rejects your loopback URL, record its exact error and use an owned HTTPS gateway with protected vault authentication; public HTTPS deployment remains separate acceptance.
+
+### Credential helper alternative: documented, not exercised
+
+For an operator-provided credential helper, use this alternative managed JSON and **omit** the static `inferenceGatewayApiKey`:
+
+```json
+{
+  "inferenceProvider": "gateway",
+  "inferenceGatewayBaseUrl": "http://127.0.0.1:8484/cc",
+  "inferenceCredentialKind": "helper-script",
+  "inferenceCredentialHelper": "<absolute path to operator credential helper>"
+}
+```
+
+The path must name an executable accessible to the regular app user. Optional `inferenceCredentialHelperArgs` is an array of separate nonsecret arguments, not a shell command string. On exit0, trimmed stdout must contain only the bare gateway token or JSON `{"token":"<amp token>","headers":{"<header name>":"<header value>"}}`; omit headers when unnecessary. No banners/prompts/secrets in arguments, and no credentials on stderr (it is logged). Helper credentials override static fields; explicit `helper-script` selects that source without fallback. `CLAUDE_HELPER_CONTEXT` may be `interactive`, `mid-session-refresh`, `background`, `scheduled-task` or `setup-test`; support noninteractive contexts appropriately. Documented defaults are helper TTL3600seconds and timeout60seconds (timeout range1..600). This is the [documented helper contract](https://claude.com/docs/third-party/claude-desktop/configuration#inferencecredentialhelper), **not** a helper QA success: the exercised recipe used the static-key configuration above.
+
+### Other platform/version setup: unexercised
+
+**Developer → Configure Third-Party Inference** is an [official in-app setup route](https://claude.com/docs/third-party/claude-desktop/in-app-configuration), but menu navigation and Linux local `~/.config/Claude-3p/configLibrary/` editing were **not** used or validated here; neither is the tested managed-policy recipe. Follow [official deployment instructions](https://claude.com/docs/third-party/claude-desktop/installation) for another platform. P3-7's actual from-zeroCLI+Desktoponce criterion is verified/CHECKED with the managed recipe, actualCLI+GUI proof, currentparentG and correctedinit smoke—not mandatoryDesktopnative/Auto. Native317/combinedordered failures unchanged; finalTUI520baseline/status/threeblockedUI atUNANSWEREDendpoint completeslocalinvestigation, notstrictnativePASS. C08READYFORLOCALCLOSURE awaitsindependentreviews+closurecommit/noC09yet.
 
 ## Safe real-CLI mock QA (parent-run only)
 
