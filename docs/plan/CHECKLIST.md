@@ -159,12 +159,13 @@
   - 位置：`src/protocols/anthropic/stream.ts`、`src/config/schema.ts`、`docs/compat.md`。
   - 完成标准：多轮会话无 400；结论入文档。
 
-- [ ] P3-6 集成测试：mock 中转站与 mock 决策提供方
+- [x] P3-6 集成测试：mock 中转站与 mock 决策提供方
   - mock 中转站：Hono 服务，按场景返回脚本化响应（纯文本、良性 tool_use、注入恶意 tool_use、并行 tool_use、带/不带上游 `safeguard_results`、非流式），三种协议各一套。mock 决策提供方：按命令关键字返回预设概率，可模拟超时、429、529、5xx。
   - 位置：`test/integration/{mock-relay,mock-decision}.ts`、`test/integration/anthropic.test.ts`。
   - 完成标准：覆盖 enforce/shadow、vault/passthrough、注入拦截、并行部分拦截、全链失败 fail-closed、缓存命中、改道换凭证。
+  - C11 GREEN DRAFT own criterion VERIFIED：父代理22:56:12 typecheck/lint/36 files/2214 tests/build 全通过，三协议实际 HTTP matrix 全36例通过；覆盖 enforce/shadow、vault/passthrough、注入/并行部分拦截、全链失败、缓存、换凭证改道。改道指原有 R7 精确 Anthropic-shaped classifier payload 经所有 generation ingress；原生 Responses/Chat classifier 格式不匹配并保持 main，不虚构支持。Anthropic native safeguard_results 与另外两协议不适用情况分账；不借邻项真实客户端/provider/cache 条件否定本项 mock 集成标准。独立评审与 C11 closure 仍待完成。
 
-  - [x] C10 protocol-applicable Responses subset: pure/benign/inert malicious/parallel/nonstream scenes; enforce/nonblocking byte-exact shadow; vault401/passthrough+credential replacement; timeout/429/529/5xx+failover/full-chain block; local gate-cache hit/context separation; classifier fingerprint explicitly NOT rerouted. Native safeguard_results/reroute semantics stay Anthropic-only v1/shared C08 coverage, no invented Responses native support. CurrentG2091/43actualHTTP/source reviews verify this subset; whole P3-6 still requires all3 protocols and is not a reason to defer remaining C10 work/selectC11 now.
+  - [x] Historical C10 protocol-applicable Responses subset was verified by G2091/43 actual HTTP cases: pure/benign/inert malicious/parallel/nonstream; enforce/nonblocking byte-exact shadow; vault/passthrough credential handling; timeout/429/529/5xx failover/full-chain block; local cache/context separation. C11 now completes all3 protocols above. The old C10 hybrid Anthropic-fingerprint-on-Responses route-gated assumption was removed under existing R7: exact Anthropic-shaped classifier payload reroutes across generation ingress; native Responses classifier format still does not match. No Responses safeguard_results/native-classifier support is invented.
 
 - [x] P3-7 Claude Code 接入文档
   - CLI：`ANTHROPIC_BASE_URL=http://127.0.0.1:8484/cc`、`ANTHROPIC_AUTH_TOKEN=<amp token>`、`ANTHROPIC_API_KEY=""`、建议 `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`；Desktop：Developer Mode → Configure Third-Party Inference 填代理地址与 token；若 Desktop 不接受 loopback 地址，写明改用云端 https 地址；成本提示 `CLAUDE_CODE_AUTO_MODE_MODEL=claude-haiku-5-5`。`init` 命令打印同样片段。
@@ -235,20 +236,23 @@
 
 ### Phase 6：WorkBuddy（OpenAI Chat Completions）适配器
 
-- [ ] P6-1 Chat Completions 流式拦截与改写
+- [x] P6-1 Chat Completions 流式拦截与改写
   - 按 `choices[0].delta.tool_calls[].index` 聚合 `id`、`function.name`、`function.arguments`；扣留该 index 的 chunk 直到流末（`finish_reason` 出现）判定；allow 放出，block 丢弃并追加一个 `delta.content` 说明 chunk；若无剩余 tool_calls，`finish_reason` 由 `tool_calls` 改为 `stop`；透传 `reasoning_content`、`usage` chunk、`[DONE]`。非流式同步处理 `message.tool_calls` 与 `finish_reason`。
   - 位置：`src/protocols/openai-chat/{adapter,stream,nonstream}.ts`。
   - 完成标准：fixture 单测覆盖单/多 tool_calls、部分拦截、`reasoning_content` 透传、非流式。
+  - Own fixture/implementation criterion VERIFIED：父代理22:56:12 全量2214 tests/build/type/lint 通过，含 Chat fixtures/actual HTTP；独立10例 HTTP feature smoke 通过单/多/部分拦截、reasoning、nonstream、usage/[DONE] 与终态。此项不要求实际 WorkBuddy UI/模式/头；这些仍属于未勾选 P6-3。GREEN DRAFT，不等于独立评审或 C11 closure。
 
-- [ ] P6-2 WorkBuddy 工具映射与路径处理
+- [x] P6-2 WorkBuddy 工具映射与路径处理
   - route 级 `tool_map{<tool_name>: command|file_write|url|mcp|other, arg?}` 配置；无映射时用 P2-1 启发式；Windows 路径归一化（反斜杠、盘符、`%USERPROFILE%`）用于敏感路径与项目目录判断；`project_dirs` 来自 route 配置。
   - 位置：`src/gate/normalize/workbuddy.ts`、`src/policy/sensitive-paths.ts`。
   - 完成标准：单测覆盖映射优先级与 Windows 路径用例。
+  - Own mapping/Windows criterion VERIFIED：复用 C06 已有映射/启发式/Windows 词法规则与 LOCKED other，补充权威 arg 选择、缺失/错误参数 fail-closed、有效空文件内容及 normalize→sensitive policy 回归；父代理22:56:12 全量2214 tests/type/lint/build 与实际映射/路径边界探针通过。route project_dirs 不等于客户端 home；缺少可信 home/userprofile 时 %USERPROFILE% 保持 unresolved_path，禁止借用宿主环境/猜 home，不增设配置面。独立评审与 C11 closure 待完成。
 
 - [ ] P6-3 调查与接入文档：WorkBuddy 实机
   - 设置 > 模型 > 添加模型 > 自定义，URL 填 `http://127.0.0.1:8484/workbuddy/v1/chat/completions`，API Key 填 amp token，开启工具调用；安全中心开启"AI 智能审批 = 自动审批"，不处于"完全访问"。经 Chat mock 中转站注入命令验证被拦截。抓取请求头，若存在 `X-Agent-Type: auxiliary` 则记入 `docs/compat.md` 供二期改道。
   - 位置：`docs/agents/workbuddy.md`（中文为主）、`docs/compat.md`、`src/cli/init.ts`。
   - 完成标准：接入成功、拦截生效、头信息记录。
+  - C11 的本地 Chat fixtures/HTTP 与真实 WorkBuddy 验收分账：自动审批模式、非完全访问、真实注入拦截、实际辅助头存在/不存在及 ≥5 轮必须由实际客户端观察，不能从 mock 注册场景或 init 片段推断。
 
 ### Phase 7：评测与校准
 

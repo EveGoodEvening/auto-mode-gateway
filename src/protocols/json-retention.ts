@@ -1,6 +1,6 @@
 import type { ResponseBudget, ResponseReservation } from './response-budget.js';
 
-export type JsonRetentionProtocol = 'responses' | 'anthropic';
+export type JsonRetentionProtocol = 'responses' | 'anthropic' | 'chat';
 export interface JsonRetention {
   bytes: number;
   reasoningBytes: number;
@@ -20,7 +20,7 @@ type Frame = {
   signature: boolean; reasoning: number; nested: Map<string, number>;
   lease?: ResponseReservation;
 };
-const keys: Record<string, true> = { type: true, output: true, content: true, signature: true, response: true, item: true, part: true, output_index: true, content_block: true, delta: true, index: true };
+const keys: Record<string, true> = { type: true, output: true, content: true, signature: true, response: true, item: true, part: true, output_index: true, content_block: true, delta: true, index: true, reasoning_content: true, choices: true, message: true };
 const escapes: Record<string, string> = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
 
 /** A bounded SAX scanner: payload strings and numeric lexemes are never retained. */
@@ -37,6 +37,7 @@ export class JsonRetentionScanner {
   private capture = false;
   private escape = false;
   private unicode = '';
+  private stringStart = 0;
   private unicodeRemaining = 0;
   private utfRemaining = 0;
   private utfCode = 0;
@@ -91,7 +92,7 @@ export class JsonRetentionScanner {
 
   private append(value: string): void {
     if (!this.capture || this.overflow) return;
-    const maximum = this.keyToken ? 13 : 128;
+    const maximum = this.keyToken ? 17 : 128;
     if (this.text.length + value.length > maximum) { this.overflow = true; this.text = ''; }
     else this.text += value;
   }
@@ -111,6 +112,8 @@ export class JsonRetentionScanner {
         }
       } else if (char === '\\') this.escape = true;
       else if (char === '"') {
+        const parent = this.stack[this.stack.length - 1];
+        if (this.protocol === 'chat' && !this.keyToken && parent?.key === 'reasoning_content') parent.nested.set(parent.key, position - this.stringStart);
         this.token = undefined;
         const frame = this.stack[this.stack.length - 1];
         if (this.keyToken) {
@@ -176,6 +179,7 @@ export class JsonRetentionScanner {
 
   private startString(key: boolean): void {
     this.token = 'string'; this.text = ''; this.overflow = false; this.keyToken = key;
+    this.stringStart = this.bytes - 1;
     const parent = this.stack[this.stack.length - 1];
     this.capture = key || !!parent && ((parent.role !== 'other' && parent.key === 'type') || this.indexField(parent));
   }
@@ -255,11 +259,12 @@ export class JsonRetentionScanner {
     if (!frame) { this.bad = true; return; }
     if ((frame.role === 'item' || (frame.role === 'part' && this.protocol === 'responses')) && frame.type === undefined) this.bad = true;
     const amount = this.ownReasoning(frame) ? position - frame.start : this.total(frame);
+    const chatReasoning = this.protocol === 'chat' && this.stack[this.stack.length - 1]?.key === 'reasoning_content';
     const parent = this.stack[this.stack.length - 1];
     if (!parent) { this.done = true; frame.reasoning = amount; frame.nested.clear(); return; }
     if (parent.kind === 'array') parent.reasoning += amount;
     else {
-      parent.nested.set(parent.key, amount);
+      parent.nested.set(parent.key, chatReasoning ? position - frame.start : amount);
       if (frame.role === 'item') parent.itemType = frame.type;
       if (frame.role === 'part') parent.partType = frame.type;
     }
@@ -273,6 +278,7 @@ export class JsonRetentionScanner {
     let pendingBytes = 0;
     if (this.done && this.root) reasoningBytes = this.total(this.root);
     else {
+      if (this.protocol === 'chat' && this.token === 'string' && !this.keyToken && this.stack[this.stack.length - 1]?.key === 'reasoning_content') pendingBytes += this.bytes - this.stringStart;
       for (const frame of this.stack) {
         if (['candidate', 'item', 'part'].includes(frame.role)) { pendingBytes += this.bytes - frame.start; break; }
         reasoningBytes += this.total(frame);

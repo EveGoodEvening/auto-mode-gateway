@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { normalizeToolCall } from '../../src/gate/normalize/index.js';
 import { resolvePolicy } from '../../src/policy/effective.js';
+import { sensitivePaths } from '../../src/policy/sensitive-paths.js';
 import type { ActionContext, NormalizationRoute, Protocol } from '../../src/gate/types.js';
 
 const ctx: ActionContext = { platform: 'linux', project_dir: '/project', workdir: '/project', home_dir: '/home/user' };
@@ -161,8 +162,33 @@ describe('WorkBuddy mapping and visible capability boundaries', () => {
   it('uses configured command argument before conventional argument', () => {
     expect(normalize('custom', { payload: 'printf configured', command: 'printf conventional' }, chat, { tool_map: { custom: { kind: 'command', arg: 'payload' } } })).toMatchObject({ kind: 'command', text: 'printf configured' });
   });
+  it.each([undefined, null, '', '   ', { opaque: true }, 42])('does not replace unavailable configured command arguments %#', (payload) => {
+    expect(normalize('custom', { payload, command: 'pwd' }, chat,
+      { tool_map: { custom: { kind: 'command', arg: 'payload' } } })).toMatchObject({ kind: 'command', execution_unavailable: true });
+  });
+  it.each([undefined, null, '', '   ', { opaque: true }, 42])('does not replace unavailable configured URL arguments %#', (payload) => {
+    const action = normalize('custom', { payload, url: 'https://example.invalid', query: 'https://ignored.invalid' }, chat,
+      { tool_map: { custom: { kind: 'url', arg: 'payload' } } });
+    expect(action).toMatchObject({ kind: 'url', execution_unavailable: true });
+    expect(action.url).toBeUndefined();
+  });
+  it('preserves conventional arguments when the mapping does not configure arg', () => {
+    expect(normalize('custom', { command: 'pwd' }, chat, { tool_map: { custom: 'command' } })).toMatchObject({ kind: 'command', text: 'pwd' });
+    expect(normalize('custom', { url: 'https://example.invalid' }, chat, { tool_map: { custom: 'url' } })).toMatchObject({ kind: 'url', url: 'https://example.invalid' });
+  });
   it('uses explicit file mapping before shell-name heuristic', () => {
     expect(normalize('run_writer', { path: 'x.txt', payload: 'inert' }, chat, { tool_map: { run_writer: { kind: 'file_write', arg: 'payload' } } })).toMatchObject({ kind: 'file_write', content_excerpt: 'inert' });
+  });
+  it.each([undefined, null, { opaque: true }, 42])('does not replace unavailable configured file content %#', (payload) => {
+    expect(normalize('custom', { path: 'inert.txt', payload, new_string: 'visible fallback content' }, chat,
+      { tool_map: { custom: { kind: 'file_write', arg: 'payload' } } })).toMatchObject({ kind: 'file_write', execution_unavailable: true });
+  });
+  it('preserves empty configured file content as a valid empty-file write', () => {
+    const action = normalize('custom', { path: 'inert.txt', payload: '' }, chat,
+      { tool_map: { custom: { kind: 'file_write', arg: 'payload' } } });
+    expect(action.kind).toBe('file_write');
+    expect(action.content_excerpt).toBe('');
+    expect(action.execution_unavailable).toBeUndefined();
   });
   it.each(['shell', 'bash', 'command', 'terminal', 'execute', 'run'])('recognizes %s execution hints', (name) => {
     expect(normalize(name, { script: 'printf inert' }, chat).kind).toBe('command');
@@ -227,6 +253,20 @@ describe('WorkBuddy mapping and visible capability boundaries', () => {
   });
   it('leaves user-profile variable unresolved without trusted client context', () => {
     expect(normalize('custom', { path: '%USERPROFILE%\\.env', content: 'inert' }, chat, undefined, { platform: 'win32' }).paths).toEqual(['%USERPROFILE%/.env']);
+  });
+  it.each([
+    ['src\\file.ts', []],
+    ['C:\\REPO\\.ENV', ['sensitive_path']],
+    ['D:\\repo\\file.ts', ['outside_project_write']],
+    ['%USERPROFILE%\\file.ts', ['unresolved_path']],
+  ] as const)('passes route-scoped Windows %s through actual sensitive policy', (path, reasons) => {
+    const route = { project_dirs: ['C:\\repo'] };
+    const context: ActionContext = { project_dir: route.project_dirs[0] };
+    const action = normalize('custom', { path, content: 'inert' }, chat, route, context);
+    const result = sensitivePaths(action, context);
+    expect(result.review).toBe(reasons.length > 0);
+    for (const reason of reasons) expect(result.reasons).toContain(reason);
+    if (!reasons.length) expect(result.paths).toEqual(['c:/repo/src/file.ts']);
   });
 });
 

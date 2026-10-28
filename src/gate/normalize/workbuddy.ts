@@ -32,13 +32,14 @@ export function normalizeWorkBuddy(call: ToolCall, context: ActionContext, route
   const executionHint = executionName.test(call.name) || descriptions.some((description) => executionName.test(description));
 
   // Explicit mappings win over heuristics, but cannot erase visible execution evidence.
-  if (kind === 'command') return command(action, selected ?? (commandKey ? input[commandKey] : undefined));
+  if (kind === 'command') return command(action, arg !== undefined ? selected : (commandKey ? input[commandKey] : undefined));
   if (kind === 'file_write') {
-    return fileWrite(action, arg ? { ...input, content: selected } : input, effective, policy);
+    if (arg !== undefined && typeof selected !== 'string') action.execution_unavailable = true;
+    return fileWrite(action, arg !== undefined ? { ...input, content: selected } : input, effective, policy);
   }
   if (kind === 'url') {
     action.kind = 'url';
-    const url = string(selected) ?? string(input.url) ?? string(input.query);
+    const url = arg !== undefined ? string(selected) : string(input.url) ?? string(input.query);
     if (url?.trim()) action.url = url;
     else action.execution_unavailable = true;
     return action;

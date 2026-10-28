@@ -91,8 +91,7 @@ async function writePrivate(path: string, text: string, force: boolean): Promise
 function snippets(token: string): string {
   return `
 Setup guidance only: agent compatibility and protection are not yet verified.
-Messages and Responses generation endpoints have tool-use enforcement installed.
-WorkBuddy/Chat remains unprotected until C11; do not send real tool traffic there.
+Messages, Responses and Chat Completions generation endpoints have tool-use enforcement installed.
 Installed enforcement is not client acceptance. Shadow mode does not block tools.
 Native delivery is not proof that this client supports safeguard_results.
 The issued client token below is a secret; do not paste this output into logs.
@@ -131,11 +130,13 @@ supports_websockets = false
 # Desktop must inherit AMP_TOKEN: macOS launchctl setenv AMP_TOKEN <token>;
 # Windows setx AMP_TOKEN <token>, then restart the GUI. These persist a secret.
 
-WorkBuddy (future protected rollout; setup only):
+WorkBuddy (Chat enforcement installed; actual-client QA tracked separately):
 Settings > Models > Add model > Custom (设置 > 模型 > 添加模型 > 自定义)
 Full Chat Completions URL: http://127.0.0.1:8484/workbuddy/v1/chat/completions
 API Key: ${token}
 Enable tool calls; choose AI 智能审批 = 自动审批, not 完全访问.
+WorkBuddy auxiliary-header/classifier rerouting is not implemented in v1.
+See docs/agents/workbuddy.md; setup guidance is not actual mode/header/replay proof.
 `;
 }
 

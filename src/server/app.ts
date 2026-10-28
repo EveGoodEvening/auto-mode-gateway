@@ -12,6 +12,7 @@ import { resolvePolicy } from '../policy/effective.js';
 import { anthropicAdapter, createClaudeDeliveryState, prepareAnthropicRequest } from '../protocols/anthropic/adapter.js';
 import { isClassifierRequest, isSuspectedClassifierRequest, prepareClassifierTarget } from '../protocols/anthropic/classifier-fingerprint.js';
 import { responsesAdapter } from '../protocols/openai-responses/adapter.js';
+import { chatAdapter } from '../protocols/openai-chat/adapter.js';
 import type { RequestContext } from '../protocols/types.js';
 import { authenticate, buildUpstreamHeaders } from './auth.js';
 import { errorResponse } from './errors.js';
@@ -109,7 +110,9 @@ export function createApp(config: Config) {
       && resolved.pathname === '/v1/messages';
     const responsesGeneration = request.method === 'POST' && resolved.route.protocol === 'openai-responses'
       && resolved.pathname === '/v1/responses';
-    const adapter = anthropicGeneration ? anthropicAdapter : responsesGeneration ? responsesAdapter : undefined;
+    const chatGeneration = request.method === 'POST' && resolved.route.protocol === 'openai-chat'
+      && resolved.pathname === '/v1/chat/completions';
+    const adapter = anthropicGeneration ? anthropicAdapter : responsesGeneration ? responsesAdapter : chatGeneration ? chatAdapter : undefined;
     const generation = adapter !== undefined;
     const extracted = adapter && body ? adapter.extractRequest(body) : undefined;
     const sourceHeaders = new Headers(request.headers);
@@ -129,12 +132,14 @@ export function createApp(config: Config) {
     let headers = buildUpstreamHeaders(request.headers, upstream, config.auth.mode);
     let delivery: 'native' | 'rewrite' = 'rewrite';
     let rerouted = false;
-    if (anthropicGeneration && body) {
+    if (generation && body) {
       let parsed: unknown;
       try { parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)); } catch { /* Preserve invalid request for upstream validation. */ }
-      deliveryState.observeRequest(scope, isClassifierRequest(parsed));
-      delivery = deliveryState.select(requestContext, scope, resolved.route);
-      if (isSuspectedClassifierRequest(parsed)) {
+      if (anthropicGeneration) {
+        deliveryState.observeRequest(scope, isClassifierRequest(parsed));
+        delivery = deliveryState.select(requestContext, scope, resolved.route);
+      }
+      if (anthropicGeneration && isSuspectedClassifierRequest(parsed)) {
         void audit.appendEvent({ event: 'suspected_classifier', route: resolved.route.prefix, protocol: resolved.route.protocol, session_id: session });
       }
       let target;
@@ -148,7 +153,7 @@ export function createApp(config: Config) {
         pathname = target.url.pathname + target.url.search;
         headers = target.headers;
         body = target.body as Uint8Array<ArrayBuffer>;
-      } else {
+      } else if (anthropicGeneration) {
         const prepared = prepareAnthropicRequest(body, headers, requestContext, upstream, config.gate.mode);
         body = prepared.body as Uint8Array<ArrayBuffer>;
         headers = prepared.headers;
@@ -209,7 +214,7 @@ export function createApp(config: Config) {
         void settled.then(() => observations.delete(settled));
       },
       onToolCall: (call, _context, signal) => gate.decide(
-        normalizeToolCall(resolved.route.protocol, call, gateContext, resolved.route, policy),
+        normalizeToolCall(resolved.route.protocol, call, { ...gateContext, request: requestContext }, resolved.route, policy),
         { ...gateContext, signal },
       ),
     });

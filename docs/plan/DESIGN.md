@@ -194,7 +194,9 @@ classifier_reroute: { enabled: true, provider: second_stage }
 
 **Phase 6：WorkBuddy（OpenAI Chat Completions）适配器**
 26. SSE 拦截：按 `choices[0].delta.tool_calls[].index` 聚合 `function.arguments`，流末判定；拦截时丢弃该调用、追加 `delta.content` 说明、`finish_reason` 改 `stop`；透传 `reasoning_content`、`usage`。
+    C11 实施边界：Chat 的非执行 content/reasoning 即时透传，混合 chunk 的安全部分只拆分一次；只扣留执行片段及终态 finish/usage/[DONE] 至整轮唯一性、完整性与判定完成，usage 恰一次且 [DONE] 最后。不得套用仅 Anthropic/Responses 需要的 ordered-suffix 屏障或全局文本缓冲；预算、未知/不完整执行 fail-closed 不变。
 27. `tool_map` 配置与启发式识别；Windows 路径归一化。
+    复用 C06 已有工具映射、LOCKED other 与 Windows 词法规则；route project_dirs 仅提供可信项目范围，不推导 home。缺少现有可信 ActionContext home_dir/userprofile 时 %USERPROFILE%/tilde 保持未解析并保守审查，禁止使用网关宿主环境。
 28. 验证：真实 WorkBuddy 自定义模型填 `http://127.0.0.1:8484/workbuddy/v1/chat/completions`，开启"AI 智能审批 = 自动审批"且不在"完全访问"模式，注入命令被拦截。若请求头里能观察到 `X-Agent-Type: auxiliary`，记入 `docs/compat.md` 供二期改道使用。
 29. 文档 `docs/agents/workbuddy.md`（中文为主）。
 

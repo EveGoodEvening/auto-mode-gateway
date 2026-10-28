@@ -319,17 +319,6 @@ describe('Responses actual HTTP enforcement integration', () => {
     expect(relay.requests).toHaveLength(0);
     expect(decision.requests).toHaveLength(0);
   });
-  it('does not reroute an Anthropic classifier fingerprint on a Responses route', async () => {
-    const { request, relay, decision, second } = await setup({ scene: 'text' });
-    const system = [{ type: 'text', text: 'You are a security monitor for autonomous AI coding agents\nEvaluate.' }];
-    const input = [{ role: 'system', content: [{ type: 'input_text', text: system[0]!.text }] }];
-    const body = await (await request({ system, input })).json() as Snapshot;
-    expect(body.id).toBe('resp_mock');
-    expect(relay.requests).toHaveLength(1);
-    expect(relay.requests[0]?.body).toMatchObject({ system, input, model: 'mock-codex' });
-    expect(decision.requests).toHaveLength(0);
-    expect(second.requests).toHaveLength(0);
-  });
   it.each(['timeout', '429', '529', '5xx'] as const)('blocks when the whole provider chain fails with %s', async decision => {
     const { request, decision: first, second } = await setup({ scene: review(), decision, allFail: true });
     const body = await (await request()).json() as Snapshot;

@@ -3,6 +3,7 @@ import { configSchema } from '../../src/config/schema.js';
 import type { Answers, DecisionProvider, DecisionResult } from '../../src/decision/types.js';
 import type { ReviewResult } from '../../src/decision/llm-review.js';
 import { createGate, thresholdOutcome } from '../../src/gate/decide.js';
+import { normalizeToolCall } from '../../src/gate/normalize/index.js';
 import type { Action, GateContext } from '../../src/gate/types.js';
 import { resolvePolicy } from '../../src/policy/effective.js';
 
@@ -55,6 +56,17 @@ describe('gate branches and audit', () => {
     const gate = createGate(cfg, { providers: [p], audit });
     expect(await gate.decide(input, ctx)).toMatchObject({ outcome: 'block', rule });
     expect(p.decide).not.toHaveBeenCalled(); expect(audit).toHaveBeenCalledTimes(1);
+  });
+  it.each(['command', 'url', 'file_write'] as const)('blocks unavailable configured %s arguments before provider fail-open', async (kind) => {
+    const cfg = config();
+    cfg.gate.on_provider_failure = 'allow';
+    const p = provider();
+    const gate = createGate(cfg, { providers: [p], audit });
+    const action = normalizeToolCall('openai-chat', {
+      id: 'mapped-missing', name: 'custom', input: { command: 'pwd', url: 'https://example.invalid', path: 'inert.txt', new_string: 'inert fallback' }, raw: {},
+    }, ctx, { tool_map: { custom: { kind, arg: 'payload' } } });
+    expect(await gate.decide(action, ctx)).toMatchObject({ outcome: 'block', rule: 'execution-unavailable' });
+    expect(p.decide).not.toHaveBeenCalled();
   });
   it.each([
     { ...action, kind: 'other' as const, text: undefined, paths: [] },
