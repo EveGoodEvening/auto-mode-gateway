@@ -50,8 +50,8 @@
 ```
 agent ──HTTP──▶ ingress(route by prefix/path) ──▶ auth(vault|passthrough)
       ◀─SSE──  stream interceptor ◀─────────────── upstream relay
-                    │ text/thinking: 直通
-                    │ tool call: 缓冲 → Gate → 投递
+                    │ pure/earlier text/thinking: 直通；首个扣留 tool 后的有状态内容有界保序
+                    │ tool call + ordered suffix: 缓冲 → 全轮 ID/Gate → 按源序投递
                     ▼
    Gate = normalize → redact → rules(allow|deny|review) → decision chain → threshold → verdict
    投递 = CC native safeguard_results | rewrite(替换为文本) | shadow(仅记录)
@@ -86,11 +86,22 @@ agent ──HTTP──▶ ingress(route by prefix/path) ──▶ auth(vault|pas
 
 - Claude Code，原请求带 safeguards 且 selector 选 native：代理默认剥转发 safeguards 与危险 beta，enforce 始终丢弃任何上游 safeguard_results；全轮 ID 唯一性确认后，在最后 message_delta 注入代理结果，block=flagged+问题名/概率 explanation，provider 不可用=flagged+说明；非流式顶层注入。selector 选 rewrite 则走下一条改写语义。
 - 其他情况（Claude Code 无 `safeguards`、Codex、WorkBuddy）：改写。Anthropic 格式把该 `tool_use` 块替换为同 index 的 `text` 块，若无剩余 tool_use 则 `stop_reason` 改为 `end_turn`。Responses 格式改写/扣留对应 `response.output_item.done`，替换为 `message` 输出项，并同步修正 `response.completed.output[]`。Chat Completions 格式按 `index` 聚合 `delta.tool_calls`，拦截时丢弃该调用、补发 `delta.content` 说明，`finish_reason` 改为 `stop`。
-- 并行多个 tool call 逐个判定；各协议可在单项完成时开始判定，但所有执行事件须扣留至全轮 ID 唯一性确认，再按原顺序放出允许项。文本立即直通；thinking 通常直通，仅有证据启用的兼容模式按下文有界缓冲。
+- 并行多个 tool call 逐个判定；各协议可在单项完成时开始判定，但所有执行事件须扣留至全轮 ID 唯一性确认，再按原顺序放出允许项。Anthropic enforce 增加下述 ordered-content barrier：纯文本与首个扣留 tool 之前的文本/thinking 立即直通，之后的有状态内容不得越过 tool；不再承诺混合轮次后缀文本零等待。ping/comment/上游 error 保持即时，shadow 原字节/非阻塞不变。
 - 流式/非流式响应均检查 tool ID 唯一性；碰撞（包括混合 verdict）使整轮所有执行调用 fail-closed，并取消上游，不生成碰撞的 native 结果映射。native 路径也必须扣留执行块直到全轮 ID 唯一性确认，不能在检测前泄露调用。
-- 缓冲硬界限（所有协议）：单调用 1 MiB、单响应累计所有扣留帧/参数/终态/兼容 reasoning 8 MiB，其中 thinking/reasoning 合计 ≤4 MiB；SSE 未闭合帧 ≤1 MiB。收到首个执行块或兼容 reasoning 开始计时，60 s 内须完整闭合；上游连续无字节 30 s 超时（代理 ping 不重置），判定链另有全轮 60 s 截止。超限、超时、EOF 未闭合均 block 整轮未投递执行、取消上游、终止响应，不发允许/执行事件；非流式拦截响应体也受 8 MiB 界限约束。使用假时钟/超大 fixture 验证，不等待真实超时。
+- 缓冲硬界限（所有协议）：单调用 1 MiB、单响应累计所有扣留帧/参数/终态/有序后缀/兼容 reasoning 8 MiB，其中 thinking/reasoning 合计 ≤4 MiB（有序后缀内同样适用，不仅 compat 模式）；SSE 未闭合帧 ≤1 MiB。收到首个执行块或兼容 reasoning 开始计时，60 s 内须完整闭合；上游连续无字节 30 s 超时（代理 ping 不重置），判定链另有全轮 60 s 截止。超限、超时、EOF 未闭合均 block 整轮未投递执行、取消上游、终止响应，不发允许/执行事件；非流式拦截响应体也受 8 MiB 界限及 thinking/reasoning 子集界限约束。使用假时钟/超大 fixture 验证，不等待真实超时。
 - 自动 native fallback：route `claude_delivery: auto|native|rewrite` 默认 auto；route 显式 native/rewrite 优先，其次 `claude_delivery_by_version` 精确版本覆盖，其次 scoped auto。auto 在原请求有 safeguards 且无已知不支持证据时仍尝试 native（未知版本不擅自默认为 rewrite）；无 safeguards 改写。已发 native 后，同一客户端认证身份 + route + 明确 session header + 实测 agent version 的下一请求，若匹配既定 classifier 指纹且发生在该 session 最近 native 响应后 30 s 内、无中间模型轮次，作为客户端 fallback 可观察信号，改道该 classifier 并将该 scoped session 后续请求自动切为 rewrite。最多跟踪 1024 session，闲置 30 min 过期；无可靠 session/version、不相关 classifier 或仅 /status/计费文字不触发降级。passthrough 用本地不可逆凭证身份指纹隔离、绝不存原凭证。缺失身份则不自动推断。不推断虚构 acknowledgement，不重放已发工具；fixture 验证关联/隔离/过期/override，并以真实 fallback 轨迹验证；无实机证据 P3-4 pending。
 - 投递 selector 的前置条件是原请求确实带 safeguards；无该字段始终 rewrite，route/version native 不能伪造客户端 opt-in。auto fallback 只更新本地 scoped evidence，不自行写全局版本覆盖表；版本覆盖必须有人工记录的实测证据。正常请求/结果不得作为能力确认信号。
+
+**C08 定向契约修订：Anthropic 有序内容屏障（计划重新评审 pending，green 前禁止生产补丁）**
+
+- 事实依据：实际 Claude Code 2.1.311 的 artifact295 严格 mixed 回放失败；artifact303 第 2 行完整诊断表明代理先发送 index1 text start/delta/stop，后发送被扣留的 index0 tool（native）或 index0 拒绝文本（rewrite）。立即下一请求的同一个 assistant message 中分别为 `[marker text, exact original Bash tool]`、`[marker text, exact proxy denial text]`；无相关截断/省略和 parser error。native 的 per-ID flagged/代理 explanation 已捕获，相关 user `tool_result.is_error` 与返回原因证据仍在。三次调用全被拒绝、零成功：这是内容顺序/历史语义回归，不是执行绕过，也不是可接受的相邻同角色 message 序列化拆分。不能放宽观察器把反序当成功。
+- 原契约“文本/thinking 永不缓冲”与“native 历史不变”在合法 tool0→text1 布局上不能同时成立；客户端实测按到达顺序构造 replay，index 不足以救回原序。选择最小正确修订：仅在 enforce 收到首个被扣留 tool start 时开启单响应、不可提前解除的内容屏障。屏障前已合法输出的文本/thinking 不撤回；纯文本轮次完全不进入屏障，额外延迟 <5 ms 的原目标不变。屏障后的全部 content_block start/delta/stop（包括 text、thinking、redacted_thinking、signature 及未来不认识的内容块）和 message_delta/message_stop 按原到达次序进入同一有界队列；无需按类型建立第二套后缀队列，也不只扣留 start 而放过 delta/stop。保留原 index/工具 ID/输入；合法源序上不排序、不重编号、不合并或重组助手历史。
+- 全轮正常闭合及现有 EOF/完整 JSON/ID 唯一性检查、全部真实判定完成后才放队列。native 仅移除伪造结果并在最终 delta 注入代理结果，原 content 顺序/内容不变；rewrite 在原 tool 的队列位置替换完整同 index text start/delta/stop，后续 marker 保持在它之后，允许的 tool 原样保序；无剩余 tool 时才改 end_turn。终态/usage 仍在内容之后，不重复计入/发送；非流式 content[] 的原位映射是相同语义的参照，不通过历史改写修复客户端。
+- 旁路仅限非内容控制事件：ping、SSE comment/id/retry-only frame、上游 error 立即发送，判定等待期间既有保活继续；不得借未知 content-block 类型旁路。其他未识别的 data 事件在屏障后保守入队，避免引入未知状态反序；屏障前沿用既有处理。即时 error 不授权清空/放行队列，不替代原 fail-closed/取消语义。背压下所有输出继续串行化，客户端取消/上游故障取消 reader、判定与定时器并丢弃未放后缀，绝不靠超限提前 flush。
+- 后缀 raw bytes、保留的参数/解析表示、终态与改写输出沿用同一总量账本，不另开 8 MiB，不重复复制整个队列；重编码/替换暂存同样受界限约束。队列中的 thinking/redacted_thinking/signature 相关帧及所保留表示归入 ≤4 MiB 子集，同时归入 ≤8 MiB 总量；不能把 reasoning 改名为普通 suffix 逃开子集上限。仅已释放且不再保留的早期内容不占队列预算。首 tool 完成 60 s、idle 30 s、全轮判定 60 s 及单 tool/未闭合帧 1 MiB 全不变，后续 text/ping 不重启截止；边界失败不放任何未放执行项。
+- 这不是 preserved-thinking stripping 兼容模式：原始 thinking/signature 内容仍保留，只按需要等待顺序；不得因本证据启用 strip/replay 清理。既有 P3-5 有证据的选择性 stripping 分支与 R5 仍单列，若启用则共享相同屏障/总量/子集预算，不能撤回已发 thinking。shadow 继续原字节无等待观察，不为复制 enforce 屏障而延迟客户流。
+- 替代方案不采用：①维持文字永直通或放宽 mixed 断言，已证实反序；②重映射 index，既不恢复到达顺序又增加身份/改写一致性风险；③发 tool start 占位后等审批，违反扣留执行与全轮 ID 安全；④逐 tool 提前释放，无法排除晚到重复 ID；⑤缓冲整轮纯文本/从 message_start 开始，一刀切损害 <5 ms 目标；⑥事后重写请求历史、强制 rewrite、特判目标版本/布局，均不能同时恢复 native 与 rewrite 的源序契约。单一 ordered suffix 队列复用已有闸门、边界与取消路径，代价明确为工具之后文本/thinking 等待，不增加配置或审批策略。
+- 验收必须同时包含协议夹具、真实 HTTP 与同一 installed CLI mixed regression：tool0→marker1 的 native replay 为 exact tool 在 marker 之前且保留相关 errored result/exact proxy reason，rewrite replay 为 exact denial 在 marker 之前且无该工具/结果；立即下一请求中检查同 assistant 语义关联与 ordered block tuples，不用拼接文本偏移替代。测试早期 text→tool→后缀、多个 tool/部分 block、thinking/signature、无工具、shadow、错误/保活、慢判定/背压、同一总量与 reasoning 子集超限、EOF/重复 ID/超时/取消；对照 nonstream 的 content 顺序与 stop_reason。不得将 mock cache、纯文本性能、三次拒绝或 CLI exit0 单独当 mixed 回归成功。精确实施入口与重新验收记账见 PROGRESS 的 C08 修订。
 
 **Classifier 改道（仅 Claude Code）**：匹配 `system` 数组中存在以 `You are a security monitor for autonomous AI coding agents` 开头的文本块且无 `tools` 的请求，换凭证转发到配置的可信 Anthropic 兼容 provider，裸模型 ID 映射为网关 slug（Cloudflare passthrough 不映射），`system` 数组（含首位 attribution 块）、`stop_sequences`、`thinking`、`cache_control` 原样保留，响应流原样回传。
 
@@ -132,7 +143,7 @@ classifier_reroute: { enabled: true, provider: second_stage }
 4. 路由：按 `prefix` 匹配 route，无前缀时按路径推断协议（`/v1/messages*` → anthropic，`/v1/responses` → responses，`/v1/chat/completions` → chat）；未知路径对该 upstream 字节级直通。
 5. 认证：vault 模式校验客户端 token（常量时间比较），转发时替换 `Authorization` / `x-api-key` 为 upstream 凭证；passthrough 模式仅当监听地址为 loopback 时允许，否则启动失败。转发保留除 hop-by-hop 外全部头（含 `anthropic-version`、`anthropic-beta`、`x-claude-code-*`），响应头原样回传（`retry-after`、限流头），错误体不改写。
 6. 请求体：仅解析不修改时按原字节转发；需要修改（剥 `safeguards`、改道换模型）才重新序列化。
-7. SSE 拦截器：原始 frame 字节保留（含 CRLF/comment/id/retry/多行 data），解析旁路供语义使用，仅改写事件重新编码；ping 直通。tool_use 从 start 到 stop 私有缓冲，完整 JSON.parse 后审批；partial-json 只供诊断，不把未完整输入判 allow；超限/截止/EOF 按投递语义 fail-closed。
+7. SSE 拦截器：原始 frame 字节保留（含 CRLF/comment/id/retry/多行 data），解析旁路供语义使用，仅改写事件重新编码；ping 直通。tool_use 从 start 到 stop 私有缓冲，完整 JSON.parse 后审批；Anthropic enforce 首个扣留 tool 后按上述有序内容屏障扣留有状态后缀，纯/早期文本立即直通；partial-json 只供诊断，不把未完整输入判 allow；超限/截止/EOF 按投递语义 fail-closed。
 8. 验证：录制 fixture（文本、thinking、单/多 tool_use、ping、错误事件）做单元测试；用 mock upstream 跑 Claude Code 实机会话，确认直通时行为与无代理一致（含 prompt cache 命中，看 `cache_read_input_tokens` 不为 0）。
 
 **Phase 2：闸门引擎与 System One 适配器**
@@ -192,6 +203,7 @@ classifier_reroute: { enabled: true, provider: second_stage }
 - 实机验证清单（人工，记录到 `docs/compat.md`）：Claude Code CLI 与 Desktop、Codex CLI 与桌面版、WorkBuddy，各自执行 Phase 3/5/6 的验证步骤。
 - 评测门槛：Phase 7 的拦截率/误拦率在 CI 中强制；每次修改 policy 常量/覆盖/阈值立即使旧报告失效，必须重跑全部配置 provider/chain 全集与注入套件并归档新报告；无密钥 rules-only 不替代完整重跑，外部证据不足保持 pending、不得标绿发布验收。
 - 性能预算：纯文本流经代理的额外延迟 < 5 ms；带 tool call 的响应末尾额外等待 p95 ≤ 1.5 s（Jev）或 ≤ 0.5 s（Clef-flash）。
+- C08 有序内容回归：artifact295/303 的实际 tool0→text1 布局必须在修复后用原严格观察器重跑 native/rewrite，捕获代理实际事件次序与立即下一请求的有序 blocks/相关原生拒绝原因；同源 stream/nonstream parity、延迟纯文本与混合后缀分开报告。计划定向重新评审 green 前不得生产补丁；P3-1/P3-2 重开，P3-3 不受此发现影响，C08 未闭合且不得启动后续 chunk。
 - 安全检查：`ss -ltnp` 确认默认只监听 127.0.0.1；云端只有 Caddy 443 对外；grep 审计与日志无 token/key 明文。
 - 成本核算：C12 的 tuning 文档用现有审计字段给出 UTC 每日两阶段成本手工聚合示例，unknown cost 单列而非当 0，实际重试费用每调用只计一次；C14 README 链接方法并给出估算（每 100 判定约 $0.003，灰区二审约 $0.0002），不新增成本服务/命令。
 
@@ -200,14 +212,14 @@ classifier_reroute: { enabled: true, provider: second_stage }
 - `safeguards` / `safeguard_results` 尚未进入公开 API 参考，字段可能变动：实现为特性探测（请求无该字段即改写模式），字段名集中在一个模块，fixture 带 Claude Code 版本号；`docs/compat.md` 记录验证过的版本。
 - Classifier 指纹（system 首行）漂移：匹配失败只会退化为"该请求走中转站"，不影响闸门；提供配置覆盖，并对疑似请求打日志。
 - 决策模型可被欺骗（文献约 10% 翻转）：规则先行、state 不含模型文本、灰区二审、fail-closed、注入评测进 CI。
-- 改写助手轮次触及 Claude 5.x 的 preserved thinking 校验：优先用原生 `safeguard_results`（不改历史）；改写模式按 Phase 3 的验证分支去除 thinking 块。
+- 改写助手轮次触及 Claude 5.x 的 preserved thinking 校验：优先用原生 `safeguard_results`（内容/历史原序不变，需 C08 有序屏障）；改写模式仅按 Phase 3 的实测证据分支去除 thinking 块，本次顺序回归不是剥除签名历史的证据。
 - Codex 改写后的 `input` 回放与加密 reasoning 一致性：Phase 5 验证分支（必要时同时丢弃 reasoning 项）。
 - 中转站拒绝被剥字段或多余 beta 值：按 upstream 开关控制剥除粒度，错误体原样回传便于定位。
 - 决策提供方不可用或限流：多提供方 failover、重试、缓存；最终 fail-closed 且说明原因，可配置 fail-open。
 - Desktop 版 Claude 可能不接受 loopback 网关或关闭 beta 特性：退回改写模式；文档给出云端 https 接入路径。
 - WorkBuddy 工具名未知：保留原 `tool_map` + 启发式；有 command/path 或不可解析执行输入时归一为相应待审动作（不可用执行上下文 block），不误落 other；真正剩余的泛化 other 及显式 `tool_map: other` 直接 allow。残余风险：未知/误映射工具若把执行、读写、联网或委派能力藏在无法识别的参数/描述中，可能作为 other 绕过决策模型；Task 的不可见间接委派同样不受保护，只有后续可见调用仍过闸门。此网关不声称覆盖所有工具副作用；不得以消除此风险为由静默收紧已请求策略。
 - 隐私：命令与路径会发送给第三方决策提供方：默认脱敏、文档提示 ZDR 选项（Vercel 可 ZDR + 第一方；OpenRouter 的 ZDR 与第一方 Anthropic 互斥；Cloudflare 的 ZDR 仅 Unified Billing）。
-- 延迟：只在 tool call 处等待，文本直通；Clef-flash 作为低延迟备选。
+- 延迟与内容顺序：纯文本/首个扣留 tool 之前内容直通；Anthropic 混合轮次有序后缀等待全轮 ID/判定，明确牺牲工具后文本/thinking 延迟以保持 native/rewrite 历史语义。后缀增长受同一总量/子集/截止限制，超限 fail-closed 而非放早；Clef-flash 作为低延迟备选。artifact303 已证明无屏障反序，实际 mixed 回归与纯文本 <5 ms 必须分别达标。
 
 ## Execution supplement
 
