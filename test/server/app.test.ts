@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { configSchema, type Config } from '../../src/config/schema.js';
 import { createApp } from '../../src/server/app.js';
+import { anthropicSceneResponse, responsesSceneResponse, startLoopback } from '../integration/mock-relay.js';
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -492,6 +493,143 @@ describe('createApp authenticated Anthropic gate and opaque transport', () => {
       await app.flushAudit();
     }
   });
+});
+
+describe.each([
+  { protocol: 'anthropic-messages', prefix: '/cc', endpoint: '/v1/messages' },
+  { protocol: 'openai-responses', prefix: '/codex', endpoint: '/v1/responses' },
+] as const)('$protocol generation redirect boundary over actual HTTP', ({ protocol, prefix, endpoint }) => {
+  it.each([300, 301, 302, 303, 304, 307, 308, 399])('rejects upstream %i before a client can escape into opaque transport', async (status) => {
+    const marker = 'AMP_PRIVATE_REDIRECT_CONTEXT';
+    const location = `${prefix}/v1/redirected-metadata?context=${marker}`;
+    const recorded = { method: 'POST', path: endpoint, headers: new Headers(), body: { model: 'mock', stream: true } };
+    const raw = protocol === 'anthropic-messages'
+      ? anthropicSceneResponse({ content: [{ type: 'tool_use', id: 'redirect-call', name: 'Bash', input: { command: 'printf AMP_DENIAL_PROBE' } }] }, recorded)
+      : responsesSceneResponse({ output: [{ type: 'function_call', id: 'fc_redirect', call_id: 'redirect-call', name: 'exec_command', arguments: JSON.stringify({ cmd: 'printf AMP_DENIAL_PROBE' }), status: 'completed' }] }, recorded);
+    const executableWire = await raw.text();
+    let upstreamRequests = 0;
+    let escapedRequests = 0;
+    const relay = await mockServer((request, response) => {
+      upstreamRequests++;
+      if (request.url === endpoint) {
+        response.writeHead(status, { location, 'content-type': 'text/plain' });
+        response.end(`relay redirect ${marker}`);
+      } else {
+        escapedRequests++;
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.end(executableWire);
+      }
+    });
+    const settings = config(relay);
+    settings.routes = [{ ...settings.routes[0]!, prefix, protocol }];
+    const app = createApp(settings); cleanups.push(app.flushAudit);
+    const gateway = await startLoopback(app); cleanups.push(gateway.close);
+    const response = await fetch(`${gateway.url}${prefix}${endpoint}`, { method: 'POST', headers: { ...credentials, 'content-type': 'application/json' }, body: JSON.stringify({ ...recorded.body, messages: [], input: [] }) });
+    const body = await response.text();
+    expect(response.status).toBe(502);
+    expect(response.redirected).toBe(false);
+    expect(response.headers.has('location')).toBe(false);
+    expect(JSON.parse(body)).toMatchObject({ error: { type: 'api_error' } });
+    expect(body).not.toContain(marker);
+    expect(body).not.toContain('AMP_DENIAL_PROBE');
+    expect(upstreamRequests).toBe(1);
+    expect(escapedRequests).toBe(0);
+  });
+
+  it('cancels a rejected redirect body rather than retaining its upstream connection', async () => {
+    const closed = Promise.withResolvers<void>();
+    const relay = await mockServer((_request, response) => {
+      response.once('close', () => closed.resolve());
+      response.writeHead(307, { location: `${prefix}/v1/opaque`, 'content-type': 'text/plain' });
+      response.write('AMP_REDIRECT_RESOURCE_CONTEXT');
+    });
+    const settings = config(relay);
+    settings.routes = [{ ...settings.routes[0]!, prefix, protocol }];
+    const app = createApp(settings); cleanups.push(app.flushAudit);
+    const gateway = await startLoopback(app); cleanups.push(gateway.close);
+    const response = await fetch(`${gateway.url}${prefix}${endpoint}`, { method: 'POST', headers: credentials, body: '{}', redirect: 'manual' });
+    expect(response.status).toBe(502);
+    expect(await response.text()).not.toContain('AMP_REDIRECT_RESOURCE_CONTEXT');
+    await closed.promise;
+  });
+
+  it.each([400, 429, 503, 529])('preserves ordinary upstream error %i bytes and headers', async (status) => {
+    const bytes = Buffer.from([0, 255, 13, 10, 65]);
+    const relay = await mockServer((_request, response) => {
+      response.writeHead(status, { 'content-type': 'application/octet-stream', 'retry-after': '12' });
+      response.end(bytes);
+    });
+    const settings = config(relay);
+    settings.routes = [{ ...settings.routes[0]!, prefix, protocol }];
+    const app = createApp(settings); cleanups.push(app.flushAudit);
+    const gateway = await startLoopback(app); cleanups.push(gateway.close);
+    const response = await fetch(`${gateway.url}${prefix}${endpoint}`, { method: 'POST', headers: credentials, body: '{}' });
+    expect(response.status).toBe(status);
+    expect(response.headers.get('retry-after')).toBe('12');
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+  });
+
+  it('retains raw shadow redirect transport without advertising enforcement', async () => {
+    const bytes = Buffer.from('opaque shadow redirect\r\n');
+    const location = `${prefix}/v1/opaque-shadow`;
+    const relay = await mockServer((_request, response) => {
+      response.writeHead(307, { location, 'content-type': 'application/octet-stream' });
+      response.end(bytes);
+    });
+    const settings = config(relay);
+    settings.routes = [{ ...settings.routes[0]!, prefix, protocol }];
+    settings.gate.mode = 'shadow';
+    const app = createApp(settings); cleanups.push(app.flushAudit);
+    const gateway = await startLoopback(app); cleanups.push(gateway.close);
+    const response = await fetch(`${gateway.url}${prefix}${endpoint}`, { method: 'POST', headers: credentials, body: '{}', redirect: 'manual' });
+    expect(response.status).toBe(307);
+    expect(response.headers.get('location')).toBe(location);
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
+  });
+
+  it('keeps non-generation GET metadata redirects usable', async () => {
+    let targetRequests = 0;
+    const relay = await mockServer((request, response) => {
+      if (request.url === '/v1/models') {
+        response.writeHead(307, { location: `${prefix}/v1/models-final` });
+        response.end('metadata redirect');
+      } else {
+        targetRequests++;
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ object: 'list', data: [] }));
+      }
+    });
+    const settings = config(relay);
+    settings.routes = [{ ...settings.routes[0]!, prefix, protocol }];
+    const app = createApp(settings); cleanups.push(app.flushAudit);
+    const gateway = await startLoopback(app); cleanups.push(gateway.close);
+    const response = await fetch(`${gateway.url}${prefix}/v1/models`, { headers: credentials });
+    expect(response.status).toBe(200);
+    expect(response.redirected).toBe(true);
+    expect(await response.json()).toEqual({ object: 'list', data: [] });
+    expect(targetRequests).toBe(1);
+  });
+});
+
+it('preserves explicitly trusted rerouted-classifier redirect transport as opaque, not protected generation', async () => {
+  let relayRequests = 0;
+  let trustedRequests = 0;
+  const relay = await mockServer((_request, response) => { relayRequests++; response.writeHead(500); response.end('unexpected relay'); });
+  const trusted = await mockServer((_request, response) => {
+    trustedRequests++;
+    response.writeHead(307, { location: '/trusted-classifier-target', 'content-type': 'text/plain' });
+    response.end('trusted classifier redirect');
+  });
+  const original = config(relay);
+  const settings = configSchema.parse({ ...original, classifier_reroute: { ...original.classifier_reroute, enabled: true, model_map: { mock: 'mock-classifier' } }, decision: { ...original.decision, second_stage: { base_url: `${trusted}/v1`, api_key: 'disposable-trusted', model: 'mock-classifier' } } });
+  const app = createApp(settings); cleanups.push(app.flushAudit);
+  const gateway = await startLoopback(app); cleanups.push(gateway.close);
+  const response = await fetch(`${gateway.url}/cc/v1/messages`, { method: 'POST', headers: { ...credentials, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'mock', system: [{ type: 'text', text: 'You are a security monitor for autonomous AI coding agents' }], messages: [{ role: 'user', content: 'inert classifier transport' }] }), redirect: 'manual' });
+  expect(response.status).toBe(307);
+  expect(response.headers.get('location')).toBe('/trusted-classifier-target');
+  expect(await response.text()).toBe('trusted classifier redirect');
+  expect(relayRequests).toBe(0);
+  expect(trustedRequests).toBe(1);
 });
 
 it('runs the genuine serve CLI with config/log-level and shuts down its owned listener on SIGTERM', async () => {

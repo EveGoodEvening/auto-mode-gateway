@@ -11,6 +11,7 @@ import type { GateContext } from '../gate/types.js';
 import { resolvePolicy } from '../policy/effective.js';
 import { anthropicAdapter, createClaudeDeliveryState, prepareAnthropicRequest } from '../protocols/anthropic/adapter.js';
 import { isClassifierRequest, isSuspectedClassifierRequest, prepareClassifierTarget } from '../protocols/anthropic/classifier-fingerprint.js';
+import { responsesAdapter } from '../protocols/openai-responses/adapter.js';
 import type { RequestContext } from '../protocols/types.js';
 import { authenticate, buildUpstreamHeaders } from './auth.js';
 import { errorResponse } from './errors.js';
@@ -56,7 +57,7 @@ async function boundedBody(request: Request, limit: number): Promise<Uint8Array<
   return bytes;
 }
 
-/** Authenticated transport; only the installed Anthropic adapter enforces tool use. */
+/** Authenticated transport with protocol-specific gates on implemented generation endpoints. */
 export function createApp(config: Config) {
   const app = new Hono<{ Bindings: HttpBindings }>();
   const policy = resolvePolicy(config.policy);
@@ -104,9 +105,13 @@ export function createApp(config: Config) {
       }
       throw error;
     }
-    const generation = request.method === 'POST' && resolved.route.protocol === 'anthropic-messages'
+    const anthropicGeneration = request.method === 'POST' && resolved.route.protocol === 'anthropic-messages'
       && resolved.pathname === '/v1/messages';
-    const extracted = generation && body ? anthropicAdapter.extractRequest(body) : undefined;
+    const responsesGeneration = request.method === 'POST' && resolved.route.protocol === 'openai-responses'
+      && resolved.pathname === '/v1/responses';
+    const adapter = anthropicGeneration ? anthropicAdapter : responsesGeneration ? responsesAdapter : undefined;
+    const generation = adapter !== undefined;
+    const extracted = adapter && body ? adapter.extractRequest(body) : undefined;
     const sourceHeaders = new Headers(request.headers);
     const bearer = /^Bearer[\t ]+(\S+)$/i.exec(sourceHeaders.get('authorization') ?? '')?.[1];
     const supplied = [bearer, sourceHeaders.get('x-api-key')].filter((value): value is string => Boolean(value));
@@ -124,7 +129,7 @@ export function createApp(config: Config) {
     let headers = buildUpstreamHeaders(request.headers, upstream, config.auth.mode);
     let delivery: 'native' | 'rewrite' = 'rewrite';
     let rerouted = false;
-    if (generation && body) {
+    if (anthropicGeneration && body) {
       let parsed: unknown;
       try { parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)); } catch { /* Preserve invalid request for upstream validation. */ }
       deliveryState.observeRequest(scope, isClassifierRequest(parsed));
@@ -159,6 +164,13 @@ export function createApp(config: Config) {
       signal: controller.signal,
       onError: (httpStatus) => logger.error({ status: httpStatus }, 'Upstream transport failed'),
     });
+    // A downstream SDK can follow an upstream redirect back into an opaque
+    // metadata route. Manual upstream fetch alone does not preserve this gate.
+    if (generation && !rerouted && config.gate.mode === 'enforce' && response.status >= 300 && response.status < 400) {
+      controller.abort();
+      await response.body?.cancel().catch(() => {});
+      return errorResponse(502, 'api_error', 'Upstream generation redirects are not supported');
+    }
     // Classifier responses are opaque trusted transport, not agent tool generations.
     if (!generation || rerouted || !response.ok) return response;
     const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
@@ -185,7 +197,7 @@ export function createApp(config: Config) {
       session_id: session,
       delivery: config.gate.mode === 'shadow' ? 'shadow' : delivery === 'native' ? 'safeguard' : 'rewrite',
     };
-    return anthropicAdapter.transformResponse(response, requestContext, {
+    return adapter!.transformResponse(response, requestContext, {
       signal: forwarded.signal,
       mode: config.gate.mode,
       delivery,

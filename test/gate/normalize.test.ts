@@ -57,11 +57,41 @@ describe('Codex normalization', () => {
   it('parses local_shell_call action.command', () => {
     expect(normalize('local_shell_call', { action: { command: ['printf', 'inert'], working_directory: '/project/sub' } }, 'openai-responses')).toMatchObject({ kind: 'command', argv: ['printf', 'inert'], workdir: '/project/sub' });
   });
+  it.each(['exec', 'wait', 'request_permissions'])('never treats native opaque %s as generic other or an unrelated benign cmd', (name) => {
+    expect(normalize(name, { cmd: 'pwd', call_id: 'opaque-continuation' }, 'openai-responses')).toMatchObject({ kind: 'command', execution_unavailable: true });
+    expect(normalize(name, 'opaque native input', 'openai-responses')).toMatchObject({ kind: 'command', execution_unavailable: true });
+  });
+  it('keeps native client tool search out of generic-other approval', () => {
+    expect(normalizeToolCall('openai-responses', { id: 'call', name: 'tool_search', input: { query: 'opaque native dispatch' }, raw: { type: 'tool_search_call', execution: 'client' } }, ctx)).toMatchObject({ execution_unavailable: true });
+  });
+  it.each([undefined, null, '', 'functions'])('supports the native default namespace %s', (namespace) => {
+    expect(normalizeToolCall('openai-responses', { id: 'call', name: 'exec_command', input: { cmd: 'pwd' }, raw: { namespace } }, ctx)).toMatchObject({ kind: 'command', text: 'pwd' });
+  });
+  it('does not approve a local command name in a different namespace', () => {
+    expect(normalizeToolCall('openai-responses', { id: 'call', name: 'exec_command', input: { cmd: 'pwd' }, raw: { namespace: 'remote' } }, ctx).execution_unavailable).toBe(true);
+    expect(normalizeToolCall('openai-responses', { id: 'call', name: 'generic_note', input: {}, raw: { namespace: 'remote' } }, ctx)).toMatchObject({ kind: 'mcp', execution_unavailable: true });
+    expect(normalizeToolCall('openai-responses', { id: 'call', name: 'generic_note', input: {}, raw: { namespace: 'functions' } }, ctx)).toMatchObject({ kind: 'other' });
+  });
+  it.each([{ encrypted_function_args: ['opaque'] }, { encrypted_function_args: 'malformed' }, { encrypted_function_args: {} }])('never approves unseen encrypted execution arguments %#', ({ encrypted_function_args }) => {
+    expect(normalizeToolCall('openai-responses', { id: 'call', name: 'exec_command', input: { cmd: 'pwd' }, raw: { encrypted_function_args } }, ctx).execution_unavailable).toBe(true);
+  });
+  it.each([{ env: { PATH: '/inert/alternate-bin' } }, { env: [] }, { user: 'alternate-user' }])('withholds unbound legacy shell context %#', (override) => {
+    expect(normalize('local_shell_call', { action: { command: ['pwd'], ...override } }, 'openai-responses')).toMatchObject({ kind: 'command', execution_unavailable: true });
+  });
+  it.each([{}, null])('retains legacy command support without an execution context override %#', (env) => {
+    expect(normalize('local_shell_call', { action: { command: ['pwd'], env, user: null } }, 'openai-responses').execution_unavailable).toBeUndefined();
+  });
   it.each([{}, { cmd: [] }, { cmd: [1] }, { cmd: '' }])('blocks unusable command shape %#', (input) => {
     expect(normalize('exec_command', input, 'openai-responses').execution_unavailable).toBe(true);
   });
   it('retains write_stdin chars but requires trusted session association', () => {
     expect(normalize('write_stdin', { session_id: 123, chars: 'printf inert\n' }, 'openai-responses')).toMatchObject({ kind: 'command', text: 'printf inert\n', execution_unavailable: true });
+  });
+  it('keeps native MCP calls out of the generic-other exemption', () => {
+    expect(normalize('mcp__server__opaque', { path: 'note.txt' }, 'openai-responses')).toMatchObject({ kind: 'mcp', paths: ['note.txt'], execution_unavailable: true });
+  });
+  it.each([{ shell: '/inert/alternate-shell' }, { environment_id: 'unbound-remote' }])('does not approve cmd under an unbound executable context %#', (override) => {
+    expect(normalize('exec_command', { cmd: 'pwd', ...override }, 'openai-responses')).toMatchObject({ kind: 'command', text: 'pwd', execution_unavailable: true });
   });
   it('handles freeform multi-file patches with deletes and move targets', () => {
     const patch = '*** Begin Patch\n*** Add File: a.txt\n+inert\n*** Update File: b.txt\n*** Move to: c.txt\n@@\n-old\n+new\n*** Delete File: obsolete.txt\n*** End Patch';

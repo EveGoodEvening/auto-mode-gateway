@@ -24,7 +24,8 @@ export function createStatus(config: Config, stats?: () => GateStats) {
       const current = stats?.();
       const routes = config.routes.map(({ prefix, protocol, upstream }) => ({
         prefix, protocol, upstream,
-        protected: stats !== undefined && config.gate.mode === 'enforce' && protocol === 'anthropic-messages',
+        protected: stats !== undefined && config.gate.mode === 'enforce'
+          && (protocol === 'anthropic-messages' || protocol === 'openai-responses'),
       }));
       const providerHealth = Object.fromEntries(Object.keys(config.decision.providers).map((id) => {
         const health = current?.provider_health[id];

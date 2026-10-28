@@ -1,0 +1,18 @@
+[
+  { "type": "response.created", "response": { "id": "resp_interleaved", "status": "in_progress", "output": [] } },
+  { "type": "response.output_item.added", "output_index": 0, "item": { "type": "function_call", "id": "fc_left", "call_id": "call_left", "name": "exec_command", "arguments": "", "status": "in_progress" } },
+  { "type": "response.function_call_arguments.delta", "output_index": 0, "item_id": "fc_left", "delta": "{\"cmd\":\"printf left_fixture\"}" },
+  { "type": "response.output_item.added", "output_index": 1, "item": { "type": "function_call", "id": "fc_right", "call_id": "call_right", "name": "exec_command", "arguments": "", "status": "in_progress" } },
+  { "type": "response.function_call_arguments.delta", "output_index": 1, "item_id": "fc_right", "delta": "{\"cmd\":\"printf right_fixture\"}" },
+  { "type": "response.function_call_arguments.done", "output_index": 1, "item_id": "fc_right", "arguments": "{\"cmd\":\"printf right_fixture\"}" },
+  { "type": "response.output_item.done", "output_index": 1, "item": { "type": "function_call", "id": "fc_right", "call_id": "call_right", "name": "exec_command", "arguments": "{\"cmd\":\"printf right_fixture\"}", "status": "completed" } },
+  { "type": "response.function_call_arguments.done", "output_index": 0, "item_id": "fc_left", "arguments": "{\"cmd\":\"printf left_fixture\"}" },
+  { "type": "response.output_item.done", "output_index": 0, "item": { "type": "function_call", "id": "fc_left", "call_id": "call_left", "name": "exec_command", "arguments": "{\"cmd\":\"printf left_fixture\"}", "status": "completed" } },
+  { "type": "response.output_item.added", "output_index": 2, "item": { "type": "message", "id": "msg_trailing", "role": "assistant", "status": "in_progress", "content": [] } },
+  { "type": "response.output_item.done", "output_index": 2, "item": { "type": "message", "id": "msg_trailing", "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": "INTERLEAVED_TRAILING_MARKER", "annotations": [] }] } },
+  { "type": "response.completed", "response": { "id": "resp_interleaved", "status": "completed", "output": [
+    { "type": "function_call", "id": "fc_left", "call_id": "call_left", "name": "exec_command", "arguments": "{\"cmd\":\"printf left_fixture\"}", "status": "completed" },
+    { "type": "function_call", "id": "fc_right", "call_id": "call_right", "name": "exec_command", "arguments": "{\"cmd\":\"printf right_fixture\"}", "status": "completed" },
+    { "type": "message", "id": "msg_trailing", "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": "INTERLEAVED_TRAILING_MARKER", "annotations": [] }] }
+  ], "usage": { "input_tokens": 21, "output_tokens": 12, "total_tokens": 33 } } }
+]

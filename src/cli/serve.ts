@@ -18,9 +18,9 @@ export async function runServer(config: Config): Promise<void> {
     hostname: config.listen.host,
     port: config.listen.port,
   }, () => {
-    if (config.gate.mode === 'shadow') logger.warn('Shadow mode records hypothetical Anthropic decisions without blocking tools');
-    if (config.routes.some((route) => route.protocol !== 'anthropic-messages')) {
-      logger.warn('Only Anthropic Messages tool-use enforcement is installed; other protocol routes are unprotected');
+    if (config.gate.mode === 'shadow') logger.warn('Shadow mode records hypothetical decisions without blocking tools');
+    if (config.routes.some((route) => route.protocol === 'openai-chat')) {
+      logger.warn('Chat Completions tool-use enforcement is not installed; Chat routes are unprotected');
     }
     logger.info('Server listening');
   });

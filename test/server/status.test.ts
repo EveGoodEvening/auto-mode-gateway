@@ -79,12 +79,13 @@ describe('management status', () => {
   it('does not advertise unfinished protocols or shadow as protected', async () => {
     const config = fixture();
     config.routes.push({ ...config.routes[0]!, prefix: '/cx', protocol: 'openai-responses' });
+    config.routes.push({ ...config.routes[0]!, prefix: '/wb', protocol: 'openai-chat' });
     const stats: GateStats = { decisions: 0, allow: 0, block: 0, uncertain: 0, cache_hits: 0,
       provider_failures: 0, provider_health: {} };
     const status = createStatus(config, () => stats);
     const mixed = await status.response(new Headers(), '127.0.0.1').json() as { protected: boolean; routes: { protected: boolean }[] };
     expect(mixed.protected).toBe(false);
-    expect(mixed.routes.map((route) => route.protected)).toEqual([true, false]);
+    expect(mixed.routes.map((route) => route.protected)).toEqual([true, true, false]);
     config.gate.mode = 'shadow';
     const shadow = await status.response(new Headers(), '127.0.0.1').json() as { protected: boolean; routes: { protected: boolean }[] };
     expect(shadow.protected).toBe(false);

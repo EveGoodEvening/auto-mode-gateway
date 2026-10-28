@@ -1,0 +1,12 @@
+{
+  "exec": { "type": "function_call", "id": "fc_exec", "call_id": "call_exec", "name": "exec_command", "arguments": "{\"cmd\":\"printf fixture\",\"sandbox_permissions\":\"require_escalated\",\"justification\":\"inert fixture\"}", "status": "completed" },
+  "patch": { "type": "custom_tool_call", "id": "ct_patch", "call_id": "call_patch", "name": "apply_patch", "input": "*** Begin Patch\n*** Add File: fixture.txt\n+fixture\n*** End Patch", "status": "completed" },
+  "local": { "type": "local_shell_call", "id": "ls_local", "call_id": "call_local", "action": { "type": "exec", "command": ["printf", "fixture"], "working_directory": "/fixture" }, "status": "completed" },
+  "stdin": { "type": "function_call", "id": "fc_stdin", "call_id": "call_stdin", "name": "write_stdin", "arguments": "{\"session_id\":17,\"chars\":\"printf fixture\\n\"}", "status": "completed" },
+  "codeExec": { "type": "custom_tool_call", "id": "ct_code", "call_id": "call_code", "name": "exec", "input": "console.log(\"inert fixture\")", "status": "completed" },
+  "codeWait": { "type": "function_call", "id": "fc_wait", "call_id": "call_wait", "name": "wait", "arguments": "{\"cell_id\":\"fixture-cell\"}", "status": "completed" },
+  "search": { "type": "tool_search_call", "id": "ts_fixture", "call_id": "call_search", "execution": "client", "arguments": { "query": "inert fixture" }, "status": "completed" },
+  "text": { "type": "message", "id": "msg_fixture", "status": "completed", "role": "assistant", "content": [{ "type": "output_text", "text": "TRAILING_MARKER", "annotations": [] }] },
+  "reasoning": { "type": "reasoning", "id": "rs_fixture", "summary": [{ "type": "summary_text", "text": "fixture reasoning" }], "encrypted_content": "fixture-opaque-signature" },
+  "usage": { "input_tokens": 47, "input_tokens_details": { "cached_tokens": 13 }, "output_tokens": 19, "output_tokens_details": { "reasoning_tokens": 7 }, "total_tokens": 66 }
+}

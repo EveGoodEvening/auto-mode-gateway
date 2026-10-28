@@ -91,9 +91,9 @@ async function writePrivate(path: string, text: string, force: boolean): Promise
 function snippets(token: string): string {
   return `
 Setup guidance only: agent compatibility and protection are not yet verified.
-C08 implements Claude Messages enforcement only; parent verification is pending.
-Codex/Responses and WorkBuddy/Chat are unprotected until their adapter rollouts.
-Do not send real tool traffic to those routes. Shadow mode does not block tools.
+Messages and Responses generation endpoints have tool-use enforcement installed.
+WorkBuddy/Chat remains unprotected until C11; do not send real tool traffic there.
+Installed enforcement is not client acceptance. Shadow mode does not block tools.
 Native delivery is not proof that this client supports safeguard_results.
 The issued client token below is a secret; do not paste this output into logs.
 
@@ -115,7 +115,7 @@ See docs/agents/claude-code.md for the validated setup.
 Select the explicit Code view; the generic home/new-chat view is not Code.
 If your installed Desktop rejects loopback, use your own HTTPS gateway.
 
-Codex CLI / Desktop (future protected rollout; setup only):
+Codex CLI / Desktop (Responses enforcement installed; client QA tracked separately):
 export AMP_TOKEN='${token}'
 # Merge into ~/.codex/config.toml. Keep model_provider at the TOP LEVEL,
 # before any [table] headers (not inside an existing table):
@@ -127,6 +127,7 @@ base_url = "http://127.0.0.1:8484/codex/v1"
 env_key = "AMP_TOKEN"
 wire_api = "responses"
 supports_websockets = false
+# Codex classifier rerouting is not implemented in v1.
 # Desktop must inherit AMP_TOKEN: macOS launchctl setenv AMP_TOKEN <token>;
 # Windows setx AMP_TOKEN <token>, then restart the GUI. These persist a secret.
 
