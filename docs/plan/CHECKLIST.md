@@ -197,10 +197,15 @@
 
 ### Phase 5：Codex（OpenAI Responses）适配器
 
+- C10 ACTIVE after CLOSED LOCAL C09 `638f676`; P5-1/2/3 remain unchecked pending parent gates, actual installed-client replay and separate original external/Desktop evidence. Only implemented Responses generation paths may be advertised protected; Codex classifier rerouting is not implemented in v1 and Chat remains unprotected until C11.
+
 - [ ] P5-1 Responses 流式拦截与改写
-  - output_index → item；function_call/custom_tool_call/local_shell_call 扣留 added/参数 delta，在 output_item.done 判定但直到全轮 ID 唯一性确认后才放执行事件。allow 按原序；block 替换 message 完整事件链（output_item.added→content_part.added→output_text.delta/done→content_part.done→output_item.done，msg_amp_<n>）。外发 sequence_number 单调重编，completed/incomplete.output[] 同步替换、usage 不变，文本直通，reasoning 仅在有证据 compat 模式有界缓冲。非流式同理，碰撞/超限/未闭合/超时取消上游且无执行泄漏。
+  - output_index → item；function_call/custom_tool_call/local_shell_call 扣留 added/参数 delta/done，在 output_item.done 对完整动作判定但直到全轮 ID 唯一性确认及全部判定后才放执行事件。enforce 首个 execution 开启不可提前解除的单向有界 ordered suffix：纯文本/屏障前文本及 reasoning 即时，屏障后所有文本/reasoning/未知 stateful data 的完整生命周期与终态快照按源序保留。allow 原序；block 在原位置替换 message 完整事件链（output_item.added→content_part.added→output_text.delta→output_text.done→content_part.done→output_item.done，msg_amp_<n> 无碰撞）。外发 sequence_number 严格单调（含 control interleave 后重编），completed/incomplete.output[] 同步原位替换、usage 不变。仅真正 control-only ping/comment/error 可即时；含 output 的快照是 stateful，初始/终态未跟踪或矛盾 execution 必须在发出前 fail-closed。非流式同理；shadow 原字节非阻塞；碰撞/超限/未闭合/超时/取消丢弃未放后缀且无执行泄漏。
+  - 与 R5 分离：ordering retention 不是 reasoning stripping；没有实际 P5-2 reasoning 一致性错误，不启用 compat、不删当前/replay reasoning。所有 retained raw/decoded/parsed/终态/替换暂存共用 ≤8 MiB，reasoning 全部表示同时受独立 ≤4 MiB 子集约束，单 tool/frame ≤1 MiB 与 60s completion/30s idle/60s decision 不变。不修请求历史/index，不发早期可执行占位，不缓冲整轮纯文本，不放宽断言。定向修订 **targeted PLAN REVIEW CLEAN / prior approval for repair**（`agent://C10OrderingContractReview` 三份规划 CLEAN）；父代理仍须先仅提交这三份计划再解除生产修复 HOLD，已有未验证 stream 草稿不是批准实现，P5 运行验收仍未完成。
   - 位置：`src/protocols/openai-responses/{adapter,stream,nonstream}.ts`。
   - 完成标准：fixture 单测覆盖 `exec_command` 拦截、`apply_patch`（custom_tool_call）拦截、`local_shell_call`、并行项部分拦截、`sequence_number` 单调性断言。
+  - 定向新增但不替代原标准：tool0→marker1、早期 text→tool→suffix、多项部分拒绝、reasoning/未知状态/控制交错、完整替换链/单调序号/终态数组/usage/nonstream parity；late duplicate、aggregate 与 reasoning 各自溢出（含终态副本）、EOF/截止/取消、慢判定/背压/纯文本/shadow。实际 installed Codex mixed replay 必须捕获代理 wire 顺序和立即下一请求 input 有序 tuples/身份/精确拒绝文本，允许项/拒绝 message 均在 marker 前，block 不留被拒工具/结果；CLI exit0/计数/mock 不足以证明此项或真实上游。原 P5-2/3 两模式、CLI/Desktop、inert exact-string、真实 ≥5 轮条件不变。
+  - 延迟独立记账：direct baseline 首事件额外 <50 ms、1000-event 纯文本 <5 ms/event 不变；held suffix 从首扣留/收集结束/判定结束到释放及背压另报。真实 provider p95 ≤1.5s Jev/≤0.5s Clef-flash 未测，不得以 mock/C08 成绩代替。
 
 - [ ] P5-2 调查：Codex 实机与回放一致性
   - 保留 `exec_command{cmd:"rm -rf ~", sandbox_permissions:"require_escalated"}` exact-string 的 inert policy/改写证据；真实 Codex CLI/Desktop 在 --yolo 与 Approve for me 下额外使用无害 denial probe + mock deny，绝不尝试真实破坏执行，分别记账，原外部要求未证实部分留 pending。随后 ≥5 轮真实上游 replay；如 reasoning 加密项一致性实测错误，启用 DESIGN 有界兼容缓冲及仅该轮 reasoning/replay 剔除（strip_reasoning_on_rewrite），记录证据后才设置该兼容分支默认。
