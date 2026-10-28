@@ -14,6 +14,8 @@ export interface SseFrame {
   readonly data?: string | undefined;
   readonly id?: string | undefined;
   readonly complete: boolean;
+  readonly jsonComplete?: boolean | undefined;
+  readonly jsonAmbiguous?: boolean | undefined;
   releaseSemantic(): void;
   release(): void;
 }
@@ -23,6 +25,12 @@ export interface SseEvent {
   readonly data?: string;
   readonly id?: string;
   readonly retry?: number;
+}
+
+export interface SseRetention {
+  readonly reasoningBytes: number;
+  readonly jsonComplete: boolean;
+  readonly jsonAmbiguous: boolean;
 }
 
 /** Zero-copy data fields with exactly the semantic LF joining used by SSE. */
@@ -45,13 +53,15 @@ export function* sseDataSegments(raw: Uint8Array): Iterable<Uint8Array> {
 }
 
 /** Exact JSON spelling/duplicate semantics; uncertainty keeps the whole frame reserved. */
-export function sseReasoningBytes(raw: Uint8Array, protocol: JsonRetentionProtocol, reasoningIndex?: (index: number) => boolean | undefined, budget?: ResponseBudget, partialPrefix = false): number {
+export function classifySseRetention(raw: Uint8Array, protocol: JsonRetentionProtocol, reasoningIndex?: (index: number) => boolean | undefined, budget?: ResponseBudget, partialPrefix = false): SseRetention {
   const metadata = budget?.reserve(256);
   const preview = new Map<number, boolean>();
   let total = 0;
   let frameStart = 0;
   let cursor = 0;
   let first = true;
+  let jsonComplete = true;
+  let jsonAmbiguous = false;
   try {
     while (cursor < raw.length) {
       const lineStart = cursor;
@@ -62,14 +72,16 @@ export function sseReasoningBytes(raw: Uint8Array, protocol: JsonRetentionProtoc
       const bomBlank = lineStart === 0 && lineEnd === 3 && raw[0] === 0xef && raw[1] === 0xbb && raw[2] === 0xbf;
       if (lineStart !== lineEnd && !bomBlank) continue;
       const frame = raw.subarray(frameStart, cursor);
-      if (first && partialPrefix) total += frame.byteLength;
+      if (first && partialPrefix) { total += frame.byteLength; jsonComplete = false; jsonAmbiguous = true; }
       else {
         const scanner = new JsonRetentionScanner(protocol, 'event', budget);
         let dataBytes = 0;
         try {
-          for (const segment of sseDataSegments(frame)) { dataBytes += segment.byteLength; scanner.push(segment); }
+          for (const segment of sseDataSegments(frame)) { dataBytes += segment.byteLength; scanner.feed(segment); }
           const info = scanner.finish();
           if (dataBytes) {
+            jsonComplete = jsonComplete && info.complete;
+            jsonAmbiguous = jsonAmbiguous || info.ambiguous;
             if (!info.complete || info.ambiguous) total += frame.byteLength;
             else {
               const lifecycle = protocol === 'responses'
@@ -94,7 +106,8 @@ export function sseReasoningBytes(raw: Uint8Array, protocol: JsonRetentionProtoc
       first = false;
       frameStart = cursor;
     }
-    return total + raw.length - frameStart;
+    const tail = raw.length - frameStart;
+    return { reasoningBytes: total + tail, jsonComplete: jsonComplete && tail === 0, jsonAmbiguous: jsonAmbiguous || tail > 0 };
   } finally { preview.clear(); metadata?.release(); }
 }
 
@@ -120,7 +133,7 @@ export function decodedStringBytes(raw: Uint8Array): number {
 export function parseSse(source: ReadableStream<Uint8Array>, options: {
   maxFrameBytes?: number;
   budget?: ResponseBudget;
-  classifyReasoning?: (raw: Uint8Array, partialPrefix?: boolean) => number;
+  classifyRetention?: (raw: Uint8Array, partialPrefix?: boolean) => SseRetention;
   potentialReasoning?: boolean;
 } = {}): ReadableStream<SseFrame> {
   const maximum = options.maxFrameBytes ?? MAX_SSE_FRAME_BYTES;
@@ -165,7 +178,9 @@ export function parseSse(source: ReadableStream<Uint8Array>, options: {
     if (!scratch) throw new Error('Missing SSE allocation');
     if (offset === chunk.length) releaseInput();
     const raw = buffer.subarray(0, length);
-    const reasoning = options.classifyReasoning?.(raw) ?? (options.potentialReasoning ? raw.byteLength : 0);
+    // Only this individual frame's validation facts cross the consumer boundary.
+    const retention = options.classifyRetention?.(raw);
+    const reasoning = retention?.reasoningBytes ?? (options.potentialReasoning ? raw.byteLength : 0);
     scratch.resize(buffer.byteLength + 256, reasoning);
     const rawLease = scratch;
     budget.registerBytes(raw, rawLease);
@@ -194,6 +209,8 @@ export function parseSse(source: ReadableStream<Uint8Array>, options: {
       first = false;
       const frame: SseFrame = Object.freeze({
         raw, complete,
+        jsonComplete: retention?.jsonComplete,
+        jsonAmbiguous: retention?.jsonAmbiguous,
         get event() { return event?.event; },
         get data() { return event?.data; },
         get id() { return event?.id; },
@@ -232,7 +249,8 @@ export function parseSse(source: ReadableStream<Uint8Array>, options: {
             if (result.value) {
               input = budget.claimBytes(result.value);
               if (options.potentialReasoning) {
-                const reasoning = options.classifyReasoning?.(result.value, length > 0) ?? result.value.byteLength;
+                // Aggregate input facts reserve bytes only; they never validate a yielded frame.
+                const reasoning = options.classifyRetention?.(result.value, length > 0).reasoningBytes ?? result.value.byteLength;
                 input.resize(input.bytes, reasoning);
               }
               chunk = result.value;

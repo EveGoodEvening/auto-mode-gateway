@@ -1,4 +1,4 @@
-import { assertSseField, parseSse, sseReasoningBytes, type SseFrame } from '../sse.js';
+import { assertSseField, classifySseRetention, parseSse, type SseFrame } from '../sse.js';
 import type { AdapterOptions, RequestContext, ToolCall } from '../types.js';
 import { AnthropicResponseError, MAX_TOOL_BYTES, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES, IDLE_TIMEOUT_MS, COMPLETION_TIMEOUT_MS, decide, blockedText, safeguardResults, shadowStream, bounded, parseToolInput, record, unique, validateToolBlock } from './safety.js';
 import { ResponseBudget, type ResponseAccounting, type ResponseReservation } from '../response-budget.js';
@@ -47,7 +47,7 @@ export function transformAnthropicStream(source: ReadableStream<Uint8Array>, con
     },
     cancel(reason) { return upstream.cancel(reason); },
   }, { highWaterMark: 0 });
-  const frames = parseSse(timedSource, { budget, potentialReasoning: true, classifyReasoning: (raw, partial) => sseReasoningBytes(raw, 'anthropic', index => contentBlocks.get(index), budget, partial) }).getReader();
+  const frames = parseSse(timedSource, { budget, potentialReasoning: true, classifyRetention: (raw, partial) => classifySseRetention(raw, 'anthropic', index => contentBlocks.get(index), budget, partial) }).getReader();
   const active = new Map<number, PendingTool>();
   const indices = new Set<number>();
   const ids = new Set<string>();

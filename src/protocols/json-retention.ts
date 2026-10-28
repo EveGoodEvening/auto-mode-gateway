@@ -44,12 +44,14 @@ export class JsonRetentionScanner {
   private workspace?: ResponseReservation;
   private numberState = '';
   private literalRemaining = '';
+  private finalStatus?: JsonRetention;
 
   constructor(private readonly protocol: JsonRetentionProtocol, private readonly mode: 'response' | 'event', private readonly budget?: ResponseBudget) {
     this.workspace = budget?.reserve(2048, 2048);
   }
 
-  push(bytes: Uint8Array): JsonRetention {
+  feed(bytes: Uint8Array): void {
+    if (this.finalStatus) throw new Error('JSON scanner is complete');
     for (const byte of bytes) {
       this.bytes++;
       if (this.bad) continue;
@@ -67,23 +69,23 @@ export class JsonRetentionScanner {
         this.utfMinimum = this.utfRemaining === 1 ? 128 : this.utfRemaining === 2 ? 2048 : 65536;
       } else this.bad = true;
     }
-    return this.snapshot();
   }
 
   finish(): JsonRetention {
+    if (this.finalStatus) return this.finalStatus;
     if (this.token === 'primitive') this.endPrimitive();
     if (this.utfRemaining || this.token || this.stack.length || !this.done) this.bad = true;
     const result = this.snapshot();
-    const frames = this.stack;
-    this.stack = [];
     const root = this.root;
     this.root = undefined;
     this.text = '';
     this.unicode = '';
-    for (const frame of frames) frame.lease?.release();
+    for (const frame of this.stack) frame.lease?.release();
+    this.stack.length = 0;
     root?.lease?.release();
     this.workspace?.release();
     this.workspace = undefined;
+    this.finalStatus = result;
     return result;
   }
 
@@ -265,7 +267,8 @@ export class JsonRetentionScanner {
     frame.lease?.release();
   }
 
-  private snapshot(): JsonRetention {
+  snapshot(): JsonRetention {
+    if (this.finalStatus) return this.finalStatus;
     let reasoningBytes = 0;
     let pendingBytes = 0;
     if (this.done && this.root) reasoningBytes = this.total(this.root);

@@ -140,7 +140,8 @@ export async function transformAnthropicNonstream(response: Response, context: R
       if (item.value.byteLength) lastByteAt = Date.now();
       incoming = undefined;
       leases.push(lease);
-      const classification = scanner.push(item.value);
+      scanner.feed(item.value);
+      const classification = scanner.snapshot();
       let pending = classification.ambiguous ? size + item.value.byteLength : classification.reasoningBytes + classification.pendingBytes;
       for (const allocation of leases) allocation.resize(allocation.bytes, 0);
       for (const allocation of leases) { const amount = Math.min(allocation.bytes, pending); allocation.resize(allocation.bytes, amount); pending -= amount; }

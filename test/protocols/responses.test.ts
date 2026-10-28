@@ -378,6 +378,22 @@ describe('Responses immediate text and raw shadow', () => {
     expect(await new Response(transformResponsesStream(source(raw, length), context, config)).text()).toBe(raw);
     expect(config.onToolCall).not.toHaveBeenCalled();
   });
+  it.each([
+    { kind: 'syntax', later: 'data: {"type":"vendor.stateful"\n\n' },
+    { kind: 'metadata', later: 'data: {"type":"vendor.stateful","output_index":{}}\n\n' },
+  ])('delivers a valid early frame before rejecting later $kind ambiguity in the same chunk', async ({ later }) => {
+    const first = wire([{ type: 'response.output_text.delta', output_index: 0, item_id: 'msg_early', content_index: 0, delta: 'EARLY_MARKER' }]);
+    const cancel = vi.fn();
+    const upstream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(encoder.encode(first + later)); }, cancel });
+    const config = options();
+    const reader = transformResponsesStream(upstream, context, config).getReader();
+    try {
+      expect(new TextDecoder().decode((await reader.read()).value)).toBe(first);
+      await expect(reader.read()).rejects.toBeDefined();
+    } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
+    expect(config.onToolCall).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalled();
+  });
   it.each(['custom_tool_call', 'local_shell_call'])('preserves fully escaped %s types, split Unicode and multiline data without losing approval tracking', async type => {
     const item = type === 'custom_tool_call' ? { ...scenes.patch, name: 'fixture_utf8', input: 'inert🌍' }
       : { ...scenes.local, action: { ...scenes.local.action, command: ['printf', 'inert🌍'] } };

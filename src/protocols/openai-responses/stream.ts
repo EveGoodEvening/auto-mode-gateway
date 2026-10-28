@@ -1,9 +1,8 @@
 import type { AdapterOptions, RequestContext, ToolCall } from '../types.js';
 import type { Verdict } from '../../gate/types.js';
-import { parseSse, pingKeepalive, sseDataSegments, sseReasoningBytes, type SseFrame } from '../sse.js';
+import { classifySseRetention, parseSse, pingKeepalive, type SseFrame } from '../sse.js';
 import { ResponsesResponseError, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES, MAX_TOOL_BYTES, IDLE_TIMEOUT_MS, COMPLETION_TIMEOUT_MS, DECISION_TIMEOUT_MS, bounded, blockedText, execution, callFor, record, blockedMessage, same, sameExecution, utf8Bytes, jsonBytes, encodeEvent, shadowStream } from './safety.js';
 import { parsedBound } from './nonstream.js';
-import { JsonRetentionScanner } from '../json-retention.js';
 import { ResponseBudget, type ResponseAccounting, type ResponseReservation } from '../response-budget.js';
 
 type Item = { initial?: Record<string, unknown>; final?: Record<string, unknown>; parameters: string; parameterBytes: number; parameterId?: string; parameterReservation?: ResponseReservation; delta: boolean; parametersDone?: string; call?: ToolCall; decision?: Promise<Verdict> };
@@ -65,7 +64,7 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
   }, { highWaterMark: 0 });
   const reader = parseSse(timed, {
     budget, potentialReasoning: true,
-    classifyReasoning: (raw, partial) => sseReasoningBytes(raw, 'responses', index => lifecycle.has(index) ? lifecycle.get(index)!.type === 'reasoning' : undefined, budget, partial),
+    classifyRetention: (raw, partial) => classifySseRetention(raw, 'responses', index => lifecycle.has(index) ? lifecycle.get(index)!.type === 'reasoning' : undefined, budget, partial),
   }).getReader();
   const keepalive = pingKeepalive(options.holdKeepaliveMs ?? 10_000);
 
@@ -264,14 +263,7 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
       else output.push(frame.raw);
       frame.releaseSemantic(); return;
     }
-    const scanner = new JsonRetentionScanner('responses', 'event', budget);
-    let ambiguous: boolean;
-    try {
-      for (const segment of sseDataSegments(frame.raw)) scanner.push(segment);
-      const info = scanner.finish();
-      ambiguous = info.ambiguous || !info.complete;
-    } finally { scanner.finish(); }
-    if (ambiguous) throw new ResponsesResponseError('Unclassifiable Responses event');
+    if (frame.jsonComplete !== true || frame.jsonAmbiguous !== false) throw new ResponsesResponseError('Unclassifiable Responses event');
     // The parsed representation inherits the parser's validated-context classification.
     const rawReasoning = budget.claimBytes(frame.raw).reasoning;
     const parsedBytes = parsedBound(frame.data);

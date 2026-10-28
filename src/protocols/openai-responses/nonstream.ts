@@ -122,7 +122,8 @@ export async function transformResponsesNonstream(response: Response, context: R
       if (item.done) break;
       if (!incoming) continue;
       lastByte = Date.now();
-      const retention = scanner.push(incoming);
+      scanner.feed(incoming);
+      const retention = scanner.snapshot();
       reasoning = retention.reasoningBytes + retention.pendingBytes;
       const adopted = rawLeases.at(-1);
       if (!adopted) throw new ResponsesResponseError('Missing raw response allocation');
