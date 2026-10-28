@@ -57,7 +57,7 @@
   - 完成标准：集成测试证明非流式 JSON 与 SSE 响应逐事件透传（无缓冲，首事件延迟 < 50 ms），客户端断开后上游请求被中止。
   - C04 parent gates passed: typecheck/lint/test/build, 196 tests. Built serve launched against actual disposable loopback relay: health200, unauthorized401, authorized200, vault key replaced, `/v1/models` path and retry-after3 preserved; SIGTERM shutdown observed. Server suite covers first SSE event <50ms and disconnect cancellation. Independent review underway; this stage is explicitly unprotected transparent transport until gate integration.
 
-- [ ] P1-4 SSE 通用工具
+- [x] P1-4 SSE 通用工具
   - 基于原始 frame 扫描 + eventsource-parser 语义解析的 TransformStream；保存 comment/CRLF/id/retry/多行 data 与未知事件原始字节，仅真正修改的事件重编码，不用 parse/reencode 冒充字节保真。处理跨 chunk 半行、背压/取消，并提供 pingKeepalive(intervalMs, format)。遵守响应缓冲/截止硬界限。
   - 位置：`src/protocols/sse.ts`。
   - 完成标准：fixture 回放逐字节一致（除保活）；分片边界测试通过。
@@ -66,6 +66,7 @@
   - 请求提取 model/system/tools/messages/safeguards/stream、classifier_context 和最后用户文本。tool_use start→stop 缓冲完整 input_json_delta；完整 JSON.parse 才能作为可审批动作，partial-json 仅诊断，不完整标 unparseable 并 fail-closed。文本/thinking/ping 直通（compat 模式例外）。此未保护阶段仅对完整 fixture 调用显式 allow，禁止真实 agent 流量；非流式完整提取 content[].tool_use。受响应硬界限约束，C08 替换真实 gate。
   - 位置：`src/protocols/anthropic/{adapter,stream,nonstream}.ts`、`src/protocols/types.ts`（`ToolCall{id,name,input,raw}`、`ProtocolAdapter` 接口）。
   - 完成标准：fixture（纯文本、thinking、单 tool_use、并行多 tool_use、ping、error 事件、eager 流式的不完整 JSON）单测通过；真实 Claude Code 经代理两轮对话后第二轮 `usage.cache_read_input_tokens > 0`。
+  - C05 local implementation verified: parent full gates passed274tests; raw SSE fragmentation/bounds/EOF/cancellation and Anthropic fixtures passed. Actual HTTP smoke observed text before delayed tool and byte-exact output. Required real Claude second-turn cache evidence not yet exercised, so full P1-5 remains unchecked. Independent chunk review underway.
 
 ### Phase 2：闸门引擎与 System One 适配器
 

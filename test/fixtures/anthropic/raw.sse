@@ -1,0 +1,10 @@
+: original comment
+id: fixture-id
+retry: 2000
+event: ping
+data: {"type":
+data: "ping"}
+
+event: vendor_unknown
+data: {"type":"vendor_unknown","preserved":true}
+

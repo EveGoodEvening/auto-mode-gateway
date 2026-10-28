@@ -3,6 +3,8 @@ import { Hono } from 'hono';
 import pino from 'pino';
 
 import type { Config } from '../config/schema.js';
+import { anthropicAdapter } from '../protocols/anthropic/adapter.js';
+import type { AdapterOptions } from '../protocols/types.js';
 import { authenticate, buildUpstreamHeaders } from './auth.js';
 import { errorResponse } from './errors.js';
 import { resolveRoute } from './router.js';
@@ -47,7 +49,11 @@ async function boundedBody(request: Request, limit: number): Promise<Uint8Array<
   return bytes;
 }
 
-/** Authenticated transparent transport only; no tool-use gate is installed yet. */
+// C05 is an unprotected transparent stage for disposable mocks only. C08 must
+// replace this explicit callback with the real gate before any agent ingress.
+const transparentStageAllow: AdapterOptions['onToolCalls'] = async () => 'allow';
+
+/** Authenticated transport with the fixture-only Anthropic transparent adapter. */
 export function createApp(config: Config): Hono<{ Bindings: HttpBindings }> {
   const app = new Hono<{ Bindings: HttpBindings }>();
   const status = createStatus(config);
@@ -95,13 +101,32 @@ export function createApp(config: Config): Hono<{ Bindings: HttpBindings }> {
       body,
       signal: AbortSignal.any([request.signal, controller.signal]),
     });
-    return forwardUpstream(
+    const response = await forwardUpstream(
       forwarded, resolved.upstream, resolved.pathname + url.search, config,
       {
         signal: controller.signal,
         onError: (httpStatus) => logger.error({ status: httpStatus }, 'Upstream transport failed'),
       },
     );
+    // count_tokens, unknown endpoints, other methods/protocols and upstream
+    // errors remain opaque transport. Extraction never rewrites request bytes.
+    const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
+    if (request.method !== 'POST' || resolved.route.protocol !== 'anthropic-messages'
+      || resolved.pathname !== '/v1/messages' || !response.ok) {
+      return response;
+    }
+    // The relay controls MIME. Never let an executable generation evade the
+    // adapter just by claiming a different (or absent) content type.
+    if (mediaType !== 'text/event-stream' && mediaType !== 'application/json') {
+      controller.abort();
+      await response.body?.cancel().catch(() => {});
+      return errorResponse(502, 'api_error', 'Unsupported upstream generation content type');
+    }
+    const extracted = body ? anthropicAdapter.extractRequest(body) : undefined;
+    return anthropicAdapter.transformResponse(response, extracted ?? { stream: mediaType === 'text/event-stream' }, {
+      signal: forwarded.signal,
+      onToolCalls: transparentStageAllow,
+    });
   });
   return app;
 }

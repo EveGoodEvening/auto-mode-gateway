@@ -2,7 +2,7 @@
 
 ## Status and evidence
 
-- Plan gate CLEAN; current per-chunk execution and acceptance ledger below are authoritative. C01 CLOSED `1ed739a`, C02 CLOSED `715ca02`, C03 CLOSED `9b7794d`. C04 gates/smoke passed, independent review underway. Full P0-3 remains incomplete.
+- Plan gate CLEAN; latest per-chunk sections/acceptance ledger are authoritative. C01–C04 CLOSED (`1ed739a`, `715ca02`, `9b7794d`, `e0c410d`). C05 local gates and real HTTP smoke passed; review underway. Full P0-3 and live P1-5 cache acceptance remain incomplete.
 - Actual root: `/root/github.com/EveGoodEvening/auto-mode-gateway`; initial commit supplied by assignment: `ca125a8`. Product/bin remains `auto-mode-proxy`. Only root `AGENTS.md` and planning artifacts existed at research time.
 - Research record includes AGENTS, full DESIGN/CHECKLIST and implementation-context reports from original planner; earlier correction read the original plan-review reports, and this dependency-coupled correction read both plan-rereview reports and relevant sections of the three artifacts. All task IDs and external acceptance retained; original P2-1/P2-7 generic other semantics restored, sensitive-read ordering tied to existing P2-3 acceptance, all other accepted corrections retained.
 - Context-1 registry observations: TypeScript latest 7.0.2 conflicts with the source TypeScript 5 choice and typescript-eslint 8.72.1 peer `<6.1.0`; parser latest 4.1.3 is not the requested v3. C01 selects highest compatible stable TypeScript 5.x and parser v3, Node 24 types, compatible ESLint/plugins, and commits exact versions/lock. Document deviations before approving them, not after silent installation. tsup 9 requires Node `^22.18 || ^24.11 || >=26`; if selected, engines must express the actual supported Node 24 floor, not falsely promise 24.0 compatibility.
@@ -127,7 +127,7 @@ The chunk descriptions below define the execution sequence; current acceptance e
 - Gate: G; `npm test -- test/server`; loopback mock JSON/SSE/HEAD/count_tokens/models tests, auth 401, disconnect abort, <50ms first-event criterion. Serve smoke with disposable test config starts and stops owned server cleanly.
 - Risk/rollback: C04 is an **unprotected transparent relay**, not mock-only implementation and not protection. Until gate wiring use disposable mocks only, never real agent traffic. Rollback stops ingress or uses disposable mock receivers; revert chunk without disabling auth, no release label.
 
-#### C04 execution status — gates/smoke passed, independent review underway
+#### C04 execution status — CLOSED `e0c410d`
 
 - Frozen integration uses the existing `Config` schema: A exports `resolveRoute(config, pathname)`, `authenticate(headers, auth)`, `buildUpstreamHeaders(headers, upstream, authMode)` and `createStatus(config)`; B exports `forwardUpstream(request, upstream, path, config, { signal?, onError? }?)` plus fixed error-response factories. Header credentials/extra headers belong to A; hop filtering and identity encoding belong to B.
 - `createApp(config)` is a real Hono factory. `/healthz` is public; `/_amp/status` authorizes the actual Node socket peer or a separate configured admin token, never X-Forwarded-For/client tokens. Status exposes version, uptime, sanitized route metadata, unknown/unprobed provider health, zero-until-wired decision counters and explicit `transport: unprotected-transparent`, `protected: false`. `trust_proxy` cannot confer management access.
@@ -135,8 +135,8 @@ The chunk descriptions below define the execution sequence; current acceptance e
 - URL joining preserves configured API bases without requiring source-example rewrites: only an exact trailing `/v1` base boundary shared with leading `/v1` request boundary is deduplicated (`/v1` + `/v1/responses` → `/v1/responses`; `/api/v1` + `/v1/responses` → `/api/v1/responses`). `/api` + `/v1/messages` remains `/api/v1/messages`; origin bases and unknown paths retain their stripped ingress path/query.
 - B primes one response-body chunk before returning: initial headers/first-byte timeout can return 504; after response output begins, read timeout cancels/errors the stream rather than pretending its already-sent status can change. Upstream identity encoding is requested; when fetch decodes a noncompliant compressed response, stale encoding/length headers are removed. Other end-to-end response headers/cookies and untouched error-body bytes remain transparent.
 - Genuine `serve --config --log-level` loads the validated configuration, starts `@hono/node-server`, honors configured/overridden pino level, and owns only its listener/sockets. SIGINT/SIGTERM stops ingress and drains existing requests, with a 10-second bound before destroying its remaining sockets; signal listeners/timer are removed on close/error. Unavailable check/audit/eval commands remain unregistered; full P0-3 stays unchecked.
-- Parent verified typecheck/lint/test/build exit0, 196 tests passed including loopback transport/cancel/latency scenarios. Initial Hono web-type diagnostics fixed by DOM/DOM.Iterable libs (no skipLibCheck); status test strict types corrected. Built serve actual subprocess smoke: health200, unauthorized401, authorized200, `/v1/models`, replaced upstream credentials, retry-after3; SIGTERM shutdown observed and temp files/relay removed. No real agent/provider traffic. Independent review underway.
-- C04 CLOSED: all three independent correctness/security/accounting reviews CLEAN (`agent://c04-review-1`, `-2`, `-3`), green draft `b672b97`; final tracker commit follows. No remaining C04 fix. Next C05; real traffic remains prohibited until gate wiring.
+- Parent verified typecheck/lint/test/build exit0, 196 tests passed including loopback transport/cancel/latency scenarios. Initial Hono web-type diagnostics fixed by DOM/DOM.Iterable libs (no skipLibCheck); status test strict types corrected. Built serve actual subprocess smoke: health200, unauthorized401, authorized200, `/v1/models`, replaced upstream credentials, retry-after3; SIGTERM shutdown observed and temp files/relay removed. No real agent/provider traffic.
+- C04 CLOSED `e0c410d`: all three independent correctness/security/accounting reviews CLEAN (`agent://c04-review-1`, `-2`, `-3`), green draft `b672b97`. No remaining C04 fix. C05 is active; real traffic remains prohibited until gate wiring.
 
 
 ### C05 — Byte-preserving SSE and Anthropic transparent adapter (P1-4..5 local)
@@ -147,6 +147,14 @@ The chunk descriptions below define the execution sequence; current acceptance e
 - Gate: G; `npm test -- test/protocols`; raw CRLF/comments/multiline bytes and P1-5 fixtures, R4a tool/frame/response-size and idle/completion fake-clock/EOF cases, cancel and zero execution leak. Incomplete JSON may be parsed for diagnostics but never allowed as complete action. Mock cache fields not real cache evidence.
 - Live remainder: P1-5 second-turn real `cache_read_input_tokens > 0` waits for version/auth/upstream audit and C08; keep task unchecked.
 - Risk/rollback: revert adapter wiring to C04 **unprotected transparent relay** only after stopping agent ingress; use disposable mocks, never advertise rollback as protected service or send real agent tool traffic.
+
+#### C05 execution status — local gates/smoke passed, independent review underway
+
+- Integration contract is frozen in `src/protocols/types.ts`: complete `ToolCall{id,name,input,raw}`, extracted `RequestContext`, and `ProtocolAdapter.extractRequest/transformResponse`. `AdapterOptions` requires the request abort signal and an explicit whole-response `onToolCalls(calls, context, signal)` returning `allow | block`; incomplete execution inputs must never reach that callback or escape via an allow-only stage.
+- Server wiring selects only actual successful `POST /v1/messages` on Anthropic routes. JSON/SSE response MIME selects the adapter format; unsupported or missing generation MIME aborts/cancels upstream and returns a fixed 502, never generic passthrough based on relay-controlled metadata. `count_tokens`, unknown paths, other methods/protocols and HTTP error bodies remain opaque transport. Parsed request metadata is separate from the original bounded request bytes, which remain untouched for forwarding. Existing authentication, ingress limits and disconnect cancellation remain installed.
+- The app callback is explicitly named `transparentStageAllow`, solely for disposable mock fixtures, and must be replaced by the C08 gate. This is not a security release. New app tests cover nonstream tool byte preservation, streaming text before tool completion, raw CRLF frame preservation and endpoint/error bypass; mock cache fields are not live cache acceptance.
+- Parent typecheck/lint/test/build all exit0, 274 tests passed. Initial type inference/DOM.AsyncIterable diagnostics corrected; body-limit mock updated to real Messages JSON/MIME after fail-closed MIME cutover. Real HTTP adapter smoke observed immediate text before delayed complete tool, byte-identical full stream and complete harmless pwd tool delivery; both owned listeners closed. No real agents/providers/cache hit claimed. P1-4 locally verified; P1-5 remains unchecked solely for required real cache acceptance. Independent review underway.
+
 
 ### C06 — Normalization and pure policy (P2-1..4; P6-2 initial helpers)
 
@@ -247,9 +255,9 @@ The chunk descriptions below define the execution sequence; current acceptance e
 | P0-1 | C01 | install/typecheck/lint/empty-bootstrap-test/build/version/help all exit 0, including post-fix rerun | verified; draft `98c1970`, green fixes `e8f5f15`, clean security/accounting signoffs, final closure `1ed739a` |
 | P0-2 | C02 | full gates passed, 81 tests, direct example-loader smoke; code/security/accounting reviews CLEAN | verified; CLOSED `715ca02` |
 | P0-3 | C01/03/04/07/12 | version/help/init/token and real built serve verified; check/audit/eval depend on C07/C12 | full task unchecked; check/audit/eval unavailable |
-| P1-1..3 | C04 | full gates196tests, real built-serve loopback mock smoke, first-event/cancel tests | verified; independent review underway |
-| P1-4 | C05 | SSE parser fixture/streaming acceptance | unchecked, not implemented |
-| P1-5 | C05 + C08 | CLI version/auth/real upstream second-turn cache hit | all code pending; live prerequisite unknown |
+| P1-1..3 | C04 | full gates196tests, real built-serve loopback mock smoke, first-event/cancel tests; three CLEAN reviews | verified; CLOSED `e0c410d` |
+| P1-4 | C05 | SSE raw replay/fragmentation/bounds/keepalive suite and HTTP smoke passed | verified; independent review underway |
+| P1-5 | C05 + C08 | local fixtures/bounds/app tests and actual HTTP smoke passed; real CLI cache evidence separate | local verified, live cache unchecked pending prerequisite audit |
 | P2-1..4/7/8 | C06–07 | all branch/table/cache/log evidence | unchecked, not run |
 | P2-5/6 | C07 | mock evidence plus real provider check, OpenRouter model/path + Cloudflare envelope observations | all code pending; key/config audit pending |
 | P3-1..3/6 | C08 + C10–11 | three-protocol matrix only complete after all adapters | unchecked, not run |

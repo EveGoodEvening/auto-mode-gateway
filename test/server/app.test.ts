@@ -145,7 +145,21 @@ describe('createApp authenticated transparent transport', () => {
 
   it('enforces both declared and chunked body limits before upstream contact', async () => {
     let requests = 0;
-    const base = await mockServer((_request, response) => { requests++; response.end(); });
+    const base = await mockServer((request, response) => {
+      requests++;
+      const chunks: Buffer[] = [];
+      request.on('data', (chunk: Buffer) => chunks.push(chunk));
+      request.on('end', () => {
+        expect(Buffer.concat(chunks).toString()).toBe('1234');
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({
+          id: 'msg_body_limit', type: 'message', role: 'assistant', model: 'mock',
+          content: [{ type: 'text', text: 'accepted boundary' }],
+          stop_reason: 'end_turn', stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }));
+      });
+    });
     const settings = config(base);
     settings.limits.request_body_bytes = 4;
     const app = createApp(settings);
@@ -168,6 +182,9 @@ describe('createApp authenticated transparent transport', () => {
     expect(requests).toBe(0);
     const accepted = await app.request('/cc/v1/messages', { method: 'POST', headers: credentials, body: '1234' });
     expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toMatchObject({
+      type: 'message', content: [{ type: 'text', text: 'accepted boundary' }],
+    });
     expect(requests).toBe(1);
   });
 
@@ -222,6 +239,129 @@ describe('createApp authenticated transparent transport', () => {
       delay(1000).then(() => false),
     ]);
     expect(result).toBe(true);
+  });
+
+  it('never releases malformed execution from a successful generation even with unparseable request metadata', async () => {
+    const base = await mockServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{"id":"msg_mock","type":"message","content":[{"type":"tool_use","id":"must_not_escape","name":"echo"}]}');
+    });
+    const response = await createApp(config(base)).request('/cc/v1/messages', {
+      method: 'POST', headers: credentials, body: 'opaque request bytes',
+    });
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(await response.text()).not.toContain('must_not_escape');
+  });
+
+  it.each([
+    '{"type":"error","error":{"type":"overloaded_error","message":"fixture"}}\r\n',
+    '{ "unknown": true }\r\n',
+  ])('preserves successful opaque/error JSON without treating it as generation: %s', async (body) => {
+    const base = await mockServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(body);
+    });
+    const response = await createApp(config(base)).request('/cc/v1/messages', {
+      method: 'POST', headers: credentials, body: '{}',
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(body);
+  });
+
+  it('adapts a complete nonstream Messages tool response without changing request or response bytes', async () => {
+    const requestBytes = Buffer.from(' { "model": "mock", "stream": false, "messages": [{"role":"user","content":"你好"}] }\r\n');
+    const responseBytes = Buffer.from(' { "id":"msg_mock", "type":"message", "role":"assistant", "content":[{"type":"tool_use","id":"call_mock","name":"echo","input":{"text":"fixture"}}], "stop_reason":"tool_use" }\n');
+    const base = await mockServer((request, response) => {
+      expect(request.url).toBe('/v1/messages?fixture=1');
+      const chunks: Buffer[] = [];
+      request.on('data', (chunk: Buffer) => chunks.push(chunk));
+      request.on('end', () => {
+        expect(Buffer.concat(chunks)).toEqual(requestBytes);
+        response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'x-mock': 'nonstream' });
+        response.end(responseBytes);
+      });
+    });
+    const response = await createApp(config(base)).request('/cc/v1/messages?fixture=1', {
+      method: 'POST', headers: { ...credentials, 'content-type': 'application/json' }, body: requestBytes,
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-mock')).toBe('nonstream');
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(responseBytes);
+  });
+
+  it('streams text before tool completion and releases complete allowed fixture frames byte-for-byte', async () => {
+    const frame = (event: string, data: unknown) => `event: ${event}\r\ndata: ${JSON.stringify(data)}\r\n\r\n`;
+    const initial = ': fixture raw comment\r\n\r\n'
+      + frame('message_start', { type: 'message_start', message: { id: 'msg_mock', type: 'message', role: 'assistant', content: [] } })
+      + frame('content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })
+      + frame('content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'visible now' } })
+      + frame('content_block_stop', { type: 'content_block_stop', index: 0 });
+    const toolStart = frame('content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'call_mock', name: 'echo', input: {} } });
+    const tail = frame('content_block_delta', { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"text":"fixture"}' } })
+      + frame('content_block_stop', { type: 'content_block_stop', index: 1 })
+      + frame('message_delta', { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 1 } })
+      + frame('message_stop', { type: 'message_stop' });
+    const release = Promise.withResolvers<void>();
+    const base = await mockServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.write(initial + toolStart);
+      void release.promise.then(() => response.end(tail));
+    });
+    const response = await createApp(config(base)).request('/cc/v1/messages', {
+      method: 'POST', headers: credentials, body: '{"model":"mock","stream":true,"messages":[]}',
+    });
+    const reader = response.body!.getReader();
+    const chunks: Uint8Array[] = [];
+    let visible = '';
+    try {
+      while (!visible.includes('visible now')) {
+        const chunk = await reader.read();
+        expect(chunk.done).toBe(false);
+        chunks.push(chunk.value!);
+        visible += new TextDecoder().decode(chunk.value);
+      }
+      expect(visible).not.toContain('call_mock');
+    } finally {
+      release.resolve();
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        chunks.push(chunk.value);
+      }
+      reader.releaseLock();
+    }
+    expect(Buffer.concat(chunks)).toEqual(Buffer.from(initial + toolStart + tail));
+  });
+
+  it.each([undefined, 'application/octet-stream', 'text/plain'])('rejects generation MIME bypass before releasing tool bytes: %s', async (contentType) => {
+    const base = await mockServer((_request, response) => {
+      if (contentType) response.setHeader('content-type', contentType);
+      response.end('{"type":"message","content":[{"type":"tool_use","id":"must_not_escape","name":"echo","input":{}}]}');
+    });
+    const response = await createApp(config(base)).request('/cc/v1/messages', {
+      method: 'POST', headers: credentials, body: '{"model":"mock","messages":[]}',
+    });
+    expect(response.status).toBe(502);
+    expect(await response.text()).not.toContain('must_not_escape');
+  });
+
+  it.each([
+    ['POST', '/v1/messages/count_tokens', 200, 'application/json'],
+    ['POST', '/unknown', 200, 'application/json'],
+    ['GET', '/v1/messages', 200, 'application/json'],
+    ['POST', '/v1/messages', 429, 'application/json'],
+  ] as const)('leaves non-generation/error bodies opaque: %s %s %s %s', async (method, path, status, contentType) => {
+    // Deliberately invalid as a Messages tool response: interception would fail.
+    const bytes = Buffer.from('{"type":"error","content":[{"type":"tool_use","id":"broken"}]}\r\n');
+    const base = await mockServer((_request, response) => {
+      response.writeHead(status, { 'content-type': contentType });
+      response.end(bytes);
+    });
+    const response = await createApp(config(base)).request(`/cc${path}`, {
+      method, headers: credentials, ...(method === 'POST' ? { body: '{}' } : {}),
+    });
+    expect(response.status).toBe(status);
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(bytes);
   });
 });
 
