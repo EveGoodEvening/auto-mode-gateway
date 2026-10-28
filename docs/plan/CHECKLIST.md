@@ -1,4 +1,4 @@
-用户目标和全部原任务、外部验收保留；独立评审后的安全语义澄清明确写入下文，不再声称行为完全不变。计划最终评审已通过；P0-1 的 C01 本地 gate 已由主协调者验证，P0-2 及其余完整验收仍 pending。C01 实现评审修正与重新评审仍 pending，执行顺序与证据门禁见 [PROGRESS.md](PROGRESS.md)。
+全部原任务与外部验收保留，安全语义澄清见下文。计划评审通过；P0-1 已验证，C01 修正已落地且修正后 gate 全通过，安全复审 CLEAN，最终记账复审进行中。P0-2 及其余验收未完成；顺序与证据见 [PROGRESS.md](PROGRESS.md)。
 
 # Todo List
 
@@ -24,7 +24,7 @@
   - 位置：仓库根目录。
   - 完成标准：`npm run typecheck`、`npm test`（空测试）、`npm run build` 均通过；`node dist/cli/index.js --version` 输出版本。
   - C01 parent-reported verification (2026-10-28, local no-secret bootstrap): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test` (explicit bootstrap empty suite), `npm run build`, `node dist/cli/index.js --version` (`0.1.0`) and `node dist/cli/index.js --help` all exit 0. Actual pins: TypeScript 5.9.3, eventsource-parser 3.1.1, tsup 8.5.0 (replaces initial 9.0.0 after published declaration defects); Node `^24.11.0 || >=26.0.0`.
-  - Draft commit `98c1970`; independent reviews `agent://c01-review-1` and `agent://c01-review-2` found installer-floor/staged-eval/accounting corrections. Active fix sets npm `>=12.0.0` with engine enforcement; post-fix parent gate and independent re-review are forthcoming, not verified. C01 final sign-off remains pending; P0-2 is not covered by P0-1 evidence.
+  - Draft `98c1970`; green review-fix commit `e8f5f15` enforces npm `>=12.0.0`. Parent post-fix install/typecheck/lint/empty-test/build/version/help all exited 0. Independent re-review underway; final C01 sign-off pending. P0-2 remains uncovered.
   - `eval` script is staged and intentionally unavailable until C12 implements/registers the real command. It is not counted as a working or verified script; no eval/packed-tarball acceptance is claimed. Remove bootstrap `--passWithNoTests` in C02 when tests are introduced.
 
 - [ ] P0-2 配置 schema 与加载器
