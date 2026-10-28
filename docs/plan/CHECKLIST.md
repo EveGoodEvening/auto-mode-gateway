@@ -19,10 +19,11 @@
 
 ### Phase 0：脚手架
 
-- [ ] P0-1 初始化仓库与工具链
+- [x] P0-1 初始化仓库与工具链
   - 创建 `package.json`（`"type":"module"`，`engines.node >=24`，bin `auto-mode-proxy` → `dist/cli/index.js`，scripts：`dev`、`build`、`test`、`typecheck`、`lint`、`eval`）、`tsconfig.json`（ES2024、NodeNext、strict）、`tsup.config.ts`、`vitest.config.ts`、`.gitignore`、`LICENSE`（MIT）、`.editorconfig`。依赖：`hono`、`@hono/node-server`、`zod`、`yaml`、`pino`、`eventsource-parser`、`shell-quote`、`partial-json`、`commander`、`@inquirer/prompts`；dev：`typescript`、`tsx`、`tsup`、`vitest`、`@types/node`、`@types/shell-quote`、`eslint` + typescript-eslint。安装时取当前稳定版并把版本与 eventsource-parser v3 的 `createParser({ onEvent })` 用法记入 `AGENTS.md` Lessons。
   - 位置：仓库根目录。
   - 完成标准：`npm run typecheck`、`npm test`（空测试）、`npm run build` 均通过；`node dist/cli/index.js --version` 输出版本。
+  - C01 verification: `npm ci`, `npm run typecheck`, `npm run lint`, `npm test` (explicit bootstrap empty suite), `npm run build`, CLI `--version` (`0.1.0`) and `--help` all exit 0. tsup 8.5.0 selected after published tsup 9/8.5.1 declaration defects; exact versions/Node floor in AGENTS. Independent chunk review pending.
 
 - [ ] P0-2 配置 schema 与加载器
   - 用 zod 定义 `Config`：`listen{host,port}`、`auth{mode:"vault"|"passthrough", client_tokens[]}`、`routes[]{prefix, protocol:"anthropic-messages"|"openai-responses"|"openai-chat", upstream, project_dirs[]?, tool_map?}`、`upstreams{<id>:{base_url, api_key?, auth_header:"authorization"|"x-api-key"|"both", forward_safeguards:false, extra_headers?}}`、`gate{mode:"enforce"|"shadow", on_provider_failure:"block"|"allow", hold_keepalive_ms:5000, provider_timeout_ms:5000}`、`decision{chain[], providers{<id>:{kind:"systemone"|"openai-decisions", base_url, api_key, model, headers?, envelope?:"none"|"cloudflare", body_extra?}}, second_stage?{kind:"anthropic-messages", base_url, api_key, model, pin?}}`、`classifier_reroute{enabled, provider, model_map?}`、`audit{path, redact:true}`、`policy{thresholds, readonly_allow_extra[], hard_deny_extra[], sensitive_paths_extra[]}`、`log_level`。实现 `${ENV}` 插值（缺失变量报错并指出键路径）、默认值、`passthrough` 且非 loopback 监听时报错。
