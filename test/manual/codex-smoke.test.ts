@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
-import { CODEX_ALLOW_PROBE, CODEX_PROBE, admitCodexFixtureArrival, codexProbeScene, isCanonicalCodexFixtureRequest, observeCodexExecutions, observeCodexReplay, withCodexRunDeadline, type CodexCapture, type CodexExecutionEvent, type CodexRecordedRequest } from './codex-smoke.js';
+import { createHash } from 'node:crypto';
+import { appendFileSync, renameSync, truncateSync, writeFileSync } from 'node:fs';
+import { appendFile, link, mkdir, mkdtemp, readFile, rename, rm, symlink, truncate, unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { CODEX_ALLOW_PROBE, CODEX_PROBE, admitCodexFixtureArrival, codexProbeScene, isCanonicalCodexFixtureRequest, observeCodexExecutions, observeCodexReplay, readCodexNativeUsers, withCodexRunDeadline, type CodexCapture, type CodexExecutionEvent, type CodexNativeScope, type CodexRecordedRequest } from './codex-smoke.js';
 
 function fixture(control: 'deny' | 'mixed' = 'deny', lite = false) {
   const declaration = { type: 'function', name: 'exec_command', parameters: { type: 'object', properties: { cmd: { type: 'string' } }, required: ['cmd'], additionalProperties: false } };
@@ -20,6 +25,67 @@ function fixture(control: 'deny' | 'mixed' = 'deny', lite = false) {
   if (positiveItem) replay.push({ type: 'function_call_output', call_id: positiveItem.call_id, output: 'Chunk ID: owned\nWall time: 0.0010 seconds\nProcess exited with code 0\nOutput:\nAMP_CODEX_ALLOW_PROBE' });
   const next: CodexRecordedRequest = { ...request, arrivalId: 'arrival_next', arrivalOrder: 1, body: { ...request.body, input: replay } };
   return { requests: [request, next], capture, output, replay, offset: prefix.length };
+}
+
+const nativeDirectories = new Set<string>();
+const NATIVE_BIRTH_ID = 'msg_22222222-2222-7222-8222-222222222222';
+const INTERNAL_USER_ID = '44444444-4444-7444-8444-444444444444';
+afterEach(async () => { for (const directory of nativeDirectories) await rm(directory, { recursive: true, force: true }); nativeDirectories.clear(); });
+
+async function nativeFixture() {
+  const directory = await mkdtemp(join(tmpdir(), 'amp-native-identity-test-'));
+  nativeDirectories.add(directory);
+  const threadId = '11111111-1111-7111-8111-111111111111';
+  const firstTurnId = '11111111-1111-7111-8111-111111111112';
+  const turnId = '11111111-1111-7111-8111-111111111113';
+  const prompt = 'AMP_NORMAL_2: reply with a short text only. Do not execute tools.';
+  const sessions = join(directory, 'home', '.codex', 'sessions');
+  const sessionDirectory = join(sessions, '2026', '10', '28');
+  await mkdir(sessionDirectory, { recursive: true });
+  await mkdir(join(directory, 'workspace'));
+  const path = join(sessionDirectory, `rollout-inert-${threadId}.jsonl`);
+  const scope: CodexNativeScope = { directory, threadId, model: 'fixture-direct-model', provider: 'amp', mode: '--yolo', turnCount: 2,
+    expected: [{ probeId: 'call_probe', requestId: 'arrival_source', turnOrdinal: 2, prompt }] };
+  type NativeRecord = { type: string; payload: Record<string, unknown> };
+  const meta: NativeRecord = { type: 'session_meta', payload: { id: threadId, session_id: threadId, cli_version: '0.164.0', source: 'exec', originator: 'codex_exec', model_provider: scope.provider, cwd: join(directory, 'workspace') } };
+  const task: NativeRecord = { type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } };
+  const context: NativeRecord = { type: 'turn_context', payload: { turn_id: turnId, cwd: join(directory, 'workspace'), model: scope.model, approval_policy: 'never', approvals_reviewer: 'user' } };
+  const input: NativeRecord = { type: 'response_item', payload: { type: 'message', id: NATIVE_BIRTH_ID, role: 'user', content: [{ type: 'input_text', text: prompt }], internal_chat_message_metadata_passthrough: { turn_id: turnId, create_time: 1 } } };
+  const userEvent: NativeRecord = { type: 'event_msg', payload: { type: 'item_completed', thread_id: threadId, turn_id: turnId,
+    item: { type: 'UserMessage', id: INTERNAL_USER_ID, content: [{ type: 'text', text: prompt, text_elements: [] }] } } };
+  const modelOutput: NativeRecord = { type: 'response_item', payload: { type: 'message', id: 'msg_native_output', role: 'assistant', content: [{ type: 'output_text', text: 'inert' }] } };
+  const records: NativeRecord[] = [meta,
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: firstTurnId } },
+    { type: 'turn_context', payload: { turn_id: firstTurnId } },
+    { type: 'response_item', payload: { type: 'message', id: 'msg_native_prior', role: 'assistant', content: [] } },
+    task, context, input, userEvent, modelOutput,
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: turnId } },
+  ];
+  const save = async () => { const raw = records.map((record) => JSON.stringify(record)).join('\n') + '\n'; await writeFile(path, raw, { mode: 0o600 }); return raw; };
+  await save();
+  return { directory, sessions, sessionDirectory, path, scope, records, meta, task, context, input, userEvent, modelOutput, save };
+}
+
+function nativeWireFixture(scope: CodexNativeScope) {
+  const result = fixture();
+  result.capture.expectedNextTurnPrompt = 'AMP_NORMAL_2: reply with a short text only. Do not execute tools.';
+  for (const request of result.requests) {
+    request.body.model = scope.model;
+    request.headers.set('thread-id', scope.threadId); request.headers.set('session-id', scope.threadId);
+  }
+  const content: Record<string, unknown>[] = [{ type: 'input_text', text: 'AMP_NORMAL_2: reply with a short text only. Do not execute tools.' }];
+  const user: Record<string, unknown> = { type: 'message', id: NATIVE_BIRTH_ID, role: 'user', content };
+  result.replay.push(user);
+  return { ...result, user, content };
+}
+
+async function loadNative(scope: CodexNativeScope, alreadyCaptured = 0) {
+  let charged = alreadyCaptured;
+  const identities = await withCodexRunDeadline((run) => readCodexNativeUsers(scope, run, (bytes) => {
+    if (bytes > 8 * 1024 * 1024 - charged) throw new Error('Shared capture bound');
+    charged += bytes;
+  }));
+  return { identities, charged };
 }
 
 describe('installed Codex replay evidence boundaries', () => {
@@ -64,17 +130,18 @@ describe('installed Codex replay evidence boundaries', () => {
       expect(observeCodexReplay(requests, capture).passed, tail).toBe(false);
     }
   });
-  it('accepts only the explicitly expected next normal-turn user item after denial', () => {
-    const { requests, capture, replay } = fixture();
-    capture.expectedNextTurnPrompt = 'AMP_NORMAL_2: reply with a short text only. Do not execute tools.';
-    const user = { type: 'message', role: 'user', content: [{ type: 'input_text', text: capture.expectedNextTurnPrompt }] };
-    replay.push(user);
-    expect(observeCodexReplay(requests, capture).passed).toBe(true);
-    user.content[0]!.text = 'different prompt';
+  it('accepts only the independently bound exact next normal-turn user item after denial', async () => {
+    const native = await nativeFixture();
+    const { identities } = await loadNative(native.scope);
+    const { requests, capture, replay, user, content } = nativeWireFixture(native.scope);
+    const identity = identities.get(capture.probeId);
     expect(observeCodexReplay(requests, capture).passed).toBe(false);
-    user.content[0]!.text = capture.expectedNextTurnPrompt;
+    expect(observeCodexReplay(requests, capture, identity).passed).toBe(true);
+    content[0]!.text = 'different prompt';
+    expect(observeCodexReplay(requests, capture, identity).passed).toBe(false);
+    content[0]!.text = capture.expectedNextTurnPrompt;
     replay.push(structuredClone(user));
-    expect(observeCodexReplay(requests, capture).passed).toBe(false);
+    expect(observeCodexReplay(requests, capture, identity).passed).toBe(false);
   });
   it('does not accept a next-turn user tail for a positive-result continuation', () => {
     const { requests, capture, replay } = fixture('mixed');
@@ -272,6 +339,185 @@ describe('installed Codex replay evidence boundaries', () => {
     if (failure === 'empty-id') event.item.id = '';
     if (failure === 'missing') events.length = 0;
     expect(observeCodexExecutions(events, '/bin/bash').passed).toBe(false);
+  });
+});
+
+describe('native identity production reader', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('controlled FILE-I/O smoke binds producer identity and hashes the exact parsed native bytes', async () => {
+    const native = await nativeFixture();
+    native.modelOutput.payload.content = [{ type: 'output_text', text: 'inert '.repeat(12 * 1024) }];
+    await native.save();
+    const original = await readFile(native.path);
+    const { identities, charged } = await loadNative(native.scope);
+    const identity = identities.get('call_probe');
+    expect(identity?.inputId).toBe(NATIVE_BIRTH_ID);
+    expect(identity?.inputId).not.toBe(INTERNAL_USER_ID);
+    expect(identity?.source).toEqual({ path: native.path, bytes: original.byteLength, sha256: createHash('sha256').update(original).digest('hex') });
+    expect(identity!.taskRecordIndex < identity!.contextRecordIndex && identity!.contextRecordIndex < identity!.inputRecordIndex && identity!.inputRecordIndex < identity!.userEventRecordIndex).toBe(true);
+    expect(charged).toBeGreaterThan(original.byteLength);
+    expect(await readFile(native.path)).toEqual(original);
+    const wire = nativeWireFixture(native.scope);
+    expect(observeCodexReplay(wire.requests, wire.capture, identity).passed).toBe(true);
+  });
+
+  it.each(['session-thread', 'session-provider', 'session-cwd', 'session-version', 'missing-session', 'duplicate-session', 'context-turn', 'context-model', 'context-cwd', 'context-mode', 'duplicate-context', 'missing-input', 'wrong-prompt', 'wrong-user-metadata', 'wrong-ui-thread', 'wrong-ui-turn', 'wrong-ui-prompt', 'wrong-ui-kind', 'missing-ui', 'duplicate-ui', 'duplicate-input', 'duplicate-input-new-id', 'id-collision', 'input-after-ui', 'model-before-input', 'relay-shaped-late-user', 'malformed-birth-id'] as const)('fails closed for native lineage/provenance: %s', async (failure) => {
+    const native = await nativeFixture();
+    if (failure === 'session-thread') native.meta.payload.id = '99999999-9999-7999-8999-999999999999';
+    if (failure === 'session-provider') native.meta.payload.model_provider = 'other';
+    if (failure === 'session-cwd') native.meta.payload.cwd = '/outside-owned-workspace';
+    if (failure === 'session-version') native.meta.payload.cli_version = 'unverified';
+    if (failure === 'missing-session') native.records.splice(native.records.indexOf(native.meta), 1);
+    if (failure === 'duplicate-session') native.records.push(structuredClone(native.meta));
+    if (failure === 'context-turn') native.context.payload.turn_id = '99999999-9999-7999-8999-999999999999';
+    if (failure === 'context-model') native.context.payload.model = 'other';
+    if (failure === 'context-cwd') native.context.payload.cwd = '/outside-owned-workspace';
+    if (failure === 'context-mode') native.context.payload.approval_policy = 'on-request';
+    if (failure === 'duplicate-context') native.records.splice(native.records.indexOf(native.context), 0, structuredClone(native.context));
+    if (failure === 'missing-input') native.records.splice(native.records.indexOf(native.input), 1);
+    if (failure === 'wrong-prompt') native.input.payload.content = [{ type: 'input_text', text: 'other' }];
+    if (failure === 'wrong-user-metadata') native.input.payload.internal_chat_message_metadata_passthrough = { turn_id: '99999999-9999-7999-8999-999999999999' };
+    if (failure === 'wrong-ui-thread') native.userEvent.payload.thread_id = '99999999-9999-7999-8999-999999999999';
+    if (failure === 'wrong-ui-turn') native.userEvent.payload.turn_id = '99999999-9999-7999-8999-999999999999';
+    if (failure === 'wrong-ui-prompt' || failure === 'wrong-ui-kind') native.userEvent.payload.item = { type: failure === 'wrong-ui-kind' ? 'AgentMessage' : 'UserMessage', id: INTERNAL_USER_ID, content: [{ type: 'text', text: 'other', text_elements: [] }] };
+    if (failure === 'missing-ui') native.records.splice(native.records.indexOf(native.userEvent), 1);
+    if (failure === 'duplicate-ui') native.records.splice(native.records.indexOf(native.userEvent), 0, structuredClone(native.userEvent));
+    if (failure === 'duplicate-input' || failure === 'duplicate-input-new-id') {
+      const duplicate = structuredClone(native.input);
+      if (failure === 'duplicate-input-new-id') duplicate.payload.id = 'msg_66666666-6666-7666-8666-666666666666';
+      native.records.push(duplicate);
+    }
+    if (failure === 'id-collision') native.modelOutput.payload.id = NATIVE_BIRTH_ID;
+    if (failure === 'input-after-ui') {
+      native.records.splice(native.records.indexOf(native.input), 1);
+      native.records.push(native.input);
+    }
+    if (failure === 'model-before-input') native.records.splice(native.records.indexOf(native.input), 0, structuredClone(native.modelOutput));
+    if (failure === 'relay-shaped-late-user') {
+      native.records.splice(native.records.indexOf(native.input), 1);
+      native.records.splice(native.records.indexOf(native.userEvent), 1);
+      native.records.push(native.input, native.userEvent);
+    }
+    if (failure === 'malformed-birth-id') native.input.payload.id = 'msg_not_a_native_uuid';
+    await native.save();
+    await expect(loadNative(native.scope)).rejects.toThrow();
+  });
+
+  it.each(['late-ui', 'late-context', 'same-prompt-other-turn'] as const)('rejects ambiguity discovered after the valid input window: %s', async (failure) => {
+    const native = await nativeFixture();
+    native.scope.turnCount = 3;
+    const otherTurn = '77777777-7777-7777-8777-777777777777';
+    native.records.push({ type: 'event_msg', payload: { type: 'task_started', turn_id: otherTurn } }, { type: 'turn_context', payload: { turn_id: otherTurn } });
+    if (failure === 'late-context') native.records.push(structuredClone(native.context));
+    else {
+      const duplicate = structuredClone(native.userEvent);
+      if (failure === 'same-prompt-other-turn') duplicate.payload.turn_id = otherTurn;
+      native.records.push(duplicate);
+    }
+    await native.save();
+    await expect(loadNative(native.scope)).rejects.toThrow();
+  });
+
+  it.each(['duplicate-plan', 'wrong-planned-turn', 'wrong-planned-prompt', 'wrong-owned-thread'] as const)('rejects inconsistent independently supplied provenance: %s', async (failure) => {
+    const native = await nativeFixture();
+    if (failure === 'duplicate-plan') native.scope.expected = [native.scope.expected[0]!, { ...native.scope.expected[0]! }];
+    if (failure === 'wrong-planned-turn') native.scope.expected[0]!.turnOrdinal = 1;
+    if (failure === 'wrong-planned-prompt') native.scope.expected[0]!.prompt = 'copied or unrelated prompt';
+    if (failure === 'wrong-owned-thread') native.scope.threadId = '99999999-9999-7999-8999-999999999999';
+    await expect(loadNative(native.scope)).rejects.toThrow();
+  });
+
+  it('never treats a prompt-only caller as native identity even when its user tail is missing', async () => {
+    const native = await nativeFixture();
+    const wire = nativeWireFixture(native.scope);
+    wire.replay.pop();
+    expect(observeCodexReplay(wire.requests, wire.capture).passed).toBe(false);
+  });
+
+  it('allows non-model native control interleaving without assuming adjacent record indices', async () => {
+    const native = await nativeFixture();
+    native.records.splice(native.records.indexOf(native.userEvent), 0, { type: 'event_msg', payload: { type: 'token_count' } });
+    await native.save();
+    const { identities } = await loadNative(native.scope);
+    const identity = identities.get('call_probe')!;
+    expect(identity.userEventRecordIndex - identity.inputRecordIndex).toBeGreaterThan(1);
+    expect(identity.inputId).toBe(NATIVE_BIRTH_ID);
+  });
+
+  it.each(['wire-id', 'missing-wire-id', 'missing-tail', 'prefix-id', 'done-id', 'extra-wire-field', 'changed-prompt', 'extra-part', 'extra-message', 'extra-reasoning', 'extra-developer', 'duplicate-tail', 'prefix-collision', 'wrong-thread-header', 'wrong-model', 'forged-proof', 'forged-source-hash'] as const)('preserves complete wire identity/content/count checks: %s', async (failure) => {
+    const native = await nativeFixture();
+    const { identities } = await loadNative(native.scope);
+    const wire = nativeWireFixture(native.scope);
+    let identity = identities.get(wire.capture.probeId)!;
+    if (failure === 'wire-id') wire.user.id = 'msg_66666666-6666-7666-8666-666666666666';
+    if (failure === 'missing-wire-id') delete wire.user.id;
+    if (failure === 'missing-tail') wire.replay.pop();
+    if (failure === 'prefix-id') wire.replay[0]!.id = 'msg_changed_prefix';
+    if (failure === 'done-id') wire.replay[wire.offset]!.id = 'msg_changed_done';
+    if (failure === 'extra-wire-field') wire.user.status = 'completed';
+    if (failure === 'changed-prompt') wire.content[0]!.text = 'other';
+    if (failure === 'extra-part') wire.content.push({ type: 'input_text', text: 'extra' });
+    if (failure === 'extra-message') wire.replay.push({ type: 'message', role: 'assistant', content: [] });
+    if (failure === 'extra-reasoning') wire.replay.push({ type: 'reasoning', summary: [] });
+    if (failure === 'extra-developer') wire.replay.push({ type: 'message', role: 'developer', content: [] });
+    if (failure === 'duplicate-tail') wire.replay.push(structuredClone(wire.user));
+    if (failure === 'prefix-collision') {
+      (wire.requests[0]!.body.input as Record<string, unknown>[])[0]!.id = NATIVE_BIRTH_ID;
+      wire.replay[0]!.id = NATIVE_BIRTH_ID;
+    }
+    if (failure === 'wrong-thread-header') wire.requests[1]!.headers.set('thread-id', '99999999-9999-7999-8999-999999999999');
+    if (failure === 'wrong-model') wire.requests[1]!.body.model = 'other';
+    if (failure === 'forged-proof') identity = { ...identity };
+    if (failure === 'forged-source-hash') identity = { ...identity, source: { ...identity.source, sha256: 'untrusted' } };
+    expect(observeCodexReplay(wire.requests, wire.capture, identity).passed).toBe(false);
+  });
+
+  it.each(['missing-file', 'duplicate-file', 'file-link', 'directory-link', 'hard-link', 'path-traversal', 'too-many-entries', 'file-cap', 'shared-cap', 'truncated-record', 'malformed-json', 'invalid-utf8', 'changed-size', 'changed-path', 'mid-read-truncation'] as const)('confines and bounds actual native FILE-I/O: %s', async (failure) => {
+    const native = await nativeFixture();
+    const original = await readFile(native.path);
+    let scope = native.scope;
+    if (failure === 'missing-file') await unlink(native.path);
+    if (failure === 'duplicate-file') await writeFile(join(native.sessionDirectory, `rollout-duplicate-${scope.threadId}.jsonl`), original);
+    if (failure === 'file-link' || failure === 'directory-link' || failure === 'hard-link') {
+      const outside = await mkdtemp(join(tmpdir(), 'amp-native-outside-test-')); nativeDirectories.add(outside);
+      const outsideFile = join(outside, 'outside.jsonl'); await writeFile(outsideFile, original);
+      if (failure === 'directory-link') {
+        await rename(native.sessions, join(native.directory, 'old-sessions'));
+        await symlink(outside, native.sessions, 'dir');
+      } else {
+        await unlink(native.path);
+        if (failure === 'file-link') await symlink(outsideFile, native.path);
+        else await link(outsideFile, native.path);
+      }
+    }
+    if (failure === 'path-traversal') scope = { ...scope, directory: scope.directory + '/.' };
+    if (failure === 'too-many-entries') for (let index = 0; index < 33; index++) await mkdir(join(native.sessions, String(5000 + index)));
+    if (failure === 'file-cap') await truncate(native.path, 8 * 1024 * 1024 + 1);
+    if (failure === 'truncated-record') await writeFile(native.path, original.subarray(0, original.length - 1));
+    if (failure === 'malformed-json') await appendFile(native.path, '{invalid}\n');
+    if (failure === 'invalid-utf8') await appendFile(native.path, Buffer.from([0xff, 10]));
+    if (failure === 'changed-size' || failure === 'changed-path' || failure === 'mid-read-truncation') {
+      await expect(withCodexRunDeadline((run) => readCodexNativeUsers(scope, run, (cost) => {
+        if (cost !== original.byteLength + 1) return;
+        if (failure === 'changed-size') appendFileSync(native.path, '{}\n');
+        if (failure === 'mid-read-truncation') truncateSync(native.path, 0);
+        if (failure === 'changed-path') { renameSync(native.path, native.path + '.old'); writeFileSync(native.path, original); }
+      }))).rejects.toThrow();
+    } else await expect(loadNative(scope, failure === 'shared-cap' ? 8 * 1024 * 1024 - 1 : 0)).rejects.toThrow();
+  });
+
+  it('aborts an owned real file before further read/parse and closes it on expiry', async () => {
+    const native = await nativeFixture();
+    const original = await readFile(native.path);
+    vi.useFakeTimers();
+    let expiredAtPreflight = false;
+    const result = withCodexRunDeadline((run) => readCodexNativeUsers(native.scope, run, (cost) => {
+      if (cost === original.byteLength + 1) { expiredAtPreflight = true; vi.advanceTimersByTime(240_000); }
+    }));
+    await expect(result).rejects.toThrow();
+    expect(expiredAtPreflight).toBe(true);
+    expect(await readFile(native.path)).toEqual(original);
   });
 });
 

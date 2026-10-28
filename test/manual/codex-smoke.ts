@@ -3,8 +3,9 @@
  * Finite gated launch: async:true, timeout:0. Not real-provider/Desktop evidence.
  */
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
+import { lstat, mkdir, mkdtemp, open, opendir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -26,6 +27,237 @@ export const CODEX_ALLOW_PROBE = 'printf AMP_CODEX_ALLOW_PROBE';
 const MAX_CAPTURE = 8 * 1024 * 1024;
 const RUN_TIMEOUT_MS = 240_000;
 const SHUTDOWN_TIMEOUT_MS = 5_000;
+const CODEX_FIXTURE_MODEL = 'gpt-5.5';
+
+export interface CodexNativeUserExpectation {
+  probeId: string;
+  requestId: string;
+  turnOrdinal: number;
+  prompt: string;
+}
+export interface CodexNativeScope {
+  directory: string;
+  threadId: string;
+  model: string;
+  provider: string;
+  mode: '--yolo' | '--approve-for-me';
+  turnCount: number;
+  expected: readonly CodexNativeUserExpectation[];
+}
+export interface CodexNativeUserIdentity extends CodexNativeUserExpectation {
+  readonly threadId: string;
+  readonly turnId: string;
+  readonly inputId: string;
+  readonly model: string;
+  readonly taskRecordIndex: number;
+  readonly contextRecordIndex: number;
+  readonly inputRecordIndex: number;
+  readonly userEventRecordIndex: number;
+  readonly source: Readonly<{ path: string; bytes: number; sha256: string }>;
+}
+const nativeIdentityProofs = new WeakSet<CodexNativeUserIdentity>();
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+const NATIVE_INPUT_ID = /^msg_[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+
+/** Independent producer evidence only: this API never receives candidate HTTP input. */
+export async function readCodexNativeUsers(scope: CodexNativeScope, run: CodexRunDeadline, chargeCapture: (bytes: number) => void): Promise<ReadonlyMap<string, CodexNativeUserIdentity>> {
+  const invalid = () => new Error('Native Codex input identity evidence invalid or unavailable');
+  run.check();
+  let charged = 0;
+  const charge = (bytes: number) => {
+    run.check();
+    if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > MAX_CAPTURE - charged) throw invalid();
+    chargeCapture(bytes); run.check(); charged += bytes;
+  };
+  if (!Array.isArray(scope.expected) || scope.expected.length > scope.turnCount) throw invalid();
+  charge((scope.directory.length + scope.model.length + scope.provider.length + scope.threadId.length) * 2 + 128);
+  if (!UUID.test(scope.threadId) || scope.directory !== resolve(scope.directory) || !scope.model || !scope.provider
+    || !Number.isSafeInteger(scope.turnCount) || scope.turnCount < 1 || scope.turnCount > 32
+    || !['--yolo', '--approve-for-me'].includes(scope.mode)) throw invalid();
+  const byOrdinal = new Map<number, CodexNativeUserExpectation>();
+  const probeIds = new Set<string>();
+  const requestIds = new Set<string>();
+  for (const expected of scope.expected) {
+    if (!expected.probeId || !expected.requestId || !Number.isSafeInteger(expected.turnOrdinal)
+      || expected.turnOrdinal < 1 || expected.turnOrdinal > scope.turnCount || expected.prompt !== normalTurnPrompt(expected.turnOrdinal)
+      || byOrdinal.has(expected.turnOrdinal) || probeIds.has(expected.probeId) || requestIds.has(expected.requestId)) throw invalid();
+    charge((expected.probeId.length + expected.requestId.length + expected.prompt.length) * 2 + 128);
+    byOrdinal.set(expected.turnOrdinal, expected); probeIds.add(expected.probeId); requestIds.add(expected.requestId);
+  }
+  if (byOrdinal.size === 0) return new Map();
+  const checkedDirectory = async (path: string) => {
+    const stat = await run.step(() => lstat(path));
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (typeof process.getuid === 'function' && stat.uid !== process.getuid())
+      || await run.step(() => realpath(path)) !== path) throw invalid();
+  };
+  const home = join(scope.directory, 'home');
+  const codexHome = join(home, '.codex');
+  const sessions = join(codexHome, 'sessions');
+  for (const path of [scope.directory, home, codexHome, sessions, join(scope.directory, 'workspace')]) await checkedDirectory(path);
+  const files: string[] = [];
+  let entries = 0;
+  const discover = async (directory: string, depth: number): Promise<void> => {
+    await checkedDirectory(directory);
+    const owned = await run.step(() => opendir(directory, { bufferSize: 1 }).then((handle) => {
+      let closing: Promise<void> | undefined;
+      const close = () => closing ??= handle.close();
+      return { handle, close, untrack: run.onShutdown(close) };
+    }));
+    try {
+      await checkedDirectory(directory);
+      while (true) {
+        const entry = await run.step(() => owned.handle.read());
+        if (!entry) break;
+        if (++entries > 32) throw invalid();
+        charge((directory.length + entry.name.length + 1) * 2 + 64);
+        const path = join(directory, entry.name);
+        const stat = await run.step(() => lstat(path));
+        if (stat.isSymbolicLink()) throw invalid();
+        if (stat.isDirectory()) {
+          if (depth >= 3 || !(depth === 0 ? /^\d{4}$/u : /^\d{2}$/u).test(entry.name)) throw invalid();
+          await discover(path, depth + 1);
+        } else if (stat.isFile() && depth === 3 && entry.name.startsWith('rollout-')
+          && entry.name.endsWith(`-${scope.threadId}.jsonl`)) files.push(path);
+        else throw invalid();
+      }
+    } finally {
+      const closing = run.observe(owned.close());
+      await run.step(() => closing);
+      owned.untrack();
+    }
+  };
+  await discover(sessions, 0);
+  // Finish discovery before accepting a file: another session is ambiguous.
+  if (files.length !== 1 || typeof constants.O_NOFOLLOW !== 'number') throw invalid();
+  const path = files[0]!;
+  if (await run.step(() => realpath(path)) !== path) throw invalid();
+  const owned = await run.step(() => open(path, constants.O_RDONLY | constants.O_NOFOLLOW).then((handle) => {
+    let closing: Promise<void> | undefined;
+    const close = () => closing ??= handle.close();
+    return { handle, close, untrack: run.onShutdown(close) };
+  }));
+  try {
+    const before = await run.step(() => owned.handle.stat());
+    const named = await run.step(() => lstat(path));
+    if (!before.isFile() || before.nlink !== 1 || named.isSymbolicLink() || named.ino !== before.ino || named.dev !== before.dev
+      || (typeof process.getuid === 'function' && before.uid !== process.getuid())
+      || !Number.isSafeInteger(before.size) || before.size < 1 || before.size > MAX_CAPTURE) throw invalid();
+    charge(before.size + 1);
+    const bytes = Buffer.alloc(before.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = Math.min(64 * 1024, bytes.length - offset);
+      const read = await run.step(() => owned.handle.read(bytes, offset, count, offset));
+      if (read.bytesRead === 0) throw invalid();
+      offset += read.bytesRead;
+    }
+    const extra = Buffer.alloc(1);
+    if ((await run.step(() => owned.handle.read(extra, 0, 1, bytes.length))).bytesRead !== 0) throw invalid();
+    const after = await run.step(() => owned.handle.stat());
+    const namedAfter = await run.step(() => lstat(path));
+    if (namedAfter.isSymbolicLink() || namedAfter.ino !== before.ino || namedAfter.dev !== before.dev
+      || await run.step(() => realpath(path)) !== path) throw invalid();
+    if (before.size !== after.size || before.ino !== after.ino || before.dev !== after.dev
+      || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || bytes.at(-1) !== 10
+      || (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf)) throw invalid();
+    const source = Object.freeze({ path, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') });
+    const responseIds = new Map<string, number>();
+    const promptCounts = new Map<number, number>();
+    const userEventPromptCounts = new Map<number, number>();
+    type InputTurn = { id: string; ordinal: number; task: number; context?: number; contexts: number; users: number; events: number; closed: boolean; input?: { id: string; index: number }; event?: number };
+    const turns = new Map<string, InputTurn>();
+    const bound = new Map<number, InputTurn>();
+    let active: InputTurn | undefined;
+    let sessionCount = 0;
+    let recordIndex = 0;
+    const decoder = new TextDecoder('utf-8', { fatal: true });
+    const matches = (value: unknown, prompt: string, event = false) => {
+      if (!Array.isArray(value) || value.length !== 1) return false;
+      const part = object(value[0]);
+      return part?.type === (event ? 'text' : 'input_text') && part.text === prompt
+        && Object.keys(part).length === (event ? 3 : 2)
+        && (!event || (Array.isArray(part.text_elements) && part.text_elements.length === 0));
+    };
+    for (let start = 0; start < bytes.length; recordIndex++) {
+      run.check();
+      const end = bytes.indexOf(10, start);
+      if (end <= start) throw invalid();
+      charge((end - start) * 3);
+      const value: unknown = JSON.parse(decoder.decode(bytes.subarray(start, end)));
+      start = end + 1;
+      const record = object(value);
+      const payload = object(record?.payload);
+      if (typeof record?.type !== 'string' || !payload) throw invalid();
+      if (record.type === 'session_meta') {
+        sessionCount++;
+        if (sessionCount !== 1 || payload.id !== scope.threadId
+          || payload.source !== 'exec' || payload.originator !== 'codex_exec' || payload.cli_version !== '0.164.0'
+          || payload.model_provider !== scope.provider || payload.cwd !== join(scope.directory, 'workspace')) throw invalid();
+      } else if (record.type === 'event_msg' && payload.type === 'task_started') {
+        if (sessionCount !== 1 || typeof payload.turn_id !== 'string' || !UUID.test(payload.turn_id) || turns.has(payload.turn_id) || turns.size >= scope.turnCount) throw invalid();
+        active = { id: payload.turn_id, ordinal: turns.size + 1, task: recordIndex, contexts: 0, users: 0, events: 0, closed: false };
+        turns.set(active.id, active);
+        if (byOrdinal.has(active.ordinal)) bound.set(active.ordinal, active);
+      } else if (record.type === 'turn_context') {
+        const recordedTurn = typeof payload.turn_id === 'string' ? turns.get(payload.turn_id) : undefined;
+        if (recordedTurn && byOrdinal.has(recordedTurn.ordinal) && recordedTurn !== active) throw invalid();
+        if (active && byOrdinal.has(active.ordinal)) {
+          if (payload.turn_id !== active.id || ++active.contexts !== 1 || active.closed || payload.cwd !== join(scope.directory, 'workspace') || payload.model !== scope.model
+            || payload.approval_policy !== (scope.mode === '--yolo' ? 'never' : 'on-request')
+            || payload.approvals_reviewer !== (scope.mode === '--yolo' ? 'user' : 'auto_review')) throw invalid();
+          active.context = recordIndex;
+        }
+      } else if (record.type === 'response_item') {
+        if (payload.id !== undefined) {
+          if (typeof payload.id !== 'string' || payload.id.length === 0) throw invalid();
+          responseIds.set(payload.id, (responseIds.get(payload.id) ?? 0) + 1);
+        }
+        if (payload.type === 'message' && payload.role === 'user') {
+          for (const expected of scope.expected) if (matches(payload.content, expected.prompt)) promptCounts.set(expected.turnOrdinal, (promptCounts.get(expected.turnOrdinal) ?? 0) + 1);
+        }
+        const expected = active && byOrdinal.get(active.ordinal);
+        if (active && expected && !active.closed) {
+          // Accepted user input is persisted BEFORE the native UserMessage event,
+          // before any model output. A later relay-shaped user item cannot qualify.
+          const metadata = object(payload.internal_chat_message_metadata_passthrough);
+          if (active.context === undefined || ++active.users !== 1 || payload.type !== 'message' || payload.role !== 'user'
+            || !matches(payload.content, expected.prompt) || metadata?.turn_id !== active.id
+            || typeof payload.id !== 'string' || !NATIVE_INPUT_ID.test(payload.id)) throw invalid();
+          active.input = { id: payload.id, index: recordIndex };
+        }
+      } else if (record.type === 'event_msg' && payload.type === 'item_completed') {
+        const item = object(payload.item);
+        if (item?.type === 'UserMessage') for (const expected of scope.expected) {
+          if (matches(item.content, expected.prompt, true)) userEventPromptCounts.set(expected.turnOrdinal, (userEventPromptCounts.get(expected.turnOrdinal) ?? 0) + 1);
+        }
+        const turn = typeof payload.turn_id === 'string' ? turns.get(payload.turn_id) : undefined;
+        const expected = turn && byOrdinal.get(turn.ordinal);
+        if (turn && expected && item?.type === 'UserMessage') {
+          if (turn !== active || turn.closed || ++turn.events !== 1 || !turn.input || turn.context === undefined
+            || payload.thread_id !== scope.threadId || !matches(item.content, expected.prompt, true)
+            || typeof item.id !== 'string' || !UUID.test(item.id)) throw invalid();
+          turn.event = recordIndex; turn.closed = true;
+        } else if (active && byOrdinal.has(active.ordinal) && !active.closed) throw invalid();
+      }
+    }
+    if (sessionCount !== 1) throw invalid();
+    const result = new Map<string, CodexNativeUserIdentity>();
+    for (const expected of scope.expected) {
+      const turn = bound.get(expected.turnOrdinal);
+      if (!turn?.closed || !turn.input || turn.context === undefined || turn.event === undefined
+        || turn.contexts !== 1 || turn.users !== 1 || turn.events !== 1 || promptCounts.get(expected.turnOrdinal) !== 1 || userEventPromptCounts.get(expected.turnOrdinal) !== 1
+        || responseIds.get(turn.input.id) !== 1 || !(turn.task < turn.context && turn.context < turn.input.index && turn.input.index < turn.event)) throw invalid();
+      const identity: CodexNativeUserIdentity = Object.freeze({ ...expected, threadId: scope.threadId, turnId: turn.id, inputId: turn.input.id,
+        model: scope.model, taskRecordIndex: turn.task, contextRecordIndex: turn.context, inputRecordIndex: turn.input.index, userEventRecordIndex: turn.event, source });
+      nativeIdentityProofs.add(identity); result.set(expected.probeId, identity);
+    }
+    return result;
+  } finally {
+    const closing = run.observe(owned.close());
+    await run.step(() => closing);
+    owned.untrack();
+  }
+}
 
 export interface CodexRunDeadline {
   signal: AbortSignal;
@@ -165,7 +397,7 @@ function sameNativeReplayItem(expectedValue: unknown, actualValue: unknown): boo
 }
 
 /** Checks source completion order separately from original terminal indices. */
-export function observeCodexReplay(requests: readonly CodexRecordedRequest[], capture: CodexCapture): { passed: boolean; reason: string } {
+export function observeCodexReplay(requests: readonly CodexRecordedRequest[], capture: CodexCapture, nativeUser?: CodexNativeUserIdentity): { passed: boolean; reason: string } {
   if (!capture.captureComplete || capture.events.length === 0) return { passed: false, reason: 'missing_capture' };
   let sequence = -1;
   for (const event of capture.events) {
@@ -244,11 +476,18 @@ export function observeCodexReplay(requests: readonly CodexRecordedRequest[], ca
     }
   }
   const accounted = resultIndex + (positive ? 1 : 0);
+  if (capture.control === 'deny' && capture.expectedNextTurnPrompt !== undefined && (!nativeUser || !nativeIdentityProofs.has(nativeUser))) return { passed: false, reason: 'unaccounted_replay_tail' };
+  if (nativeUser && input.length === accounted) return { passed: false, reason: 'unaccounted_replay_tail' };
   if (input.length !== accounted) {
     const expectedPrompt = capture.expectedNextTurnPrompt;
-    const expectedUser = { type: 'message', role: 'user', content: [{ type: 'input_text', text: expectedPrompt }] };
     if (input.length !== accounted + 1 || capture.control !== 'deny' || typeof expectedPrompt !== 'string'
-      || canonical(input[accounted]) !== canonical(expectedUser)) return { passed: false, reason: 'unaccounted_replay_tail' };
+      || !nativeUser || !nativeIdentityProofs.has(nativeUser) || nativeUser.probeId !== capture.probeId
+      || nativeUser.requestId !== capture.requestId || nativeUser.prompt !== expectedPrompt
+      || original.body.model !== nativeUser.model || next.body.model !== nativeUser.model
+      || [original, next].some((request) => request.headers.get('thread-id') !== nativeUser.threadId || request.headers.get('session-id') !== nativeUser.threadId)
+      || [...previous, ...done.map((event) => event.item)].some((entry) => object(entry)?.id === nativeUser.inputId)) return { passed: false, reason: 'unaccounted_replay_tail' };
+    const expectedUser = { type: 'message', id: nativeUser.inputId, role: 'user', content: [{ type: 'input_text', text: expectedPrompt }] };
+    if (canonical(input[accounted]) !== canonical(expectedUser)) return { passed: false, reason: 'unaccounted_replay_tail' };
   }
   for (let index = 0; index < input.length; index++) {
     const entry = object(input[index]);
@@ -496,7 +735,7 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
       return response;
     });
     const gateway = await run.step(() => startLoopback(ingress).then(ownListener));
-    await run.step(() => writeFile(join(codexHome, 'config.toml'), `model = "gpt-5.5"\nmodel_provider = "amp"\n\n[agents]\nenabled = false\n\n[features]\nhooks = false\napps = false\nplugins = false\nmulti_agent = false\nmulti_agent_v2 = false\ncode_mode = false\ncode_mode_only = false\nenable_mcp_apps = false\nskill_search = false\n\n[model_providers.amp]\nname = "auto-mode-proxy"\nbase_url = "${gateway.url}/codex/v1"\nenv_key = "AMP_TOKEN"\nwire_api = "responses"\nsupports_websockets = false\n`, { mode: 0o600, signal: run.signal }));
+    await run.step(() => writeFile(join(codexHome, 'config.toml'), `model = "${CODEX_FIXTURE_MODEL}"\nmodel_provider = "amp"\n\n[agents]\nenabled = false\n\n[features]\nhooks = false\napps = false\nplugins = false\nmulti_agent = false\nmulti_agent_v2 = false\ncode_mode = false\ncode_mode_only = false\nenable_mcp_apps = false\nskill_search = false\n\n[model_providers.amp]\nname = "auto-mode-proxy"\nbase_url = "${gateway.url}/codex/v1"\nenv_key = "AMP_TOKEN"\nwire_api = "responses"\nsupports_websockets = false\n`, { mode: 0o600, signal: run.signal }));
     const turns = ['deny', 'normal', 'deny', 'normal', 'mixed', 'normal', 'normal', 'normal'] as const;
     const results: { kind: string; exitCode: number | null; completed: boolean }[] = [];
     for (const kind of turns) {
@@ -543,7 +782,24 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
       if (exitCode !== 0 || !completed || failed || timedOut || outputBoundHit || !threadId) break;
     }
     await run.step(() => proxy.flushAudit());
-    const replay = captures.map((capture) => observeCodexReplay(requests, capture));
+    let nativeUsers: ReadonlyMap<string, CodexNativeUserIdentity> = new Map();
+    let nativeIdentityFailed = false;
+    try {
+      const expected: CodexNativeUserExpectation[] = [];
+      for (const capture of captures) if (capture.control === 'deny') {
+        const ordinals = turns.flatMap((kind, index) => kind === 'normal' && normalTurnPrompt(index + 1) === capture.expectedNextTurnPrompt ? [index + 1] : []);
+        if (ordinals.length !== 1 || !capture.expectedNextTurnPrompt) throw new Error('Native turn plan unavailable');
+        expected.push({ probeId: capture.probeId, requestId: capture.requestId, turnOrdinal: ordinals[0]!, prompt: capture.expectedNextTurnPrompt });
+      }
+      if (expected.length > 0) {
+        if (!threadId) throw new Error('Native thread unavailable');
+        nativeUsers = await readCodexNativeUsers({ directory, threadId, model: CODEX_FIXTURE_MODEL, provider: 'amp', mode, turnCount: turns.length, expected }, run, (cost) => {
+          if (cost > MAX_CAPTURE - bytes) throw new Error('Manual capture bound');
+          bytes += cost;
+        });
+      }
+    } catch { run.check(); nativeIdentityFailed = true; }
+    const replay = captures.map((capture) => observeCodexReplay(requests, capture, nativeUsers.get(capture.probeId)));
     const auditText = await run.step(() => readFile(join(directory, 'audit.jsonl'), { encoding: 'utf8', signal: run.signal }).catch((error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') return '';
       throw error;
@@ -555,12 +811,12 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
       && positiveDecision.requests.length === 1 && positiveDecision.requests.every((request) => object(object(request.body.state)?.action)?.command === CODEX_ALLOW_PROBE);
     const executionProof = observeCodexExecutions(executions, userInfo().shell);
     const evidence = { mode, turns: results, originalRequestCount: requests.length, deniedCaptures: captures.filter((capture) => capture.control !== 'allow').length, positiveCaptures: captures.filter((capture) => capture.positiveItem !== undefined).length,
-      replay, captureFailed, timedOut, outputBoundHit, unsupportedRequests, executionProof, negativeDecisionRequests: decision.requests.length, positiveDecisionRequests: positiveDecision.requests.length, fixedDecisionPayloads, correlatedAuditBlocks: denialRecords.length, correlatedAuditAllows: positiveRecords.length,
+      replay, nativeIdentityFailed, nativeUserIdentityCount: nativeUsers.size, captureFailed, timedOut, outputBoundHit, unsupportedRequests, executionProof, negativeDecisionRequests: decision.requests.length, positiveDecisionRequests: positiveDecision.requests.length, fixedDecisionPayloads, correlatedAuditBlocks: denialRecords.length, correlatedAuditAllows: positiveRecords.length,
       passed: results.length === 8 && results.every((result) => result.completed && result.exitCode === 0) && results.filter((result) => result.kind === 'normal').length >= 5
         && captures.filter((capture) => capture.control !== 'allow').length === 3 && captures.filter((capture) => capture.positiveItem !== undefined).length === 1
-        && replay.every((result) => result.passed) && executionProof.passed && !captureFailed && !timedOut && !outputBoundHit && unsupportedRequests === 0 && denialRecords.length === 3 && positiveRecords.length === 1 && fixedDecisionPayloads };
+        && replay.every((result) => result.passed) && !nativeIdentityFailed && executionProof.passed && !captureFailed && !timedOut && !outputBoundHit && unsupportedRequests === 0 && denialRecords.length === 3 && positiveRecords.length === 1 && fixedDecisionPayloads };
     // All requests are private/mock-only. Never print source request/header/auth bodies.
-    await run.step(() => writeFile(join(directory, 'capture.json'), JSON.stringify({ requests: requests.map(({ headers, ...record }, index) => ({ ...record, headers: [...headers], rawBody: originalBodies[index] })), captures, executions, evidence }), { mode: 0o600, signal: run.signal }));
+    await run.step(() => writeFile(join(directory, 'capture.json'), JSON.stringify({ requests: requests.map(({ headers, ...record }, index) => ({ ...record, headers: [...headers], rawBody: originalBodies[index] })), captures, executions, nativeUserIdentities: [...nativeUsers.values()], evidence }), { mode: 0o600, signal: run.signal }));
     return evidence;
   } finally {
     // Initiate sockets first; the global shutdown bounds all outstanding joins.
