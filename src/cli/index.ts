@@ -2,6 +2,8 @@
 
 import { Command } from 'commander';
 import pkg from '../../package.json' with { type: 'json' };
+import { registerInitCommand } from './init.js';
+import { registerTokenCommand } from './token.js';
 
 const program = new Command();
 
@@ -10,4 +12,13 @@ program
   .description('A local proxy for agent tool-use safety decisions.')
   .version(pkg.version);
 
-program.parse();
+registerInitCommand(program);
+registerTokenCommand(program);
+
+try {
+  await program.parseAsync();
+} catch {
+  // Thrown errors may contain configuration values, credentials or prompt input.
+  process.stderr.write('Error: command failed. Check the command options and configuration.\n');
+  process.exitCode = 1;
+}
