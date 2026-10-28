@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import pkg from '../../package.json' with { type: 'json' };
 import { registerInitCommand } from './init.js';
 import { registerTokenCommand } from './token.js';
+import { registerServeCommand } from './serve.js';
 
 const program = new Command();
 
@@ -14,6 +15,7 @@ program
 
 registerInitCommand(program);
 registerTokenCommand(program);
+registerServeCommand(program);
 
 try {
   await program.parseAsync();

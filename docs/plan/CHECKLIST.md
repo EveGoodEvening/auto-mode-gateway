@@ -41,20 +41,21 @@
 
 ### Phase 1：直通代理与 Anthropic Messages 适配器
 
-- [ ] P1-1 Hono 应用、路由解析与健康端点
+- [x] P1-1 Hono 应用、路由解析与健康端点
   - 应用工厂 `createApp(config)`；按最长 `prefix` 匹配 route，剥去 prefix 后得到上游路径；无前缀时按路径推断协议（`/v1/messages*`、`/v1/responses`、`/v1/chat/completions`）；未知路径对该 route 的 upstream 字节级直通（含 `HEAD /api/hello`、`GET /v1/models`、`POST /v1/messages/count_tokens`）。`GET /healthz` 返回 200；`GET /_amp/status` 返回版本、运行时长、路由、提供方健康、allow/block/uncertain 计数（仅 loopback 或带管理 token 时可访问）。
   - 位置：`src/server/app.ts`、`src/server/router.ts`、`src/server/status.ts`。
   - 完成标准：单测覆盖前缀匹配与协议推断；未知路径直通测试通过。
 
-- [ ] P1-2 认证与凭证替换
+- [x] P1-2 认证与凭证替换
   - vault：从 `Authorization: Bearer` 或 `x-api-key` 取客户端 token，`timingSafeEqual` 比较；转发时按 upstream 的 `auth_header` 设置凭证，移除客户端凭证头。passthrough：原样转发凭证，仅当 `listen.host` 为 loopback 时允许启动。
   - 位置：`src/server/auth.ts`。
   - 完成标准：错误 token 返回 401（Anthropic 风格错误体 `{type:"error", error:{type:"authentication_error", message}}`）；单测覆盖两种模式与两种头。
 
-- [ ] P1-3 上游转发层
+- [x] P1-3 上游转发层
   - 用 Node 内置 `fetch` 转发：过滤 hop-by-hop 头（connection、keep-alive、transfer-encoding、te、trailer、upgrade、proxy-*、host、content-length），请求上游时加 `Accept-Encoding: identity`；保留 `anthropic-version`、`anthropic-beta`、`x-claude-code-*`、`x-codex-*` 等全部其他头；响应头原样回传（含 `retry-after`、限流头），错误体不改写；客户端断开时 `AbortController` 中止上游；上游超时与连接错误返回 502/504 并记录。请求体仅解析不修改时按原字节转发。
   - 位置：`src/server/upstream.ts`、`src/server/errors.ts`。
   - 完成标准：集成测试证明非流式 JSON 与 SSE 响应逐事件透传（无缓冲，首事件延迟 < 50 ms），客户端断开后上游请求被中止。
+  - C04 parent gates passed: typecheck/lint/test/build, 196 tests. Built serve launched against actual disposable loopback relay: health200, unauthorized401, authorized200, vault key replaced, `/v1/models` path and retry-after3 preserved; SIGTERM shutdown observed. Server suite covers first SSE event <50ms and disconnect cancellation. Independent review underway; this stage is explicitly unprotected transparent transport until gate integration.
 
 - [ ] P1-4 SSE 通用工具
   - 基于原始 frame 扫描 + eventsource-parser 语义解析的 TransformStream；保存 comment/CRLF/id/retry/多行 data 与未知事件原始字节，仅真正修改的事件重编码，不用 parse/reencode 冒充字节保真。处理跨 chunk 半行、背压/取消，并提供 pingKeepalive(intervalMs, format)。遵守响应缓冲/截止硬界限。
