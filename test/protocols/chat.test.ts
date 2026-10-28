@@ -2,9 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import scenes from '../fixtures/chat/scenes.json' with { type: 'json' };
 import { chatAdapter } from '../../src/protocols/openai-chat/adapter.js';
 import { transformChatStream } from '../../src/protocols/openai-chat/stream.js';
-import { MAX_TOOL_BYTES, record } from '../../src/protocols/openai-chat/safety.js';
+import { MAX_TOOL_BYTES, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES, record } from '../../src/protocols/openai-chat/safety.js';
 import type { AdapterOptions, RequestContext } from '../../src/protocols/types.js';
 import type { Verdict } from '../../src/gate/types.js';
+import { ResponseBudget } from '../../src/protocols/response-budget.js';
+import { createParser } from 'eventsource-parser';
 
 type Event = Record<string, unknown>;
 const encoder = new TextEncoder();
@@ -101,9 +103,61 @@ describe('Chat indexed execution boundary', () => {
     expect((await failure([chunk({ tool_calls: [tool()] }), chunk({}, 'tool_calls')], options(), false)).error).toBeDefined();
     await expect(new Response(transformChatStream(source('data: {"choices":'), context, options())).text()).rejects.toThrow();
   });
-  it('rejects per-tool oversize without releasing an executable fragment', async () => {
-    const result = await failure([chunk({ tool_calls: [tool('one', 0, ' '.repeat(MAX_TOOL_BYTES))] }), chunk({}, 'tool_calls')]);
-    expect(result.error).toBeDefined(); expect(result.text).not.toContain('tool_calls');
+  it.each([
+    { argumentBytes: MAX_TOOL_BYTES - 128, allowed: true },
+    { argumentBytes: MAX_TOOL_BYTES + 128, allowed: false },
+  ])('bounds assembled valid tool arguments at $argumentBytes bytes', async ({ argumentBytes, allowed }) => {
+    const emptyBytes = encoder.encode(JSON.stringify({ command: 'pwd', padding: '' })).byteLength;
+    const paddingBytes = argumentBytes - emptyBytes;
+    const padding = '界'.repeat(Math.floor(paddingBytes / 3)) + 'x'.repeat(paddingBytes % 3);
+    const args = JSON.stringify({ command: 'pwd', padding });
+    expect(encoder.encode(args).byteLength).toBe(argumentBytes);
+    const input: Event[] = [];
+    for (let offset = 0; offset < args.length; offset += 64 * 1024) {
+      const fragment = offset === 0 ? tool('one', 0, args.slice(offset, offset + 64 * 1024)) : { index: 0, function: { arguments: args.slice(offset, offset + 64 * 1024) } };
+      input.push(chunk({ tool_calls: [fragment] }));
+    }
+    const argumentFrames = input.length;
+    input.push(chunk({}, 'tool_calls'));
+    const frames = input.map(event => encoder.encode(wire([event], false)));
+    frames.push(encoder.encode('data: [DONE]\n\n'));
+    for (const frame of frames) expect(frame.byteLength).toBeLessThan(MAX_TOOL_BYTES);
+    let cursor = 0;
+    let cancelled = false;
+    const upstream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const frame = frames[cursor++];
+        if (frame) controller.enqueue(frame);
+        else controller.close();
+      },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 });
+    const config = options();
+    const reader = transformChatStream(upstream, context, config).getReader();
+    let text = '';
+    const pending = (async () => {
+      for (;;) {
+        const item = await reader.read();
+        if (item.done) return;
+        text += new TextDecoder().decode(item.value);
+      }
+    })();
+    if (allowed) {
+      await pending;
+      expect(config.onToolCall).toHaveBeenCalledOnce();
+      expect(config.onToolCall).toHaveBeenCalledWith(expect.objectContaining({ id: 'one', input: expect.objectContaining({ command: 'pwd' }) }), context, expect.any(AbortSignal));
+      expect(text).toBe(wire(input));
+      expect(cancelled).toBe(false);
+    } else {
+      await expect(pending).rejects.toThrow();
+      expect(cursor).toBe(argumentFrames);
+      expect(cancelled).toBe(true); expect(config.onToolCall).not.toHaveBeenCalled(); expect(text).not.toContain('"tool_calls"');
+    }
+  });
+  it('rejects an oversized individual SSE frame independently of tool arguments', async () => {
+    const config = options();
+    const result = await failure([chunk({ content: 'x'.repeat(MAX_TOOL_BYTES) }), chunk({}, 'stop')], config, true, 16_384);
+    expect(result.error).toBeDefined(); expect(result.text).toBe(''); expect(config.onToolCall).not.toHaveBeenCalled();
   });
   it('cancels pending upstream reads and a pending real decision', async () => {
     const decisionStarted = Promise.withResolvers<AbortSignal>(); const cancellation = new AbortController();
@@ -178,6 +232,95 @@ describe('Chat indexed execution boundary', () => {
     const rejected = expect(pending).rejects.toThrow();
     await vi.advanceTimersByTimeAsync(0); await started.promise;
     await vi.advanceTimersByTimeAsync(60_001); await rejected;
+  });
+  it.each(['reasoning', 'ordinary'])('reserves the actual %s classification before parsing', async kind => {
+    const budget = new ResponseBudget(MAX_RESPONSE_BYTES, MAX_REASONING_BYTES);
+    const reservations = vi.spyOn(budget, 'reserve');
+    const nativeParse = JSON.parse;
+    const chargesAtParse: (number | undefined)[] = [];
+    const parse = vi.spyOn(JSON, 'parse').mockImplementation((text: string) => {
+      if (text.length > 600_000) chargesAtParse.push(reservations.mock.calls.at(-1)?.[1]);
+      const value: unknown = nativeParse(text); return value;
+    });
+    try {
+      const first = chunk(kind === 'reasoning' ? { reasoning_content: 'r'.repeat(650_000) } : { content: 'x'.repeat(650_000) });
+      const input = [first, chunk({}, 'stop')];
+      const firstFrameBytes = encoder.encode(wire([first], false)).byteLength;
+      const pending = new Response(transformChatStream(source(wire(input), firstFrameBytes), context, options(), { budget })).text();
+      if (kind === 'reasoning') {
+        await expect(pending).rejects.toThrow(); expect(chargesAtParse).toEqual([]);
+      } else {
+        expect(await pending).toBe(wire(input)); expect(chargesAtParse).toEqual([0]);
+      }
+    } finally { parse.mockRestore(); reservations.mockRestore(); budget.close(); }
+  });
+  it('rewrites multiple held mixed frames while retaining charged serialized output', async () => {
+    const input = Array.from({ length: 16 }, (_, index) => ({
+      ...chunk({ content: `marker_${index}`, tool_calls: [index === 0 ? tool() : { index: 0, function: { arguments: '' } }] }),
+      metadata: 'x'.repeat(100_000),
+    }));
+    const config = options();
+    const text = await new Response(transformChatStream(source(wire([...input, chunk({}, 'tool_calls')]), 256 * 1024), context, config)).text();
+    expect(config.onToolCall).toHaveBeenCalledOnce();
+    const outgoing = deltas(text);
+    expect(outgoing.filter(delta => delta.tool_calls !== undefined)).toHaveLength(input.length);
+    for (let index = 0; index < input.length; index++) expect(outgoing.filter(delta => delta.content === `marker_${index}`)).toHaveLength(1);
+    expect(text.endsWith('data: [DONE]\n\n')).toBe(true);
+  });
+  it.each([false, true])('withholds authoritative early usage with tools=%s while preserving null placeholders', async withTools => {
+    const usage = { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 };
+    const feed = Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>();
+    const upstream = new ReadableStream<Uint8Array>({ start(controller) {
+      feed.resolve(controller);
+      controller.enqueue(encoder.encode(wire([{ ...chunk({ content: 'early usage text' }), usage }], false)));
+    } });
+    const controller = await feed.promise; const config = options();
+    const reader = transformChatStream(upstream, context, config).getReader();
+    const first = new TextDecoder().decode((await reader.read()).value);
+    expect(first).toContain('early usage text'); expect(events(first).some(value => value.usage != null)).toBe(false);
+    controller.enqueue(encoder.encode(wire([
+      { ...chunk({ content: 'null one' }), usage: null },
+      { choices: [], usage: null },
+      ...(withTools ? [chunk({ tool_calls: [tool()] })] : []),
+      chunk({}, withTools ? 'tool_calls' : 'stop'),
+    ]))); controller.close();
+    let text = first;
+    for (;;) { const item = await reader.read(); if (item.done) break; text += new TextDecoder().decode(item.value); }
+    reader.releaseLock();
+    const output = events(text);
+    expect(output.filter(value => value.usage != null)).toHaveLength(1);
+    const usageIndex = output.findIndex(value => value.usage != null);
+    const finishIndex = output.findIndex(value => Array.isArray(value.choices) && value.choices.some(choice => record(choice) && choice.finish_reason != null));
+    expect(usageIndex).toBeGreaterThanOrEqual(finishIndex);
+    expect(text.endsWith('data: [DONE]\n\n')).toBe(true);
+    expect(config.onToolCall).toHaveBeenCalledTimes(withTools ? 1 : 0);
+  });
+  it.each(['standalone', 'finish-attached'])('promptly cancels duplicate %s usage without waiting for EOF', async kind => {
+    const usage = { total_tokens: 3 };
+    const input = kind === 'standalone' ? [{ choices: [], usage }, { choices: [], usage }] : [chunk({ tool_calls: [tool()] }), { ...chunk({}, 'tool_calls'), usage }, { choices: [], usage }];
+    let cancelled = false;
+    const upstream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(encoder.encode(wire(input, false))); }, cancel() { cancelled = true; } });
+    const reader = transformChatStream(upstream, context, options()).getReader();
+    let text = '';
+    const pending = (async () => { for (;;) { const item = await reader.read(); if (item.done) return; text += new TextDecoder().decode(item.value); } })();
+    await expect(pending).rejects.toThrow();
+    expect(cancelled).toBe(true); expect(text).not.toContain('"tool_calls"'); expect(text).not.toContain('[DONE]');
+  });
+  it.each(['allow', 'partial', 'deny'])('preserves source SSE headers on deferred %s rewrites', async mode => {
+    const fragments = mode === 'partial' ? [tool('denied', 0), tool('allowed', 7)] : [tool(mode === 'deny' ? 'denied' : 'allowed')];
+    const upstream = `event: amp.tool\nid: mixed-${mode}\ndata: ${JSON.stringify(chunk({ content: 'immediate marker', tool_calls: fragments }))}\n\nevent: amp.finish\nid: finish-${mode}\ndata: ${JSON.stringify(chunk({}, 'tool_calls'))}\n\ndata: [DONE]\n\n`;
+    const config = { ...options(), onToolCall: async (call: { id: string }) => verdict(call.id === 'denied' ? 'block' : 'allow') };
+    const text = await new Response(transformChatStream(source(upstream), context, config)).text();
+    const decoded: { event: string | undefined; id: string | undefined; data: string }[] = [];
+    createParser({ onEvent(message) { decoded.push({ event: message.event, id: message.id, data: message.data }); } }).feed(text);
+    const executable = decoded.filter(message => message.data.includes('"tool_calls":['));
+    expect(executable).toHaveLength(mode === 'deny' ? 0 : 1);
+    for (const message of executable) { expect(message.event).toBe('amp.tool'); expect(message.id).toBe(`mixed-${mode}`); }
+    if (mode === 'deny') {
+      const terminal = decoded.find(message => message.data.includes('"finish_reason":"stop"'));
+      expect(terminal?.event).toBe('amp.finish'); expect(terminal?.id).toBe('finish-deny');
+    }
+    expect(deltas(text).filter(delta => delta.content === 'immediate marker')).toHaveLength(1);
   });
   it('keeps shadow byte-identical/nonblocking while observing hypothetical deny', async () => {
     const pending = Promise.withResolvers<Verdict>(); const observations: Promise<void>[] = [];

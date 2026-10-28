@@ -13,7 +13,7 @@ export function choiceOf(value: unknown, stream: boolean): Record<string, unknow
   if (!record(value) || !Array.isArray(value.choices)) throw new ChatResponseError('Invalid Chat choices');
   if (value.error != null || value.function_call != null || value.tool_calls != null) throw new ChatResponseError('Unsupported Chat execution shape');
   if (stream && value.choices.length === 0) {
-    if (!record(value.usage)) throw new ChatResponseError('Invalid Chat usage chunk');
+    if (!record(value.usage) && value.usage !== null) throw new ChatResponseError('Invalid Chat usage chunk');
     return undefined;
   }
   if (value.choices.length !== 1) throw new ChatResponseError('Unsupported Chat multiple choices');

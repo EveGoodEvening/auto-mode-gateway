@@ -240,7 +240,11 @@
   - 按 `choices[0].delta.tool_calls[].index` 聚合 `id`、`function.name`、`function.arguments`；扣留该 index 的 chunk 直到流末（`finish_reason` 出现）判定；allow 放出，block 丢弃并追加一个 `delta.content` 说明 chunk；若无剩余 tool_calls，`finish_reason` 由 `tool_calls` 改为 `stop`；透传 `reasoning_content`、`usage` chunk、`[DONE]`。非流式同步处理 `message.tool_calls` 与 `finish_reason`。
   - 位置：`src/protocols/openai-chat/{adapter,stream,nonstream}.ts`。
   - 完成标准：fixture 单测覆盖单/多 tool_calls、部分拦截、`reasoning_content` 透传、非流式。
-  - Own fixture/implementation criterion VERIFIED：父代理22:56:12 全量2214 tests/build/type/lint 通过，含 Chat fixtures/actual HTTP；独立10例 HTTP feature smoke 通过单/多/部分拦截、reasoning、nonstream、usage/[DONE] 与终态。此项不要求实际 WorkBuddy UI/模式/头；这些仍属于未勾选 P6-3。GREEN DRAFT，不等于独立评审或 C11 closure。
+  - Historical GREEN DRAFT exercised coverage：父代理22:56:12 全量2214 tests/build/type/lint 与10例 actual HTTP smoke 通过已覆盖的单/多/部分拦截、reasoning、nonstream、usage/[DONE]、终态案例。后续 SEC-001..004 静态发现使 P6-1 重新打开；这些旧通过不能证明新增 allocation/ownership/usage/header 边界。实际 WorkBuddy UI/模式/头仍独立属于未勾选 P6-3，不替代 P6-1 自身修复。
+  - [x] C11 R4/MATRIX001 独立 per-tool ≤1MiB 参数字节边界：父代理 TARGET946 有效 Unicode JSON、多帧各自低于 frame cap 的近界允许/累计超限与单独 frame cases 在 protocol+actualHTTP 均通过，matrix全36通过。保持同一参数字节 cap/断言，不借 frame/无效 JSON 代替 tool 边界。此局部 proof 不关闭 SEC-001..004 或恢复整体 P6-1/C11 green。
+    - Historical artifact942：matrix/overflow cases 通过，但两个 below1MiB controls 当时失败（协议参数1048448bytes触发 aggregate ResponseBudget；actual HTTP terminated）。这不是缺失 tool cap 证据；后续 TARGET946 有效多字节 UTF-8 控制在不放宽同一参数字节 cap/断言下补足独立近界/超界 proof，见上项。
+  - [x] C11-CHAT-SEC-001..004 本地修复/AFTER：父代理23:41:32 type/lint/36files2234tests/build全通过，含4项回归与独立Unicode tool/frame边界。 unchanged paired AFTER959 EXIT0：usage早发0/总1、duplicate两类fail/output0、named execution/event/id各1、reasoning在JSON.parse前拒绝(entries0)。SEC-002 discardFrame清引用后释放的source/order证据待独立复审，不冒充heap/livepeak测量。重复actualHTTP10 smoke通过/10 trusted mock requests/12audit/cleanuptrue。P6-1自身local标准恢复checked；所有security/matrix/accounting独立复审与C11 closure仍待完成，P6-3实际WorkBuddy标准不受此本地证据替代。
+    - Historical TARGET946：SEC-003/004的7个HTTP BEFORE失败（早发usage2、duplicate usage2未及时拒绝/取消而5000ms超时、deferred event/id缺失3）已观察；当时SEC-001/002还仅静态且A held。后续948资源/API trace与修复release状态以上项为准，保留946原始失败事实，不推断heap/livepeak或整体完成。
 
 - [x] P6-2 WorkBuddy 工具映射与路径处理
   - route 级 `tool_map{<tool_name>: command|file_write|url|mcp|other, arg?}` 配置；无映射时用 P2-1 启发式；Windows 路径归一化（反斜杠、盘符、`%USERPROFILE%`）用于敏感路径与项目目录判断；`project_dirs` 来自 route 配置。

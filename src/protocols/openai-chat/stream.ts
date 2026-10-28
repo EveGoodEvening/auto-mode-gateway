@@ -6,7 +6,8 @@ import { parsedBound } from '../openai-responses/nonstream.js';
 import { ChatResponseError, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES, MAX_TOOL_BYTES, COMPLETION_TIMEOUT_MS, IDLE_TIMEOUT_MS, bounded, blockedText, decide, unique, shadowStream, record, callFor, choiceOf, utf8Bytes, jsonBytes, reasoningSize } from './safety.js';
 
 type Aggregate = { id: string; name: string; arguments: string; bytes: number; lease: ResponseReservation; type?: string };
-type Held = { frame: SseFrame; value?: Record<string, unknown>; split?: boolean };
+type SseHeaders = { event?: string; id?: string };
+type Held = { frame?: SseFrame; value?: Record<string, unknown>; split?: boolean; stripUsage?: boolean; headers: SseHeaders };
 
 export function transformChatStream(source: ReadableStream<Uint8Array>, context: RequestContext, options: AdapterOptions, accounting?: ResponseAccounting): ReadableStream<Uint8Array> {
   if (options.mode === 'shadow') return shadowStream(source, async (observed, budget, signal) => {
@@ -17,7 +18,7 @@ export function transformChatStream(source: ReadableStream<Uint8Array>, context:
   const generated = new Map<Uint8Array, ResponseReservation>();
   const owned = new Set<Uint8Array>();
   const tools = new Map<number, Aggregate>();
-  const held: Held[] = [];
+  const held: (Held | undefined)[] = [];
   const output: Uint8Array[] = [];
   const abort = new AbortController();
   const signal = AbortSignal.any([options.signal, abort.signal]);
@@ -37,6 +38,9 @@ export function transformChatStream(source: ReadableStream<Uint8Array>, context:
   const calls: ToolCall[] = [];
   const byIndex = new Map<number, ToolCall>();
   let pendingDecisions: Promise<Map<string, Verdict>> | undefined;
+  let usageSeen = false;
+  let usageFrame: SseFrame | undefined;
+  let usageOutput: Uint8Array | undefined;
   const keepalive = pingKeepalive(options.holdKeepaliveMs ?? 10_000);
   const releaseOriginal = (): void => { if (!released) { released = true; original.releaseLock(); } };
   const timed = new ReadableStream<Uint8Array>({
@@ -61,7 +65,7 @@ export function transformChatStream(source: ReadableStream<Uint8Array>, context:
     const lease = generated.get(bytes);
     if (lease) { retained.delete(lease); generated.delete(bytes); }
   }
-  function emit(value: Record<string, unknown>, frame?: SseFrame): void {
+  function emit(value: Record<string, unknown>, frame?: SseHeaders, defer = false): Uint8Array {
     const size = jsonBytes(value);
     const reasoning = reasoningSize(value);
     const headers = utf8Bytes(frame?.event ?? '') + utf8Bytes(frame?.id ?? '') + 32;
@@ -71,10 +75,29 @@ export function transformChatStream(source: ReadableStream<Uint8Array>, context:
     const lease = reserve(peak, Math.min(peak, reasoning * 5));
     try {
       const bytes = encodeSse({ data: JSON.stringify(value), ...(frame?.event === undefined ? {} : { event: frame.event }), ...(frame?.id === undefined ? {} : { id: frame.id }) });
-      lease.resize(bytes.byteLength, Math.min(bytes.byteLength, reasoning)); budget.registerBytes(bytes, lease); generated.set(bytes, lease); owned.add(bytes); output.push(bytes);
+      lease.resize(bytes.byteLength, Math.min(bytes.byteLength, reasoning)); budget.registerBytes(bytes, lease); generated.set(bytes, lease); owned.add(bytes);
+      if (!defer) output.push(bytes);
+      return bytes;
     } catch (error) { release(lease); throw error; }
   }
   function raw(frame: SseFrame): void { owned.add(frame.raw); output.push(frame.raw); }
+  function hold(frame: SseFrame, value?: Record<string, unknown>, split = false, stripUsage = false): void {
+    const event = frame.event; const id = frame.id;
+    reserve(((event?.length ?? 0) + (id?.length ?? 0)) * 2 + 256);
+    held.push({ frame, value, split, stripUsage, headers: { ...(event === undefined ? {} : { event }), ...(id === undefined ? {} : { id }) } });
+  }
+  function transfer(entry: Held): void {
+    if (!entry.frame) throw new ChatResponseError('Missing retained Chat frame');
+    const bytes = entry.frame.raw;
+    entry.frame = undefined;
+    owned.add(bytes); output.push(bytes);
+  }
+  function discardFrame(entry: Held): void {
+    if (!entry.frame) return;
+    const lease = budget.claimBytes(entry.frame.raw);
+    entry.frame = undefined;
+    lease.release();
+  }
   function barrier(): void {
     if (deadline !== Infinity) return;
     deadline = Date.now() + COMPLETION_TIMEOUT_MS;
@@ -83,7 +106,9 @@ export function transformChatStream(source: ReadableStream<Uint8Array>, context:
   }
   function cleanup(): void {
     clearTimeout(timer); keepalive.close(); current?.release(); current = undefined;
-    for (const entry of held) entry.frame.release(); held.length = 0;
+    for (const entry of held) if (entry) discardFrame(entry);
+    held.length = 0;
+    usageFrame?.release(); usageFrame = undefined; usageOutput = undefined;
     for (const bytes of owned) budget.releaseBytes(bytes); owned.clear(); output.length = 0;
     generated.clear();
     for (const lease of retained) lease.release(); retained.clear(); tools.clear();
@@ -96,20 +121,26 @@ export function transformChatStream(source: ReadableStream<Uint8Array>, context:
     if (frame.data === undefined || frame.data === '') { raw(frame); frame.releaseSemantic(); return; }
     if (frame.data === '[DONE]') {
       if (!terminal || done) throw new ChatResponseError('Unexpected Chat DONE');
-      done = true; held.push({ frame }); frame.releaseSemantic(); return;
+      done = true; hold(frame); frame.releaseSemantic(); return;
     }
     if (done) throw new ChatResponseError('Chat data after DONE');
     if (frame.jsonComplete === false || frame.jsonAmbiguous) throw new ChatResponseError('Invalid Chat SSE JSON');
     const parsedSize = parsedBound(frame.data);
-    const parsed = reserve(parsedSize + 256, Math.min(parsedSize, frame.raw.byteLength));
+    const rawReasoning = budget.claimBytes(frame.raw).reasoning;
+    const overhead = Math.max(0, parsedSize - frame.data.length * 2);
+    const parsed = reserve(parsedSize + 256, rawReasoning ? Math.min(parsedSize, rawReasoning * 2 + overhead) : 0);
     let value: unknown;
     try { value = JSON.parse(frame.data); } catch { throw new ChatResponseError('Invalid Chat SSE JSON'); }
     const choice = choiceOf(value, true);
     if (!record(value)) throw new ChatResponseError('Invalid Chat chunk');
-    parsed.resize(parsed.bytes, Math.min(parsed.bytes, reasoningSize(value) * 2 + (reasoningSize(value) ? 256 : 0)));
-    if (!choice) {
-      held.push({ frame, value }); frame.releaseSemantic(); return;
+    const hasUsage = value.usage != null;
+    if (hasUsage) {
+      if (!record(value.usage) || usageSeen) throw new ChatResponseError('Duplicate or invalid Chat usage');
+      usageSeen = true;
+      if (!choice) { usageFrame = frame; frame.releaseSemantic(); return; }
+      usageOutput = emit({ ...value, choices: [] }, frame, true);
     }
+    if (!choice) { raw(frame); release(parsed); frame.releaseSemantic(); return; }
     if (terminal) throw new ChatResponseError('Chat choice after finish');
     if (!record(choice.delta)) throw new ChatResponseError('Invalid Chat delta');
     const delta = choice.delta;
@@ -155,14 +186,14 @@ export function transformChatStream(source: ReadableStream<Uint8Array>, context:
       const safeDelta = { ...delta }; delete safeDelta.tool_calls;
       const split = Object.keys(safeDelta).length > 0;
       if (split) emit({ ...value, choices: [{ ...choice, delta: safeDelta, finish_reason: null }], usage: undefined }, frame);
-      held.push({ frame, value, split });
-    } else if (tools.size) {
+      hold(frame, value, split, hasUsage);
+    } else if (tools.size || hasUsage) {
       if (Object.keys(delta).length > 0 && value.usage == null) {
         raw(frame); release(parsed);
       } else if (Object.keys(delta).length > 0) {
         emit({ ...value, choices: [{ ...choice, delta }], usage: undefined }, frame);
-        held.push({ frame, value, split: true });
-      } else held.push({ frame, value });
+        hold(frame, value, true, hasUsage);
+      } else hold(frame, value, false, hasUsage);
     } else { raw(frame); release(parsed); }
     frame.releaseSemantic();
   }
@@ -174,11 +205,20 @@ export function transformChatStream(source: ReadableStream<Uint8Array>, context:
     const denied = new Set<number>();
     for (const [index, call] of byIndex) if (decisions.get(call.id)?.outcome !== 'allow') denied.add(index);
     let explained = false;
-    for (const entry of held) {
-      if (!entry.value) { raw(entry.frame); continue; }
+    for (let index = 0; index < held.length; index++) {
+      const entry = held[index];
+      if (!entry) continue;
+      if (!entry.value) {
+        if (usageFrame) {
+          const bytes = usageFrame.raw; usageFrame = undefined;
+          owned.add(bytes); output.push(bytes);
+        }
+        if (usageOutput) { output.push(usageOutput); usageOutput = undefined; }
+        transfer(entry); delete held[index]; continue;
+      }
       const value = entry.value;
       const choice = choiceOf(value, true);
-      if (!choice) { raw(entry.frame); continue; }
+      if (!choice) { transfer(entry); delete held[index]; continue; }
       if (!record(choice.delta)) throw new ChatResponseError('Invalid retained Chat delta');
       if (choice.finish_reason != null && denied.size && !explained) {
         if (!terminalValue) throw new ChatResponseError('Missing Chat terminal metadata');
@@ -194,15 +234,17 @@ export function transformChatStream(source: ReadableStream<Uint8Array>, context:
       const delta = choice.delta;
       const fragments = Array.isArray(delta.tool_calls) ? delta.tool_calls : [];
       const allowed = fragments.filter(fragment => record(fragment) && !denied.has(Number(fragment.index)));
-      const changed = !!entry.split || allowed.length !== fragments.length || denied.size === tools.size && tools.size > 0 && choice.finish_reason === 'tool_calls';
-      if (!changed) { raw(entry.frame); continue; }
+      const changed = !!entry.split || !!entry.stripUsage || allowed.length !== fragments.length || denied.size === tools.size && tools.size > 0 && choice.finish_reason === 'tool_calls';
+      if (!changed) { transfer(entry); delete held[index]; continue; }
       const nextDelta: Record<string, unknown> = entry.split ? {} : { ...delta };
       if (allowed.length) Object.assign(nextDelta, { tool_calls: allowed });
       else if ('tool_calls' in nextDelta) delete nextDelta.tool_calls;
       const nextFinish = choice.finish_reason === 'tool_calls' && denied.size === tools.size ? 'stop' : choice.finish_reason;
-      if (Object.keys(nextDelta).length || nextFinish != null || value.usage != null) emit({ ...value, choices: [{ ...choice, delta: nextDelta, finish_reason: nextFinish }] }, entry.frame);
-      entry.frame.release();
+      if (Object.keys(nextDelta).length || nextFinish != null || !entry.stripUsage && value.usage != null) emit({ ...value, ...(entry.stripUsage ? { usage: undefined } : {}), choices: [{ ...choice, delta: nextDelta, finish_reason: nextFinish }] }, entry.headers);
+      discardFrame(entry);
+      delete held[index];
     }
+    held.length = 0;
     finished = true; keepalive.setHeld(false);
   }
   let controllerRef: ReadableStreamDefaultController<Uint8Array> | undefined;
