@@ -11,6 +11,16 @@ export interface AuditContext {
   session_id?: string;
   delivery?: AuditDelivery;
 }
+export interface AuditStage {
+  stage: 'decision' | 'review';
+  provider: string | null;
+  latency_ms: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cost_usd: number | null;
+  /** Reported final response only when complete stage accounting is unavailable. */
+  final_response?: { input_tokens: number | null; output_tokens: number | null; cost_usd: number | null };
+}
 export interface AuditVerdict {
   outcome: 'allow' | 'block' | 'uncertain';
   reasons: readonly string[];
@@ -24,6 +34,7 @@ export interface AuditVerdict {
   policy_version?: string;
   raw_outcome?: 'allow' | 'block' | 'uncertain';
   cache_hit?: boolean;
+  stages?: readonly AuditStage[];
 }
 export interface AuditInput extends AuditContext {
   action: Action;
@@ -111,6 +122,7 @@ export function createAuditRecord(input: AuditInput, credentials: readonly strin
     input_tokens: verdict.input_tokens ?? null,
     output_tokens: verdict.output_tokens ?? null,
     cost_usd: verdict.cost_usd ?? null,
+    stages: verdict.stages ?? [],
     policy_version: verdict.policy_version ?? policy.version,
   }, credentials, policy) as Record<string, unknown>;
 }

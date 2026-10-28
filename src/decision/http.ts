@@ -78,6 +78,7 @@ export async function postDecisionJson(url: string, headers: Headers, body: stri
     let retryDelay = 0;
     try {
       const result = await withinDeadline(async (signal) => {
+        if (options.accounting) options.accounting.attempts += 1;
         const response = await fetch(url, { method: 'POST', headers, body, redirect: 'manual', signal });
         if (!response.ok) {
           const retry = response.status === 429 || response.status === 529;

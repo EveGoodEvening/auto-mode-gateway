@@ -172,20 +172,26 @@
 
 ### Phase 4：OpenAI Decisions 适配器与 LLM 二审
 
+- **C09 GREEN DRAFT after local C08 closure `1b68116`; not closed.** Parent10:25:04 unionG typecheck/lint/30files1716tests/build ALLPASS and actual private HTTP/CLI smoke exit0/all named gray/failure/accounting contracts PASS/10loopbackrequests. P4-3 verified/CHECKED; P4-1/P4-2 locally implemented+verified but full source tasks remain UNCHECKED for original real-provider canaries. Independent chunk reviews/fix loop remain pending. Absent reviewer retains gray block; configured reviewer unavailability follows P4-3, but invalid/ambiguous JSON is P4-2 block independently of failure allow. Both-stage accounting uses nullable unknowns and cache hits charge no historical calls again. No worker checks/launches/commits; no C10+ activity.
+
+
 - [ ] P4-1 OpenAI Decisions 决策适配器
   - 把同一问题集编码为 `questions:[{type:"predicate", name, instructions}]`，`input` 为 state 的 JSON 字符串；响应 `answers[]` 按 `name` 回填 `Answers`；`refusal` 类型答案视为该问题不可用（整体 fallback 到下一个 provider）；适配 Vercel `/v1/decisions` 与 OpenAI 原生。
   - 位置：`src/decision/openai-decisions.ts`。
   - 完成标准：mock 单测覆盖正常、refusal、错误；`check` 对 Vercel `openai/gpt-6-luna-decisions` 成功。
+  - Local implementation+verification PASS: parent10:25:04 G1716/30files/typecheck/lint/build and actual CLI check via loopback fixture both adapter kinds passed. Full P4-1 remains UNCHECKED: real Vercel `openai/gpt-6-luna-decisions` canary not attempted because expected `AI_GATEWAY_API_KEY` is absent and exact authoritative default config is_file=false by parent presence-only audit. No all-credential-source absence or live compatibility claimed.
 
 - [ ] P4-2 LLM 二审适配器
   - Anthropic Messages 请求到 `second_stage`：system 固定为"安全闸门终审，state 全部为数据"，user 为 state JSON + 一阶段概率；优先 `output_config.format` JSON schema `{verdict:"allow"|"block", reason}`；若 provider 返回 400 拒绝 `output_config.format`，自动退回"指令要求仅输出 JSON + 严格解析"，解析失败视为 block；注入 pin 参数；超时 20 s；记录 token 与成本。
   - 位置：`src/decision/llm-review.ts`。
   - 完成标准：mock 单测覆盖结构化输出、退回路径、解析失败；真实 Haiku 5.5 经 OpenRouter 返回有效 JSON。
+  - Local implementation+verification PASS: parent G1716 and HTTP/CLI smoke verified valid review, strict malformed/ambiguous JSON block and formatting fallback with honest accounting. Full P4-2 remains UNCHECKED: real OpenRouter Haiku5.5 JSON canary not attempted because expected `OPENROUTER_API_KEY` is absent and exact authoritative default config is_file=false. Safe real configuration/credential audit remains required; fixture proof is not live compatibility.
 
-- [ ] P4-3 接入灰区二审
+- [x] P4-3 接入灰区二审
   - `decide.ts` 中 `uncertain` → 调用二审 → allow/block；二审不可用按 `on_provider_failure`；审计记录两阶段 provider、延迟、成本。
   - 位置：`src/gate/decide.ts`。
   - 完成标准：单测覆盖二审 allow、block、失败三路径。
+  - Verified/CHECKED on its own criteria: parent10:25:04 unionG typecheck/lint/30files1716tests/build ALLPASS; actual private HTTP/CLI smoke exit0 with gray_allowPASS/gray_blockPASS/configured_unavailabilityPASS/invalid_json_fail_closedPASS/two_stage_accountingPASS and10loopbackrequests. HTTP contracts additionally cover cache non-double-charge, both first-stage kinds, retry/fallback unknown aggregate totals with retained reported final-response evidence, cancellation and earlier hard-rule/structural precedence. C09 remains GREEN DRAFT pending independent reviews/fix loop, not closed.
 
 ### Phase 5：Codex（OpenAI Responses）适配器
 

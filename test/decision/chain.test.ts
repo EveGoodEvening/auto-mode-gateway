@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createDecisionChain, createDecisionProvider, decideChain } from '../../src/decision/chain.js';
+import { createDecisionChain, decideChain } from '../../src/decision/chain.js';
 import { DEFAULT_POLICY } from '../../src/policy/effective.js';
 import { DecisionError, type Answers, type DecisionProvider, type DecisionResult, type DecisionState, type ProviderConfig } from '../../src/decision/types.js';
 
@@ -12,9 +12,11 @@ afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 describe('ordered decision chain', () => {
   it('fails over in order and stops on first success', async () => {
     const first = vi.fn().mockRejectedValue(new Error('raw-secret-key'));
-    const second = vi.fn().mockResolvedValue(result);
+    const second = vi.fn().mockResolvedValue({ ...result, cost_usd: 0.01, usage: { input_tokens: 10, output_tokens: 2 } });
     const third = vi.fn();
-    expect(await decideChain([{ id: 'first', decide: first }, { id: 'second', decide: second }, { id: 'third', decide: third }], state, DEFAULT_POLICY.questions)).toMatchObject({ provider: 'second' });
+    const decision = await decideChain([{ id: 'first', decide: first }, { id: 'second', decide: second }, { id: 'third', decide: third }], state, DEFAULT_POLICY.questions);
+    expect(decision).toMatchObject({ provider: 'second', cost_usd: 0.01, accounting_complete: false });
+    expect(decision.usage).toEqual({ input_tokens: 10, output_tokens: 2 });
     expect(first).toHaveBeenCalledTimes(1);
     expect(second).toHaveBeenCalledTimes(1);
     expect(first.mock.invocationCallOrder[0]).toBeLessThan(second.mock.invocationCallOrder[0]!);
@@ -52,20 +54,16 @@ describe('ordered decision chain', () => {
     await expect(decideChain([{ id: 'one', decide }], state, DEFAULT_POLICY.questions, { signal: controller.signal })).rejects.toMatchObject({ code: 'aborted' });
     expect(decide).not.toHaveBeenCalled();
   });
-  it('constructs only actual SystemOne providers and rejects future kinds actionably', async () => {
-    expect(createDecisionProvider('one', providerConfig, 1000).id).toBe('one');
-    expect(() => createDecisionProvider('future', { ...providerConfig, kind: 'openai-decisions' }, 1000)).toThrow(/requires C09/);
-    const future = createDecisionChain({ chain: ['future'], providers: { future: { ...providerConfig, kind: 'openai-decisions' } } }, 1000);
-    await expect(future.decide(state, DEFAULT_POLICY.questions)).rejects.toMatchObject({ code: 'exhausted' });
+  it('fails safely for an unknown configured chain entry', async () => {
     const missing = createDecisionChain({ chain: ['missing'], providers: {} }, 1000);
     await expect(missing.decide(state, DEFAULT_POLICY.questions)).rejects.toMatchObject({ code: 'exhausted' });
   });
-  it.each([['one', 'future'], ['future', 'one']])('constructs real adapters lazily and fails over unsupported entries: %s %s', async (first, second) => {
-    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify({ answers: Object.fromEntries(Object.entries(answers).map(([id, noul]) => [id, { type: 'noul', noul }])) })));
+  it.each([['one', 'future'], ['future', 'one']])('fails over malformed Decisions answers without bypassing validation: %s %s', async (first, second) => {
+    const fetcher = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ answers: Object.fromEntries(Object.entries(answers).map(([id, noul]) => [id, { type: 'noul', noul }])) })));
     vi.stubGlobal('fetch', fetcher);
     const chain = createDecisionChain({ chain: [first, second], providers: { one: providerConfig, future: { ...providerConfig, kind: 'openai-decisions' } } }, 1000);
     expect(fetcher).not.toHaveBeenCalled();
     expect((await chain.decide(state, DEFAULT_POLICY.questions)).provider).toBe('one');
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledTimes(first === 'future' ? 2 : 1);
   });
 });

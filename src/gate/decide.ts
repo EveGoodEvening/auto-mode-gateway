@@ -1,8 +1,9 @@
 import type { Config } from '../config/schema.js';
 import { createAuditLogger } from '../audit/logger.js';
-import { collectConfigSecrets, type AuditSink } from '../audit/record.js';
+import { collectConfigSecrets, type AuditSink, type AuditStage } from '../audit/record.js';
 import { createDecisionProvider, decideChain } from '../decision/chain.js';
 import type { Answers, DecisionProvider } from '../decision/types.js';
+import { LlmReviewProvider, type ReviewProvider } from '../decision/llm-review.js';
 import { resolvePolicy, type EffectivePolicy } from '../policy/effective.js';
 import { hardDeny } from '../policy/hard-deny.js';
 import { isReadonlyCommand } from '../policy/readonly-allowlist.js';
@@ -17,6 +18,7 @@ const risks = ['destructive', 'exfiltration', 'remote_code_exec', 'security_weak
 
 export interface GateOptions {
   providers?: readonly DecisionProvider[];
+  reviewer?: ReviewProvider;
   audit?: AuditSink;
   now?: () => number;
   policy?: EffectivePolicy;
@@ -35,6 +37,8 @@ export function thresholdOutcome(answers: Answers, policy: EffectivePolicy): Out
 function cloneVerdict(verdict: Verdict): Verdict {
   const cloned = { ...verdict, reasons: [...verdict.reasons] };
   if (verdict.probabilities) cloned.probabilities = { ...verdict.probabilities };
+  if (verdict.stages) cloned.stages = verdict.stages.map((stage) => ({ ...stage,
+    ...(stage.final_response ? { final_response: { ...stage.final_response } } : {}) }));
   return cloned;
 }
 
@@ -47,6 +51,8 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
   const audit: AuditSink = options.audit ?? ((input) => logger!.append(input));
   const pendingAudit = new Set<Promise<void>>();
   const stats: GateStats = { decisions: 0, allow: 0, block: 0, uncertain: 0, cache_hits: 0, provider_failures: 0, provider_health: {} };
+  let reviewer = options.reviewer;
+  const reviewConfig = config.decision.second_stage ? structuredClone(config.decision.second_stage) : undefined;
   const configuredProviders = options.providers ?? config.decision.chain.map((id): DecisionProvider => {
     const providerConfig = structuredClone(config.decision.providers[id]!);
     const timeoutMs = config.gate.provider_timeout_ms;
@@ -54,8 +60,7 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
     return {
       id,
       decide(state, questions, callOptions) {
-        // Unsupported adapters fail only when reached, never before hard rules
-        // or a successful earlier provider. No synthetic answers are produced.
+        // Construction is lazy so hard rules never require provider availability.
         adapter ??= createDecisionProvider(id, providerConfig, timeoutMs);
         return adapter.decide(state, questions, callOptions);
       },
@@ -103,6 +108,9 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
     const timer = setTimeout(() => { timedOut = true; controller.abort(new Error('Decision deadline exceeded')); }, DECISION_DEADLINE_MS);
     timer.unref?.();
     let verdict: Verdict;
+    const stages: AuditStage[] = [];
+    let firstStage: Pick<Verdict, 'probabilities' | 'provider' | 'raw_outcome'> = {};
+    let decisionStarted: number | undefined;
     const base = (outcome: Outcome, rule: string, reasons = [rule]): Verdict => ({ outcome, reasons, rule, latency_ms: 0, cost_usd: 0, policy_version: policy.version });
     try {
       if (context.signal?.aborted) verdict = base('block', 'caller-aborted');
@@ -123,8 +131,9 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
             const key = cacheKey({ identity, state, action_digest: cacheKey(source), content_digest: action.content_digest,
               path_context: cacheKey({ home_dir: context.home_dir, userprofile: context.userprofile }) });
             const hit = cache.get(key);
-            if (hit) { verdict = { ...cloneVerdict(hit), cache_hit: true, cost_usd: 0, input_tokens: 0, output_tokens: 0 }; stats.cache_hits += 1; }
+            if (hit) { verdict = { ...cloneVerdict(hit), cache_hit: true, cost_usd: 0, input_tokens: 0, output_tokens: 0, stages: [] }; stats.cache_hits += 1; }
             else {
+              decisionStarted = now();
               const { promise: aborted, reject } = Promise.withResolvers<never>();
               if (controller.signal.aborted) reject(new Error('Decision aborted'));
               else controller.signal.addEventListener('abort', () => reject(new Error('Decision aborted')), { once: true });
@@ -134,14 +143,50 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
               ]);
               if (controller.signal.aborted) throw new Error('Decision aborted');
               const rawOutcome = thresholdOutcome(result.answers, policy);
-              verdict = {
-                ...base(rawOutcome === 'uncertain' ? 'block' : rawOutcome, rawOutcome === 'uncertain' ? 'gray-block' : 'model-threshold'),
-                raw_outcome: rawOutcome, probabilities: { ...result.answers }, provider: result.provider,
+              let cacheable = true;
+              firstStage = { raw_outcome: rawOutcome, probabilities: { ...result.answers }, provider: result.provider };
+              const reported = { cost_usd: result.cost_usd, input_tokens: result.usage.input_tokens ?? null, output_tokens: result.usage.output_tokens ?? null };
+              stages.push({ stage: 'decision', provider: result.provider, latency_ms: result.latency_ms, ...reported,
+                ...(result.accounting_complete === false ? { cost_usd: null, input_tokens: null, output_tokens: null, final_response: reported } : {}) });
+              verdict = { ...base(rawOutcome === 'uncertain' ? 'block' : rawOutcome, rawOutcome === 'uncertain' ? 'gray-block' : 'model-threshold'), ...firstStage,
                 cost_usd: result.cost_usd,
                 ...(result.usage.input_tokens !== undefined ? { input_tokens: result.usage.input_tokens } : {}),
                 ...(result.usage.output_tokens !== undefined ? { output_tokens: result.usage.output_tokens } : {}),
               };
-              cache.set(key, cloneVerdict(verdict));
+              if (rawOutcome === 'uncertain' && (reviewer || reviewConfig)) {
+                const reviewStarted = now();
+                try {
+                  if (!reviewer) {
+                    if (!reviewConfig) throw new Error('Reviewer unavailable');
+                    reviewer = new LlmReviewProvider(reviewConfig);
+                  }
+                  const reviewed = await Promise.race([
+                    reviewer.review(state, result.answers, { signal: controller.signal, deadline_ms: Date.now() + Math.max(0, DECISION_DEADLINE_MS - (now() - started)) }),
+                    aborted,
+                  ]);
+                  if (controller.signal.aborted) throw new Error('Decision aborted');
+                  stages.push({ stage: 'review', provider: reviewed.provider, latency_ms: reviewed.latency_ms,
+                    cost_usd: reviewed.cost_usd, input_tokens: reviewed.usage.input_tokens ?? null, output_tokens: reviewed.usage.output_tokens ?? null,
+                    ...(reviewed.final_response ? { final_response: { ...reviewed.final_response } } : {}) });
+                  verdict.outcome = reviewed.verdict;
+                  verdict.rule = 'llm-review';
+                  cacheable = !reviewed.invalid_response;
+                  // Provider text is never a diagnostic; audit sanitizes the full reason.
+                  verdict.reasons = [redact(reviewed.reason, secrets, policy)];
+                } catch {
+                  stats.provider_failures += 1;
+                  stages.push({ stage: 'review', provider: 'second_stage', latency_ms: Math.max(0, now() - reviewStarted),
+                    cost_usd: null, input_tokens: null, output_tokens: null });
+                  throw new Error('Reviewer unavailable');
+                }
+              }
+              verdict.stages = stages;
+              verdict.cost_usd = stages.every((stage) => stage.cost_usd !== null) ? stages.reduce((sum, stage) => sum + stage.cost_usd!, 0) : null;
+              if (stages.every((stage) => stage.input_tokens !== null)) verdict.input_tokens = stages.reduce((sum, stage) => sum + stage.input_tokens!, 0);
+              else delete verdict.input_tokens;
+              if (stages.every((stage) => stage.output_tokens !== null)) verdict.output_tokens = stages.reduce((sum, stage) => sum + stage.output_tokens!, 0);
+              else delete verdict.output_tokens;
+              if (cacheable) cache.set(key, cloneVerdict(verdict));
             }
           }
         }
@@ -151,6 +196,9 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
       verdict = context.signal?.aborted ? base('block', 'caller-aborted')
         : base(failureAction, timedOut ? 'decision-timeout' : 'provider-unavailable');
       verdict.cost_usd = null;
+      if (decisionStarted !== undefined && stages.length === 0) stages.push({ stage: 'decision', provider: null,
+        latency_ms: Math.max(0, now() - decisionStarted), input_tokens: null, output_tokens: null, cost_usd: null });
+      Object.assign(verdict, firstStage, { stages });
     } finally {
       clearTimeout(timer);
       context.signal?.removeEventListener('abort', callerAbort);

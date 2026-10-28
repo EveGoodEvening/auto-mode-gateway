@@ -1,6 +1,7 @@
 import type { Answers } from '../decision/types.js';
 import type { Config } from '../config/schema.js';
 import type { RequestContext, ToolCall } from '../protocols/types.js';
+import type { AuditStage } from '../audit/record.js';
 
 export type Protocol = Config['routes'][number]['protocol'];
 export type NormalizationRoute = Pick<Config['routes'][number], 'tool_map' | 'project_dirs'>;
@@ -61,6 +62,7 @@ export interface Verdict {
   cache_hit?: boolean;
   input_tokens?: number;
   output_tokens?: number;
+  stages?: AuditStage[];
 }
 
 export interface GateStats {

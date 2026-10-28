@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { configSchema } from '../../src/config/schema.js';
 import type { Answers, DecisionProvider, DecisionResult } from '../../src/decision/types.js';
+import type { ReviewResult } from '../../src/decision/llm-review.js';
 import { createGate, thresholdOutcome } from '../../src/gate/decide.js';
 import type { Action, GateContext } from '../../src/gate/types.js';
 import { resolvePolicy } from '../../src/policy/effective.js';
@@ -75,11 +76,11 @@ describe('gate branches and audit', () => {
     expect(await createGate(config(), { providers: [p], audit }).decide(input, ctx)).toMatchObject({ outcome: 'block', provider: 'one' });
     expect(p.decide).toHaveBeenCalledTimes(1);
   });
-  it('retains raw gray and blocks it even with configured fail-open', async () => {
+  it('retains raw gray and blocks when no reviewer is configured, independent of failure allow', async () => {
     const cfg = config(); cfg.gate.on_provider_failure = 'allow';
     const gate = createGate(cfg, { providers: [provider({ ...safe, destructive: 0.4 })], audit });
     expect(await gate.decide(action, ctx)).toMatchObject({ outcome: 'block', raw_outcome: 'uncertain', rule: 'gray-block' });
-    expect(gate.stats()).toMatchObject({ decisions: 1, block: 1, uncertain: 1 });
+    expect(gate.stats()).toMatchObject({ decisions: 1, block: 1, uncertain: 1, provider_failures: 0 });
   });
   it('redacts configured literals before truncation and excludes raw assistant/results', async () => {
     const p = provider(); const gate = createGate(config(), { providers: [p], audit });
@@ -107,7 +108,7 @@ describe('gate branches and audit', () => {
 });
 
 describe('failure, cancellation and cache boundaries', () => {
-  it('hard-denies without constructing an unsupported configured adapter', async () => {
+  it('hard-denies without constructing a configured provider', async () => {
     const cfg = config(); cfg.decision.providers.one!.kind = 'openai-decisions';
     const gate = createGate(cfg, { audit });
     expect(await gate.decide({ ...action, text: 'rm -rf /' }, ctx)).toMatchObject({ outcome: 'block', rule: 'root-home-delete' });
@@ -117,13 +118,13 @@ describe('failure, cancellation and cache boundaries', () => {
     const cfg = config();
     cfg.decision.providers.future = { ...cfg.decision.providers.one!, kind: 'openai-decisions' };
     cfg.decision.chain = chain;
-    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
       answers: Object.fromEntries(Object.entries(safe).map(([id, noul]) => [id, { type: 'noul', noul }])),
     }), { status: 200, headers: { 'content-type': 'application/json' } }));
     try {
       const gate = createGate(cfg, { audit });
       expect(await gate.decide(action, ctx)).toMatchObject({ outcome: 'allow', provider: 'one' });
-      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch).toHaveBeenCalledTimes(chain[0] === 'future' ? 2 : 1);
       expect(gate.stats().provider_health.future?.failures).toBe(chain[0] === 'future' ? 1 : 0);
     } finally { fetch.mockRestore(); }
   });
@@ -148,6 +149,20 @@ describe('failure, cancellation and cache boundaries', () => {
     const work = gate.decide(action, { ...ctx, signal: controller.signal }); controller.abort();
     expect(await work).toMatchObject({ outcome: 'block', rule: 'caller-aborted' });
     expect(await gate.decide(action, { ...ctx, signal: controller.signal })).toMatchObject({ outcome: 'block' });
+  });
+  it('cancels a noncooperative reviewer without fail-open or losing first-stage evidence', async () => {
+    const cfg = config(); cfg.gate.on_provider_failure = 'allow';
+    const controller = new AbortController();
+    const entered = Promise.withResolvers<void>();
+    let signal: AbortSignal | undefined;
+    const gate = createGate(cfg, { providers: [provider({ ...safe, destructive: 0.4 })], audit,
+      reviewer: { review: (_state, _answers, options) => { signal = options?.signal; entered.resolve(); return Promise.withResolvers<ReviewResult>().promise; } } });
+    const pending = gate.decide(action, { ...ctx, signal: controller.signal });
+    await entered.promise;
+    controller.abort();
+    expect(await pending).toMatchObject({ outcome: 'block', rule: 'caller-aborted', raw_outcome: 'uncertain', provider: 'one', probabilities: { destructive: 0.4 }, cost_usd: null,
+      stages: [{ stage: 'decision', input_tokens: 10, cost_usd: 0.01 }, { stage: 'review', input_tokens: null, cost_usd: null }] });
+    expect(signal?.aborted).toBe(true);
   });
   it('bounds an ignoring provider to 60 seconds and aborts its signal', async () => {
     vi.useFakeTimers();

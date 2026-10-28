@@ -26,11 +26,6 @@ export async function checkProviders(config: Config): Promise<boolean> {
   for (const [id, providerConfig] of Object.entries(config.decision.providers)) {
     const label = `provider[${++ordinal}]`;
     const started = performance.now();
-    if (providerConfig.kind !== 'systemone') {
-      process.stdout.write(`${label} unsupported (adapter requires C09) latency_ms=0\n`);
-      successful = false;
-      continue;
-    }
     try {
       const provider = createDecisionProvider(id, providerConfig, config.gate.provider_timeout_ms);
       const result = await provider.decide(canaryState(), policy.questions, {

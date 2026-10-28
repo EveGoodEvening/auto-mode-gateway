@@ -134,16 +134,20 @@ describe('check actual configuration and HTTP behavior', () => {
     expect(result.stdout + result.stderr).not.toContain(secret);
   });
 
-  it('reports unsupported adapters as failures without contacting them, while still checking supported entries', async () => {
-    const unsupported = await mockProvider((response) => response.end(JSON.stringify({ answers: wireAnswers })));
-    const supported = await mockProvider((response) => response.end(JSON.stringify({ answers: wireAnswers })));
-    const path = await configuration({ future: { base_url: unsupported.url, kind: 'openai-decisions' }, real: { base_url: supported.url } });
+  it.each([false, true])('checks both adapter kinds and safely reports Decisions refusal=%s', async (refusal) => {
+    const decisions = await mockProvider((response) => response.end(JSON.stringify({ answers: Object.entries(answers).map(([name, probability]) =>
+      name === 'destructive' && refusal ? { name, type: 'refusal' } : { name, type: 'predicate', probability }) })));
+    const systemone = await mockProvider((response) => response.end(JSON.stringify({ answers: wireAnswers })));
+    const path = await configuration({ decisions: { base_url: decisions.url.replace('/systemone', '/v1'), kind: 'openai-decisions' }, systemone: { base_url: systemone.url } });
     const result = await run(['check', '--config', path]);
-    expect(result.code).toBe(1);
-    expect(result.stdout).toContain('provider[1] unsupported (adapter requires C09)');
+    expect(result.code).toBe(refusal ? 1 : 0);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toContain(`provider[1] ${refusal ? 'failed' : 'ok'}`);
     expect(result.stdout).toContain('provider[2] ok');
-    expect(unsupported.seen).toHaveLength(0);
-    expect(supported.seen).toHaveLength(1);
+    expect(decisions.seen).toHaveLength(1);
+    expect(systemone.seen).toHaveLength(1);
+    expect(decisions.seen[0]?.path).toBe('/v1/decisions');
+    for (const value of [secret, 'private-model-name', decisions.url, systemone.url]) expect(result.stdout + result.stderr).not.toContain(value);
   });
 
   it('fails safely when the default configuration is absent', async () => {
