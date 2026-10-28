@@ -24,6 +24,87 @@ import { createMockRelay, startLoopback, type RecordedRequest, type RelayScene }
 export const CODEX_PROBE = 'printf AMP_DENIAL_PROBE';
 export const CODEX_ALLOW_PROBE = 'printf AMP_CODEX_ALLOW_PROBE';
 const MAX_CAPTURE = 8 * 1024 * 1024;
+const RUN_TIMEOUT_MS = 240_000;
+const SHUTDOWN_TIMEOUT_MS = 5_000;
+
+export interface CodexRunDeadline {
+  signal: AbortSignal;
+  check(): void;
+  step<T>(operation: () => Promise<T>): Promise<T>;
+  observe<T>(operation: Promise<T>): Promise<T>;
+  onShutdown(close: () => void | Promise<void>): () => void;
+}
+
+/** One deadline owns setup, BOTH modes, evidence and teardown; imports never launch. */
+export async function withCodexRunDeadline<T>(work: (run: CodexRunDeadline) => Promise<T>): Promise<T> {
+  const abort = new AbortController();
+  const pending = new Set<Promise<unknown>>();
+  const closing = new Set<() => void>();
+  let expired = false;
+  let stopped = false;
+  let cleanupFailed = false;
+  const failure = () => new Error('Codex fixture deadline or owned cleanup failed');
+  const observe = <V>(operation: Promise<V>): Promise<V> => {
+    pending.add(operation);
+    void operation.then(() => pending.delete(operation), () => pending.delete(operation));
+    return operation;
+  };
+  const check = () => { if (stopped || abort.signal.aborted) throw failure(); };
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    abort.abort();
+    // Initiate cancellation/socket closure before joining ANY pending work.
+    for (const close of closing) close();
+  };
+  const run: CodexRunDeadline = {
+    signal: abort.signal, check, observe,
+    step<V>(operation: () => Promise<V>): Promise<V> {
+      check();
+      const active = observe(operation());
+      const result = Promise.withResolvers<V>();
+      const onAbort = () => result.reject(failure());
+      abort.signal.addEventListener('abort', onAbort, { once: true });
+      void active.then((value) => {
+        abort.signal.removeEventListener('abort', onAbort);
+        if (abort.signal.aborted) result.reject(failure()); else result.resolve(value);
+      }, (error: unknown) => { abort.signal.removeEventListener('abort', onAbort); result.reject(error); });
+      if (abort.signal.aborted) onAbort();
+      return result.promise;
+    },
+    onShutdown(close) {
+      let initiated = false;
+      const initiate = () => {
+        if (initiated) return;
+        initiated = true;
+        try {
+          const result = close();
+          if (result) observe(result).catch(() => { cleanupFailed = true; });
+        } catch { cleanupFailed = true; }
+      };
+      closing.add(initiate);
+      // Late asynchronous setup must close its resource, never start another turn.
+      if (stopped) initiate();
+      return () => { closing.delete(initiate); };
+    },
+  };
+  const deadline = setTimeout(() => { expired = true; stop(); }, RUN_TIMEOUT_MS);
+  let result: { value: T } | undefined;
+  let failed = false;
+  try { result = { value: await run.step(() => work(run)) }; }
+  catch { failed = true; }
+  finally {
+    stop();
+    const shutdown = Promise.withResolvers<never>();
+    const shutdownTimer = setTimeout(() => shutdown.reject(failure()), SHUTDOWN_TIMEOUT_MS);
+    try {
+      while (pending.size > 0) await Promise.race([Promise.allSettled([...pending]), shutdown.promise]);
+    } catch { cleanupFailed = true; }
+    finally { clearTimeout(shutdownTimer); clearTimeout(deadline); }
+  }
+  if (failed || expired || cleanupFailed || !result) throw failure();
+  return result.value;
+}
 function object(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
@@ -254,13 +335,13 @@ export function observeCodexExecutions(events: readonly CodexExecutionEvent[], n
   return { passed: positiveSuccessful === 1 && negativeExecutions === 0 && unexpectedExecutions === 0, positiveSuccessful, negativeExecutions, unexpectedExecutions };
 }
 
-async function runMode(mode: '--yolo' | '--approve-for-me', root: string, executable: string) {
+async function runMode(mode: '--yolo' | '--approve-for-me', root: string, executable: string, run: CodexRunDeadline) {
   const directory = join(root, mode.slice(2));
   const home = join(directory, 'home');
   const codexHome = join(home, '.codex');
   const workspace = join(directory, 'workspace');
-  await mkdir(codexHome, { recursive: true });
-  await mkdir(workspace, { recursive: true });
+  await run.step(() => mkdir(codexHome, { recursive: true }));
+  await run.step(() => mkdir(workspace, { recursive: true }));
   const requests: CodexRecordedRequest[] = [];
   const originalBodies: string[] = [];
   const captures: CodexCapture[] = [];
@@ -303,9 +384,9 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
     const admission = transactions.get(context.req.header('x-amp-fixture-request') ?? '');
     if (context.req.header('authorization') !== `Bearer ${relayKey}` || !admission || admission.relayClaimed || !isCanonicalCodexFixtureRequest(context.req.raw, 'relay')) return context.json({ error: 'uncorrelated fixture transport' }, 401);
     admission.relayClaimed = true;
-    const raw = await context.req.raw.clone().text();
+    const raw = await run.step(() => context.req.raw.clone().text());
     if (raw !== originalBodies[admission.record.arrivalOrder]) { unsupportedRequests++; return context.json({ error: 'fixture body correlation failed' }, 400); }
-    return relay.app.fetch(context.req.raw);
+    return run.step(async () => relay.app.fetch(new Request(context.req.raw, { signal: run.signal })));
   });
   const decision = createMockDecision({ mode: 'deny' });
   const positiveDecision = createMockDecision({ mode: 'allow' });
@@ -313,27 +394,36 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
   trustedFixture.onError(() => { unsupportedRequests++; return Response.json({ error: 'manual decision request failed' }, { status: 400 }); });
   trustedFixture.post('*', async (context) => {
     if (context.req.header('authorization') !== `Bearer ${decisionKey}`) return context.json({ error: 'unauthorized manual decision request' }, 401);
-    const body: unknown = await context.req.raw.clone().json();
+    const body: unknown = await run.step(() => context.req.raw.clone().json());
     const command = object(object(object(body)?.state)?.action)?.command;
-    if (command === CODEX_PROBE) return decision.app.fetch(context.req.raw);
-    if (command === CODEX_ALLOW_PROBE) return positiveDecision.app.fetch(context.req.raw);
+    if (command === CODEX_PROBE) return run.step(async () => decision.app.fetch(new Request(context.req.raw, { signal: run.signal })));
+    if (command === CODEX_ALLOW_PROBE) return run.step(async () => positiveDecision.app.fetch(new Request(context.req.raw, { signal: run.signal })));
     unsupportedRequests++;
     return context.json({ error: 'unsupported manual decision payload' }, 400);
   });
   const listeners: { close(): Promise<void> }[] = [];
-  let flush: (() => Promise<void>) | undefined;
+  const ownListener = (listener: { url: string; close(): Promise<void> }) => {
+    const close = listener.close;
+    let closing: Promise<void> | undefined;
+    listener.close = () => closing ??= close();
+    listeners.push(listener);
+    run.onShutdown(listener.close);
+    return listener;
+  };
   try {
-    const upstream = await startLoopback(relayBroker); listeners.push(upstream);
-    const trusted = await startLoopback(trustedFixture); listeners.push(trusted);
+    const upstream = await run.step(() => startLoopback(relayBroker).then(ownListener));
+    const trusted = await run.step(() => startLoopback(trustedFixture).then(ownListener));
     const config = configSchema.parse({ auth: { mode: 'vault', client_tokens: [clientToken] },
       routes: [{ prefix: '/codex', protocol: 'openai-responses', upstream: 'mock', project_dirs: [workspace] }],
       upstreams: { mock: { base_url: upstream.url, api_key: relayKey } }, gate: { mode: 'enforce', on_provider_failure: 'block' },
       decision: { chain: ['mock'], providers: { mock: { kind: 'systemone', base_url: trusted.url, api_key: decisionKey, model: 'mock' } } },
       policy: { readonly_programs: [] }, audit: { path: join(directory, 'audit.jsonl') }, log_level: 'silent' });
-    const proxy = createApp(config); flush = proxy.flushAudit;
+    const proxy = createApp(config);
+    run.onShutdown(() => proxy.flushAudit());
     const ingress = new Hono<{ Bindings: HttpBindings }>();
     ingress.onError(() => { unsupportedRequests++; return Response.json({ error: 'manual generation request failed' }, { status: 400 }); });
     ingress.use('*', async (context, next) => {
+      run.check();
       // Authenticate/canonicalize before recording identity/order, before any await.
       const record = admitCodexFixtureArrival(context.req.raw, clientToken, requests, originalBodies, active !== undefined);
       if (typeof record === 'number') { unsupportedRequests++; return context.json({ error: 'unauthorized or bounded fixture arrival' }, record); }
@@ -342,6 +432,7 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
       if (!outgoing) { unsupportedRequests++; return context.json({ error: 'missing owned response lifecycle' }, 500); }
       const completed = Promise.withResolvers<void>();
       responses.add(completed.promise);
+      run.observe(completed.promise);
       const admission: Admission = { record, nonce: randomUUID(), prompt: expectedPrompt, control: armedControl, turn,
         relayClaimed: false, sceneConsumed: false, captureStarted: false, captureFinished: false, responseFinished: false,
         release() {
@@ -356,14 +447,14 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
       const close = () => { if (!outgoing.writableFinished) captureFailed = true; admission.responseFinished = true; admission.release(); };
       outgoing.once('finish', finish); outgoing.once('close', close);
       active = admission; armedControl = undefined; admissions.set(context.req.raw, admission);
-      try { await next(); }
+      try { await run.step(() => next()); }
       finally { if (!admission.captureStarted) admission.captureFinished = true; admission.release(); }
     });
     ingress.use('*', bodyLimit({ maxSize: MAX_CAPTURE }));
     ingress.all('*', async (context) => {
       const admission = admissions.get(context.req.raw);
       if (!admission || !isCanonicalCodexFixtureRequest(context.req.raw, 'ingress')) { unsupportedRequests++; return context.json({ error: 'manual probe request boundary' }, 400); }
-      const rawBody = await context.req.raw.clone().text();
+      const rawBody = await run.step(() => context.req.raw.clone().text());
       bytes += Buffer.byteLength(rawBody) * 3;
       if (bytes > MAX_CAPTURE) { unsupportedRequests++; return context.json({ error: 'manual capture bound' }, 413); }
       originalBodies[admission.record.arrivalOrder] = rawBody;
@@ -377,13 +468,18 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
       transactions.set(admission.nonce, admission);
       const headers = new Headers(context.req.raw.headers);
       headers.set('x-amp-fixture-request', admission.nonce);
-      const response = await proxy.fetch(new Request(context.req.raw, { headers }), context.env);
+      const response = await run.step(async () => proxy.fetch(new Request(context.req.raw, { headers, signal: run.signal }), context.env));
       if (!response.ok || !response.body) { captureFailed = true; return response; }
       const copy = response.clone();
       admission.captureStarted = true;
+      const reader = parseSse(copy.body!).getReader();
+      const untrackReader = run.onShutdown(() => reader.cancel());
       const work = (async () => {
         try {
-          for await (const frame of parseSse(copy.body!)) {
+          while (true) {
+            const next = await run.step(() => reader.read());
+            if (next.done) break;
+            const frame = next.value;
             bytes += frame.raw.byteLength * 3;
             if (bytes > MAX_CAPTURE || !frame.complete) throw new Error('capture bound or incomplete frame');
             if (frame.data) {
@@ -393,17 +489,18 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
             }
           }
           if (admission.capture) admission.capture.captureComplete = true;
-        } catch { captureFailed = true; await copy.body?.cancel().catch(() => {}); }
-        finally { admission.captureFinished = true; admission.release(); }
+        } catch { captureFailed = true; await run.observe(reader.cancel()); }
+        finally { untrackReader(); reader.releaseLock(); admission.captureFinished = true; admission.release(); }
       })();
-      pending.add(work); void work.finally(() => pending.delete(work));
+      run.observe(work); pending.add(work); void work.then(() => pending.delete(work), () => pending.delete(work));
       return response;
     });
-    const gateway = await startLoopback(ingress); listeners.push(gateway);
-    await writeFile(join(codexHome, 'config.toml'), `model_provider = "amp"\n\n[features]\nhooks = false\napps = false\nplugins = false\nmulti_agent = false\nmulti_agent_v2 = false\ncode_mode = false\nenable_mcp_apps = false\nskill_search = false\n\n[model_providers.amp]\nname = "auto-mode-proxy"\nbase_url = "${gateway.url}/codex/v1"\nenv_key = "AMP_TOKEN"\nwire_api = "responses"\nsupports_websockets = false\n`, { mode: 0o600 });
+    const gateway = await run.step(() => startLoopback(ingress).then(ownListener));
+    await run.step(() => writeFile(join(codexHome, 'config.toml'), `model_provider = "amp"\n\n[features]\nhooks = false\napps = false\nplugins = false\nmulti_agent = false\nmulti_agent_v2 = false\ncode_mode = false\nenable_mcp_apps = false\nskill_search = false\n\n[model_providers.amp]\nname = "auto-mode-proxy"\nbase_url = "${gateway.url}/codex/v1"\nenv_key = "AMP_TOKEN"\nwire_api = "responses"\nsupports_websockets = false\n`, { mode: 0o600, signal: run.signal }));
     const turns = ['deny', 'normal', 'deny', 'normal', 'mixed', 'normal', 'normal', 'normal'] as const;
     const results: { kind: string; exitCode: number | null; completed: boolean }[] = [];
     for (const kind of turns) {
+      run.check();
       turn++;
       armedControl = kind === 'normal' ? undefined : kind;
       let completed = false;
@@ -429,31 +526,28 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
           } catch { failed = true; }
         }, onOutputBound() { outputBoundHit = true; }, onExitCode(code) { exitCode = code; }, shouldForceKill() { return timedOut; },
       });
+      const untrackChild = run.onShutdown(() => { owned.stop(); return owned.completion.finally(() => owned.dispose()); });
       child.stdin.end();
       const timer = setTimeout(() => { timedOut = true; owned.stop(); }, 30_000);
-      try { await owned.completion; }
+      let childClosed = false;
+      try { await run.step(() => owned.completion); childClosed = true; }
       finally {
         clearTimeout(timer);
-        if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-          const exited = Promise.withResolvers<void>();
-          const force = setTimeout(() => child.kill('SIGKILL'), 1000);
-          child.once('close', () => { clearTimeout(force); exited.resolve(); });
-          owned.stop();
-          await exited.promise;
-        } else owned.stop();
-        owned.dispose();
+        owned.stop();
+        // If closure is unknown, the global shutdown owns bounded reaping.
+        if (childClosed) { owned.dispose(); untrackChild(); }
       }
-      await Promise.all(pending);
-      await Promise.all(responses);
+      await run.step(() => Promise.all(pending));
+      await run.step(() => Promise.all(responses));
       results.push({ kind, exitCode, completed: completed && !failed });
       if (exitCode !== 0 || !completed || failed || timedOut || outputBoundHit || !threadId) break;
     }
-    await proxy.flushAudit();
+    await run.step(() => proxy.flushAudit());
     const replay = captures.map((capture) => observeCodexReplay(requests, capture));
-    const auditText = await readFile(join(directory, 'audit.jsonl'), 'utf8').catch((error: NodeJS.ErrnoException) => {
+    const auditText = await run.step(() => readFile(join(directory, 'audit.jsonl'), { encoding: 'utf8', signal: run.signal }).catch((error: NodeJS.ErrnoException) => {
       if (error.code === 'ENOENT') return '';
       throw error;
-    });
+    }));
     const audit = auditText.trim().split('\n').filter(Boolean).map((line) => object(JSON.parse(line)));
     const denialRecords = audit.filter((row) => row?.verdict === 'block' && captures.some((capture) => capture.control !== 'allow' && object(object(row.action)?.raw)?.call_id === capture.probeId));
     const positiveRecords = audit.filter((row) => row?.verdict === 'allow' && captures.some((capture) => capture.positiveItem !== undefined && object(object(row.action)?.raw)?.call_id === capture.positiveItem.call_id));
@@ -466,27 +560,36 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
         && captures.filter((capture) => capture.control !== 'allow').length === 3 && captures.filter((capture) => capture.positiveItem !== undefined).length === 1
         && replay.every((result) => result.passed) && executionProof.passed && !captureFailed && !timedOut && !outputBoundHit && unsupportedRequests === 0 && denialRecords.length === 3 && positiveRecords.length === 1 && fixedDecisionPayloads };
     // All requests are private/mock-only. Never print source request/header/auth bodies.
-    await writeFile(join(directory, 'capture.json'), JSON.stringify({ requests: requests.map(({ headers, ...record }, index) => ({ ...record, headers: [...headers], rawBody: originalBodies[index] })), captures, executions, evidence }), { mode: 0o600 });
+    await run.step(() => writeFile(join(directory, 'capture.json'), JSON.stringify({ requests: requests.map(({ headers, ...record }, index) => ({ ...record, headers: [...headers], rawBody: originalBodies[index] })), captures, executions, evidence }), { mode: 0o600, signal: run.signal }));
     return evidence;
   } finally {
-    await Promise.all(pending);
-    await flush?.();
-    for (const listener of listeners.reverse()) await listener.close();
+    // Initiate sockets first; the global shutdown bounds all outstanding joins.
+    for (const listener of listeners.reverse()) run.observe(listener.close());
   }
 }
 
 async function main() {
-  const root = await mkdtemp(join(tmpdir(), 'amp-codex-smoke-'));
-  try {
+  const output = await withCodexRunDeadline(async (run) => {
+    const root = await run.step(() => mkdtemp(join(tmpdir(), 'amp-codex-smoke-')).then((directory) => {
+      if (process.env.AMP_CODEX_SMOKE_KEEP !== '1') run.onShutdown(() => rm(directory, { recursive: true, force: true }));
+      return directory;
+    }));
     const modes = [];
-    for (const mode of ['--yolo', '--approve-for-me'] as const) modes.push(await runMode(mode, root, process.env.CODEX_EXECUTABLE ?? 'codex'));
-    console.log(JSON.stringify({ kind: 'installed_codex_loopback_mock', ...(process.env.AMP_CODEX_SMOKE_KEEP === '1' ? { privateCaptureDirectory: root } : {}), modes, passed: modes.every((mode) => mode.passed) }));
-    process.exitCode = modes.every((mode) => mode.passed) ? 0 : 1;
-  } finally {
-    if (process.env.AMP_CODEX_SMOKE_KEEP !== '1') await rm(root, { recursive: true, force: true });
-  }
+    for (const mode of ['--yolo', '--approve-for-me'] as const) {
+      run.check();
+      modes.push(await run.step(() => runMode(mode, root, process.env.CODEX_EXECUTABLE ?? 'codex', run)));
+    }
+    return { kind: 'installed_codex_loopback_mock', ...(process.env.AMP_CODEX_SMOKE_KEEP === '1' ? { privateCaptureDirectory: root } : {}), modes, passed: modes.every((mode) => mode.passed) };
+  });
+  // No success report before confirmed bounded teardown of BOTH modes.
+  console.log(JSON.stringify(output));
+  process.exitCode = output.passed ? 0 : 1;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  main().catch(() => { console.error('Codex manual mock proof failed; no secret diagnostics emitted'); process.exitCode = 1; });
+  main().catch(() => {
+    console.error('Codex manual mock proof failed; no secret diagnostics emitted');
+    // A failed cleanup may leave uncooperative owned I/O alive: never retain the gate.
+    process.exit(1);
+  });
 }
 

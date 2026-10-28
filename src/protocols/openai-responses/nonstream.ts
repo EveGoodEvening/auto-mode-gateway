@@ -124,6 +124,12 @@ export async function transformResponsesNonstream(response: Response, context: R
       lastByte = Date.now();
       const retention = scanner.push(incoming);
       reasoning = retention.reasoningBytes + retention.pendingBytes;
+      const adopted = rawLeases.at(-1);
+      if (!adopted) throw new ResponsesResponseError('Missing raw response allocation');
+      // Classification is complete for these bytes. Normalize inherited shadow
+      // credit before restoring the dense-prefix cursor; no allocation or await
+      // occurs between this reclassification and the cursor updates below.
+      if (adopted.reasoning) adopted.resize(adopted.bytes, 0);
       // Adjust the charged prefix in either direction without rescanning all
       // earlier chunks on each read (including single-byte upstream chunks).
       while (chargedReasoning < reasoning) {

@@ -103,7 +103,8 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
     }
   }
   function reasoningJson(value: Record<string, unknown>): { whole: boolean; bytes: number } {
-    const text = value.type === 'response.output_text.delta' || value.type === 'response.output_text.done' || (record(value.part) && value.part.type === 'output_text');
+    const text = value.type === 'response.output_text.delta' || value.type === 'response.output_text.done'
+      || ((value.type === 'response.content_part.added' || value.type === 'response.content_part.done') && record(value.part) && value.part.type === 'output_text');
     const whole = String(value.type).includes('reasoning') || (record(value.item) && value.item.type === 'reasoning')
       || (record(value.part) && value.part.type === 'reasoning_text')
       || (typeof value.output_index === 'number' && (lifecycle.get(value.output_index)?.type === 'reasoning' || (!lifecycle.has(value.output_index) && !text)));
@@ -113,6 +114,7 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
     }
     return { whole, bytes };
   }
+  /** Original frames are supplied only when their semantic payload is unchanged. */
   function emit(value: Record<string, unknown>, raw?: SseFrame): void {
     if (raw && (value.sequence_number === undefined || (typeof value.sequence_number === 'number' && Number.isSafeInteger(value.sequence_number) && value.sequence_number > sequence))) {
       if (typeof value.sequence_number === 'number') sequence = value.sequence_number;
@@ -243,7 +245,9 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
       } else if (event === value && replacements.size) {
         reserve(finalOutput.length * 32 + 2048);
         const rewritten = { ...event, response: { ...value.response, output: finalOutput.map((item: unknown, index: number) => replacements.get(index) ?? item) } };
-        emit(rewritten, frame);
+        emit(rewritten);
+        frame.release();
+        ownedRaw.delete(frame.raw);
       } else emit(event, frame);
       entry.frame = undefined; entry.value = undefined;
     }
@@ -261,17 +265,15 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
       frame.releaseSemantic(); return;
     }
     const scanner = new JsonRetentionScanner('responses', 'event', budget);
-    let rawReasoning: number;
     let ambiguous: boolean;
     try {
       for (const segment of sseDataSegments(frame.raw)) scanner.push(segment);
       const info = scanner.finish();
       ambiguous = info.ambiguous || !info.complete;
-      const text = info.type === 'response.output_text.delta' || info.type === 'response.output_text.done' || info.partType === 'output_text';
-      rawReasoning = ambiguous || info.type?.includes('reasoning') || info.itemType === 'reasoning' || info.partType === 'reasoning_text'
-        || (info.itemType === undefined && info.outputIndex !== undefined && (lifecycle.get(info.outputIndex)?.type === 'reasoning' || (!lifecycle.has(info.outputIndex) && !text))) ? frame.raw.byteLength : info.reasoningBytes + info.pendingBytes;
     } finally { scanner.finish(); }
     if (ambiguous) throw new ResponsesResponseError('Unclassifiable Responses event');
+    // The parsed representation inherits the parser's validated-context classification.
+    const rawReasoning = budget.claimBytes(frame.raw).reasoning;
     const parsedBytes = parsedBound(frame.data);
     const overhead = Math.max(0, parsedBytes - frame.data.length * 2);
     const parsed = reserve(parsedBytes, rawReasoning ? Math.min(parsedBytes, rawReasoning * 2 + overhead) : 0);

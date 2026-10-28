@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { HttpBindings } from '@hono/node-server';
@@ -48,7 +48,7 @@ function assertLifecycle(frames: Item[], output: Item[], completedIndices = outp
     for (const frame of chain.slice(1, -1)) expect(frame.item_id).toBe(item.id);
   }
 }
-async function setup(options: { scene?: string | RelayScene; mode?: 'enforce' | 'shadow'; auth?: 'vault' | 'passthrough'; decision?: DecisionMode; failover?: boolean; allFail?: boolean; upstreamHandler?: (request: Request) => Response; decisionBarrier?: { entered: PromiseWithResolvers<void>; release: Promise<void>; aborted: PromiseWithResolvers<void> }; providerTimeoutMs?: number; transportReadTimeoutMs?: number; onWritePressure?: (outgoing: HttpBindings['outgoing']) => void } = {}) {
+async function setup(options: { scene?: string | RelayScene; mode?: 'enforce' | 'shadow'; auth?: 'vault' | 'passthrough'; decision?: DecisionMode; failover?: boolean; allFail?: boolean; upstreamHandler?: (request: Request) => Response; decisionBarrier?: { entered: PromiseWithResolvers<void>; release: Promise<void>; aborted: PromiseWithResolvers<void> }; providerTimeoutMs?: number; transportReadTimeoutMs?: number; onWritePressure?: (outgoing: HttpBindings['outgoing']) => void; onUpstreamChunk?: (chunk: Uint8Array) => void } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'amp-responses-integration-'));
   cleanups.push(() => rm(dir, { recursive: true, force: true }));
   const relay = createMockRelay({ protocol: 'openai-responses', scene: options.scene ?? 'bad' });
@@ -65,6 +65,27 @@ async function setup(options: { scene?: string | RelayScene; mode?: 'enforce' | 
   const upstream = await startLoopback(relayApp); cleanups.push(upstream.close);
   const trusted = await startLoopback(decisionApp); cleanups.push(trusted.close);
   const backup = await startLoopback(second.app); cleanups.push(backup.close);
+  if (options.onUpstreamChunk) {
+    const originalFetch = globalThis.fetch;
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const response = await originalFetch(input, init);
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (!url.startsWith(`${upstream.url}/`) || !response.body) return response;
+      const reader = response.body.getReader();
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          try {
+            const next = await reader.read();
+            if (next.done) { reader.releaseLock(); controller.close(); }
+            else { options.onUpstreamChunk!(next.value); controller.enqueue(next.value); }
+          } catch (error) { controller.error(error); }
+        },
+        async cancel(reason) { try { await reader.cancel(reason); } finally { reader.releaseLock(); } },
+      }, { highWaterMark: 0 });
+      return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+    });
+    cleanups.push(async () => { spy.mockRestore(); });
+  }
   const config = configSchema.parse({
     auth: { mode: options.auth ?? 'vault', client_tokens: ['fake-client'] },
     routes: [{ prefix: '/codex', protocol: 'openai-responses', upstream: 'relay', project_dirs: ['/project'] }],
@@ -103,16 +124,20 @@ async function setup(options: { scene?: string | RelayScene; mode?: 'enforce' | 
     responses.push(response);
     return response;
   }
-  return { request, relay, decision, second };
+  return { request, relay, decision, second, async records(): Promise<Item[]> {
+    await app.flushAudit();
+    const text = await readFile(config.audit.path, 'utf8');
+    return text.trim().split('\n').map(line => JSON.parse(line) as Item);
+  } };
 }
 
-function controlledUpstream() {
+function controlledUpstream(contentType = 'text/event-stream', initial = ': connected\n\n') {
   const ready = Promise.withResolvers<void>();
   const cancelled = Promise.withResolvers<void>();
   let feed!: ReadableStreamDefaultController<Uint8Array>;
   const encoder = new TextEncoder();
   const body = new ReadableStream<Uint8Array>({
-    start(controller) { feed = controller; controller.enqueue(encoder.encode(': connected\n\n')); },
+    start(controller) { feed = controller; if (initial) controller.enqueue(encoder.encode(initial)); },
     cancel() { cancelled.resolve(); },
   });
   return {
@@ -120,7 +145,7 @@ function controlledUpstream() {
     handler(request: Request) {
       request.signal.addEventListener('abort', () => cancelled.resolve(), { once: true });
       ready.resolve();
-      return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
+      return new Response(body, { headers: { 'content-type': contentType } });
     },
     send(raw: string) { feed.enqueue(encoder.encode(raw)); },
     close() { feed.close(); },
@@ -562,5 +587,72 @@ describe('Responses actual HTTP terminal-copy retention boundaries', () => {
     upstream.send(final);
     await failedBody(reader, raw);
     await upstream.cancelled;
+  });
+});
+
+describe('Responses nonstream shadow trusted observation over actual HTTP', () => {
+  it.each(['single', 'multiple'] as const)('retains byte-identical nonblocking delivery and the real hypothetical verdict/audit with %s network chunks', async chunking => {
+    const release = Promise.withResolvers<void>();
+    const barrier = { entered: Promise.withResolvers<void>(), release: release.promise, aborted: Promise.withResolvers<void>() };
+    const snapshot = {
+      id: 'resp_shadow_reasoning', object: 'response', status: 'completed',
+      output: [
+        { type: 'reasoning', id: 'rs_shadow', encrypted_content: 'r'.repeat(1024), summary: [] },
+        command('npm run AMP_REVIEW_DENY'),
+      ],
+      handoff: 'SHADOW_PREFIX_HANDOFF', usage,
+    };
+    const source = JSON.stringify(snapshot);
+    const chunks: number[] = [];
+    const upstream = chunking === 'multiple' ? controlledUpstream('application/json', '') : undefined;
+    const { request, decision, records } = await setup({
+      mode: 'shadow', providerTimeoutMs: 120_000, decisionBarrier: barrier,
+      upstreamHandler: upstream?.handler ?? (() => new Response(source, { headers: { 'content-type': 'application/json' } })),
+      onUpstreamChunk(chunk) { chunks.push(chunk.byteLength); },
+    });
+    cleanups.push(async () => { release.resolve(); });
+    let actual: string;
+    if (upstream) {
+      const split = source.indexOf(',"usage":');
+      expect(split).toBeGreaterThan(0);
+      const pending = request();
+      await upstream.ready;
+      upstream.send(source.slice(0, split));
+      const reader = (await pending).body!.getReader();
+      actual = await readThrough(reader, 'SHADOW_PREFIX_HANDOFF');
+      const prefixChunks = chunks.length;
+      expect(prefixChunks).toBeGreaterThan(0);
+      // The first prefix has traversed the real gateway/client connection before the next source write exists.
+      upstream.send(source.slice(split));
+      upstream.close();
+      const decoder = new TextDecoder();
+      while (true) {
+        const next = await reader.read();
+        if (next.done) break;
+        actual += decoder.decode(next.value, { stream: true });
+      }
+      reader.releaseLock();
+      expect(chunks.length).toBeGreaterThan(prefixChunks);
+    } else {
+      actual = await (await request()).text();
+      // Observe the real upstream fetch boundary rather than assuming one server write means one read.
+      expect(chunks).toEqual([new TextEncoder().encode(source).byteLength]);
+    }
+    expect(actual).toBe(source);
+    // All client bytes arrived while the trusted verdict remains deliberately unresolved.
+    expect(decision.requests).toHaveLength(0);
+    await barrier.entered.promise;
+    release.resolve();
+    const observed = await records();
+    expect(decision.requests).toHaveLength(1);
+    expect(decision.requests[0]?.headers.get('authorization')).toBe('Bearer fake-decision');
+    expect(decision.requests[0]?.body.state).toMatchObject({ action: { tool: 'exec_command', command: 'npm run AMP_REVIEW_DENY' } });
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).toMatchObject({
+      route: '/codex', protocol: 'openai-responses', tool: 'exec_command', delivery: 'shadow',
+      action: { kind: 'command', text: 'npm run AMP_REVIEW_DENY' }, verdict: 'block', raw_outcome: 'block', provider: 'decision', cache_hit: false,
+      probabilities: { destructive: 0.95 }, input_tokens: 1, output_tokens: 1,
+      stages: [{ stage: 'decision', provider: 'decision', input_tokens: 1, output_tokens: 1 }],
+    });
   });
 });

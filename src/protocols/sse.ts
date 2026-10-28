@@ -72,12 +72,17 @@ export function sseReasoningBytes(raw: Uint8Array, protocol: JsonRetentionProtoc
           if (dataBytes) {
             if (!info.complete || info.ambiguous) total += frame.byteLength;
             else {
-              if (info.outputIndex !== undefined && info.itemType !== undefined) {
+              const lifecycle = protocol === 'responses'
+                ? info.type === 'response.output_item.added' || info.type === 'response.output_item.done'
+                : info.type === 'content_block_start';
+              if (lifecycle && info.outputIndex !== undefined && info.itemType !== undefined) {
+                const known = preview.get(info.outputIndex) ?? reasoningIndex?.(info.outputIndex);
                 if (!preview.has(info.outputIndex)) metadata?.resize(metadata.bytes + 128);
-                preview.set(info.outputIndex, ['thinking', 'redacted_thinking', 'signature', 'reasoning'].includes(info.itemType));
+                preview.set(info.outputIndex, known === true || ['thinking', 'redacted_thinking', 'signature', 'reasoning'].includes(info.itemType));
               }
               const indexed = info.outputIndex === undefined ? false : preview.get(info.outputIndex) ?? reasoningIndex?.(info.outputIndex);
-              const text = info.type === 'response.output_text.delta' || info.type === 'response.output_text.done' || info.partType === 'output_text';
+              const text = info.type === 'response.output_text.delta' || info.type === 'response.output_text.done'
+                || ((info.type === 'response.content_part.added' || info.type === 'response.content_part.done') && info.partType === 'output_text');
               if (info.type?.includes('reasoning') || ['thinking', 'redacted_thinking', 'signature', 'reasoning'].includes(info.itemType ?? '')
                 || ['thinking_delta', 'redacted_thinking_delta', 'signature_delta', 'reasoning_text'].includes(info.partType ?? '')
                 || indexed === true || (info.outputIndex !== undefined && indexed === undefined && !text)) total += frame.byteLength;

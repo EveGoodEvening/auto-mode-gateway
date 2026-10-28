@@ -117,6 +117,36 @@ describe('Responses execution approval boundary', () => {
     expect(new TextDecoder().decode((await pending).value)).toContain('response.output_item.added');
     await reader.cancel();
   });
+  it.each([
+    { status: 'completed', mixed: false, sequence: 1000 }, { status: 'completed', mixed: false, sequence: undefined },
+    { status: 'completed', mixed: true, sequence: 1000 }, { status: 'completed', mixed: true, sequence: undefined },
+    { status: 'incomplete', mixed: false, sequence: 1000 }, { status: 'incomplete', mixed: false, sequence: undefined },
+    { status: 'incomplete', mixed: true, sequence: 1000 }, { status: 'incomplete', mixed: true, sequence: undefined },
+  ] as const)('keeps denied terminal items consistent with delivered history ($status/$mixed/$sequence)', async ({ status, mixed, sequence }) => {
+    const input = mixed ? [scenes.exec, scenes.patch] : [scenes.exec];
+    const events = eventsFor(input, status);
+    const terminal = events.pop();
+    if (!terminal) throw new Error('Missing terminal fixture');
+    const raw = wire(events) + `event: ${String(terminal.type)}\ndata: ${JSON.stringify({ ...terminal, ...(sequence === undefined ? {} : { sequence_number: sequence }) })}\n\n`;
+    const config = { ...options(), onToolCall: vi.fn(async (call: { id: string }) => verdict(call.id === scenes.exec.call_id ? 'block' : 'allow')) };
+    const output = parsed(await new Response(transformResponsesStream(source(raw), context, config)).text());
+    const delivered = terminalOutput(output);
+    const completedByIndex = new Map(output.filter(event => event.type === 'response.output_item.done').map(event => [event.output_index, event.item]));
+    expect(delivered).toHaveLength(input.length);
+    for (let index = 0; index < delivered.length; index++) expect(delivered[index]).toEqual(completedByIndex.get(index));
+    expect(delivered[0]).toMatchObject({ type: 'message', content: [{ text: expect.stringContaining('fixture-deny') }] });
+    if (mixed) expect(delivered[1]).toEqual(scenes.patch);
+    expect(responseValue(output.at(-1)!.response).usage).toEqual(scenes.usage);
+    expect(config.onToolCall).toHaveBeenCalledTimes(input.length);
+    let previous = -1;
+    for (const event of output) {
+      const number = event.sequence_number;
+      if (typeof number !== 'number') throw new Error('Missing outgoing sequence number');
+      expect(Number.isSafeInteger(number)).toBe(true);
+      expect(number).toBeGreaterThan(previous);
+      previous = number;
+    }
+  });
   it.each(['completed', 'incomplete'] as const)('rewrites partial parallel blocks in %s output with full message lifecycle and untouched usage', async status => {
     const config = { ...options(), onToolCall: vi.fn(async (call: { id: string }) => verdict(call.id === scenes.exec.call_id ? 'block' : 'allow')) };
     const input = [scenes.exec, scenes.text, scenes.patch, scenes.reasoning, scenes.local];
@@ -593,9 +623,9 @@ describe('Responses failure, cancellation and resource boundaries', () => {
     expect(result.error).toBeDefined();
     expect(result.text).not.toContain('function_call');
   });
-  it('keeps stateful data associated with a reasoning item inside the reasoning subset', async () => {
+  it.each([{ metadata: false }, { metadata: true }])('keeps reasoning-associated stateful data inside the subset despite non-lifecycle item metadata ($metadata)', async ({ metadata }) => {
     const input = eventsFor([scenes.exec, scenes.reasoning]);
-    const fragments = Array.from({ length: 3 }, () => ({ type: 'vendor.stateful', output_index: 1, payload: 'x'.repeat(500_000) }));
+    const fragments = Array.from({ length: 3 }, () => ({ type: 'vendor.stateful', output_index: 1, ...(metadata ? { item: { type: 'message' } } : {}), payload: 'x'.repeat(500_000) }));
     input.splice(input.length - 1, 0, ...fragments);
     expect(encoder.encode(wire(input)).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
     const result = await captureFailure(input);
@@ -717,17 +747,19 @@ describe('Responses nonstream parity and media boundary', () => {
     await expect(transformResponsesNonstream(jsonResponse([scenes.exec, { ...scenes.patch, id: scenes.exec.id }]), context, config)).rejects.toBeDefined();
     expect(config.onToolCall).not.toHaveBeenCalled();
   });
-  it('keeps nonstream shadow bytes and headers unchanged despite a hypothetical denial', async () => {
+  it.each(['single', 'multiple'] as const)('observes ordinary reasoning in %s-chunk nonstream shadow without delaying or changing client bytes', async chunking => {
     const pending = Promise.withResolvers<Verdict>();
     const observations: Promise<void>[] = [];
     const config = { ...options(), mode: 'shadow' as const, onToolCall: vi.fn(() => pending.promise), trackObservation: (work: Promise<void>) => { observations.push(work); } };
-    const raw = ` {"status":"completed", "output": ${JSON.stringify([scenes.exec])}, "usage":${JSON.stringify(scenes.usage)}} `;
-    const response = await transformResponsesNonstream(new Response(raw, { headers: { 'content-type': 'application/json', 'x-fixture': 'shadow' } }), context, config);
-    expect(await response.text()).toBe(raw);
-    expect(response.headers.get('x-fixture')).toBe('shadow');
-    await vi.waitFor(() => expect(config.onToolCall).toHaveBeenCalledOnce());
-    pending.resolve(verdict('block'));
-    await Promise.all(observations);
+    const reasoning = { ...scenes.reasoning, encrypted_content: 'r'.repeat(2048) };
+    const raw = ` {"status":"completed", "output": ${JSON.stringify([scenes.exec, reasoning])}, "usage":${JSON.stringify(scenes.usage)}} `;
+    try {
+      const chunk = chunking === 'single' ? encoder.encode(raw).byteLength : 1024;
+      const response = await transformResponsesNonstream(new Response(source(raw, chunk), { headers: { 'content-type': 'application/json', 'x-fixture': 'shadow' } }), context, config);
+      expect(await response.text()).toBe(raw);
+      expect(response.headers.get('x-fixture')).toBe('shadow');
+      await vi.waitFor(() => expect(config.onToolCall).toHaveBeenCalledOnce());
+    } finally { pending.resolve(verdict('block')); await Promise.all(observations); }
   });
   it.each([undefined, 'text/plain', 'application/octet-stream'])('rejects unsupported generation media %s and cancels upstream', async media => {
     const cancel = vi.fn();

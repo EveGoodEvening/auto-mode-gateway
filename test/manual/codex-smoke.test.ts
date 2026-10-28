@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
-import { CODEX_ALLOW_PROBE, CODEX_PROBE, admitCodexFixtureArrival, codexProbeScene, isCanonicalCodexFixtureRequest, observeCodexExecutions, observeCodexReplay, type CodexCapture, type CodexExecutionEvent, type CodexRecordedRequest } from './codex-smoke.js';
+import { CODEX_ALLOW_PROBE, CODEX_PROBE, admitCodexFixtureArrival, codexProbeScene, isCanonicalCodexFixtureRequest, observeCodexExecutions, observeCodexReplay, withCodexRunDeadline, type CodexCapture, type CodexExecutionEvent, type CodexRecordedRequest } from './codex-smoke.js';
 
 function fixture(control: 'deny' | 'mixed' = 'deny', lite = false) {
   const declaration = { type: 'function', name: 'exec_command', parameters: { type: 'object', properties: { cmd: { type: 'string' } }, required: ['cmd'], additionalProperties: false } };
@@ -255,5 +255,116 @@ describe('installed Codex replay evidence boundaries', () => {
     if (failure === 'empty-id') event.item.id = '';
     if (failure === 'missing') events.length = 0;
     expect(observeCodexExecutions(events, '/bin/bash').passed).toBe(false);
+  });
+});
+
+describe('Codex production whole-run deadline and shutdown', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it.each(['setup', 'post-child capture', 'HTTP completion', 'audit flush', 'evidence write', 'child close'])('bounds stalled %s without a client launch', async (phase) => {
+    vi.useFakeTimers();
+    const stalled = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    const events: string[] = [];
+    let signal: AbortSignal | undefined;
+    let settled = false;
+    const result = withCodexRunDeadline(async (run) => {
+      signal = run.signal;
+      run.onShutdown(() => { events.push('listener/socket shutdown initiated'); });
+      run.onShutdown(() => { events.push('owned child stop initiated'); });
+      run.onShutdown(() => { events.push('capture reader cancellation initiated'); });
+      events.push(phase); entered.resolve();
+      await run.step(() => stalled.promise);
+      events.push('FORBIDDEN later turn/mode');
+      return true;
+    }).then(() => { settled = true; return 'success'; }, () => { settled = true; return 'failure'; });
+    await entered.promise;
+    await vi.advanceTimersByTimeAsync(240_000);
+    expect(signal?.aborted).toBe(true);
+    expect(events).toEqual([phase, 'listener/socket shutdown initiated', 'owned child stop initiated', 'capture reader cancellation initiated']);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toBe('failure');
+    stalled.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).not.toContain('FORBIDDEN later turn/mode');
+  });
+
+  it('actively cancels a real stalled capture reader before shutdown joins', async () => {
+    vi.useFakeTimers();
+    const entered = Promise.withResolvers<void>();
+    const stalledPull = Promise.withResolvers<void>();
+    const events: string[] = [];
+    const result = withCodexRunDeadline(async (run) => {
+      const stream = new ReadableStream<Uint8Array>({
+        pull() { entered.resolve(); return stalledPull.promise; },
+        cancel() { events.push('reader cancelled'); },
+      });
+      const reader = stream.getReader();
+      run.onShutdown(() => reader.cancel());
+      run.onShutdown(() => { events.push('socket shutdown initiated'); });
+      await run.step(() => reader.read());
+      events.push('FORBIDDEN continuation');
+    }).then(() => 'success', () => 'failure');
+    await entered.promise;
+    await vi.advanceTimersByTimeAsync(240_000);
+    expect(events).toEqual(['reader cancelled', 'socket shutdown initiated']);
+    expect(await result).toBe('failure');
+    stalledPull.resolve();
+  });
+
+  it.each(['listener close', 'audit drain', 'child reap'])('never reports success when %s remains unconfirmed during normal teardown', async (resource) => {
+    vi.useFakeTimers();
+    const stalled = Promise.withResolvers<void>();
+    const initiated = Promise.withResolvers<void>();
+    const events: string[] = [];
+    let settled = false;
+    const result = withCodexRunDeadline(async (run) => {
+      run.onShutdown(() => { events.push(resource); initiated.resolve(); return stalled.promise; });
+      run.onShutdown(() => { events.push('other sockets stopped despite stalled cleanup'); });
+      return resource;
+    }).then(() => { settled = true; return 'success'; }, () => { settled = true; return 'failure'; });
+    await initiated.promise;
+    expect(events).toEqual([resource, 'other sockets stopped despite stalled cleanup']);
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toBe('failure');
+    stalled.resolve();
+  });
+
+  it('closes late asynchronous startup and prevents post-deadline spawning', async () => {
+    vi.useFakeTimers();
+    const startup = Promise.withResolvers<{ close(): Promise<void> }>();
+    const entered = Promise.withResolvers<void>();
+    const events: string[] = [];
+    const result = withCodexRunDeadline(async (run) => {
+      entered.resolve();
+      await run.step(() => startup.promise.then((listener) => {
+        run.onShutdown(() => listener.close());
+        return listener;
+      }));
+      run.check();
+      events.push('FORBIDDEN child spawn');
+    }).then(() => 'success', () => 'failure');
+    await entered.promise;
+    await vi.advanceTimersByTimeAsync(245_000);
+    expect(await result).toBe('failure');
+    startup.resolve({ close: async () => { events.push('late listener closed'); } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual(['late listener closed']);
+  });
+
+  it('waits for confirmed teardown before returning successful evidence', async () => {
+    const events: string[] = [];
+    const result = await withCodexRunDeadline(async (run) => {
+      run.onShutdown(async () => { events.push('listener closed'); });
+      run.onShutdown(async () => { events.push('audit drained'); });
+      return { passed: true };
+    });
+    expect(events).toEqual(['listener closed', 'audit drained']);
+    expect(result).toEqual({ passed: true });
   });
 });
