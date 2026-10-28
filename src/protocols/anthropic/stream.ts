@@ -1,6 +1,6 @@
 import { parseSse } from '../sse.js';
 import type { AdapterOptions, RequestContext, ToolCall } from '../types.js';
-import { AnthropicResponseError, MAX_TOOL_BYTES, MAX_RESPONSE_BYTES, IDLE_TIMEOUT_MS, COMPLETION_TIMEOUT_MS, approve, bounded, parseToolInput, record, toolCall, unique } from './safety.js';
+import { AnthropicResponseError, MAX_TOOL_BYTES, MAX_RESPONSE_BYTES, IDLE_TIMEOUT_MS, COMPLETION_TIMEOUT_MS, approve, bounded, parseToolInput, record, toolCall, unique, validateToolBlock } from './safety.js';
 
 interface PendingTool {
   block: Record<string, unknown>;
@@ -112,6 +112,11 @@ export function transformAnthropicStream(source: ReadableStream<Uint8Array>, con
           }
           if (frame.event && typeof event.type === 'string' && frame.event !== event.type && (frame.event.startsWith('content_block_') || event.type.startsWith('content_block_'))) throw new AnthropicResponseError('Conflicting execution event identity');
           const type = event.type ?? frame.event;
+          if (type === 'message_start' || frame.event === 'message_start') {
+            if (!record(event.message) || !Array.isArray(event.message.content) || event.message.content.length !== 0) {
+              throw new AnthropicResponseError('Invalid message_start initial content');
+            }
+          }
           const index = event.index;
           const block = event.content_block;
           if (type === 'content_block_start' && record(block) && block.type === 'tool_use') {
@@ -119,8 +124,8 @@ export function transformAnthropicStream(source: ReadableStream<Uint8Array>, con
             if (typeof block.id !== 'string' || ids.has(block.id)) throw new AnthropicResponseError('Duplicate or invalid tool ID');
             ids.add(block.id);
             indices.add(index);
-            // Validate the start identity and object-shaped initial input before buffering deltas.
-            toolCall(block);
+            // Validate and charge retained initial input alongside the raw start frame.
+            heldBytes += validateToolBlock(block);
             active.set(index, { block, fragments: [], bytes: 0 });
             if (!hasTools) {
               hasTools = true;

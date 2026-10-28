@@ -33,14 +33,20 @@ export function parseToolInput(json: string): unknown {
   }
 }
 
-export function toolCall(block: Record<string, unknown>): ToolCall {
+/** Validates a tool block and returns its serialized input size for retention accounting. */
+export function validateToolBlock(block: Record<string, unknown>): number {
   if (typeof block.id !== 'string' || !block.id || typeof block.name !== 'string' || !block.name) {
     throw new AnthropicResponseError('Invalid tool identity');
   }
   if (!record(block.input)) throw new AnthropicResponseError('Unparseable tool input', 'unparseable');
   const bytes = new TextEncoder().encode(JSON.stringify(block.input)).byteLength;
   if (bytes > MAX_TOOL_BYTES) throw new AnthropicResponseError('Tool input exceeds 1 MiB');
-  return { id: block.id, name: block.name, input: block.input, raw: block };
+  return bytes;
+}
+
+export function toolCall(block: Record<string, unknown>): ToolCall {
+  validateToolBlock(block);
+  return { id: block.id as string, name: block.name as string, input: block.input, raw: block };
 }
 
 /** Races are always cleaned up, including disconnects while an upstream read is pending. */

@@ -115,6 +115,29 @@ describe('Anthropic transparent stream', () => {
       .rejects.toMatchObject({ blocked: true, parseStatus: 'unparseable', diagnostic: { command: 'echo fixture' } });
     expect(config.onToolCalls).not.toHaveBeenCalled();
   });
+  it('rejects complete tool_use in message_start content without execution bytes or approval', async () => {
+    const config = options();
+    const input = wire([
+      { type: 'message_start', message: { id: 'msg_snapshot', type: 'message', content: [
+        { type: 'tool_use', id: 'snapshot_tool', name: 'Read', input: { path: 'fixture.txt' } },
+      ] } },
+      { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 1 } },
+      { type: 'message_stop' },
+    ]);
+    const output = transformAnthropicStream(source(input), context, config).getReader();
+    const emitted: string[] = [];
+    const result = (async () => {
+      for (;;) {
+        const { done, value } = await output.read();
+        if (done) return;
+        emitted.push(new TextDecoder().decode(value));
+      }
+    })();
+    await expect(result).rejects.toBeInstanceOf(AnthropicResponseError);
+    expect(emitted.join('')).not.toContain('tool_use');
+    expect(emitted.join('')).not.toContain('snapshot_tool');
+    expect(config.onToolCalls).not.toHaveBeenCalled();
+  });
   it.each([
     [scenes.single[0]],
     scenes.single.slice(0, -1),
@@ -151,6 +174,25 @@ describe('Anthropic transparent stream', () => {
     events.push({ type: 'message_stop' });
     const config = options();
     await expect(collect(transformAnthropicStream(source(wire(events), 65536), context, config))).rejects.toThrow('8 MiB');
+    expect(config.onToolCalls).not.toHaveBeenCalled();
+  });
+  it('counts six initial tool inputs alongside raw frames toward the 8 MiB aggregate before approval', async () => {
+    const initialInput = { text: 'x'.repeat(750 * 1024) };
+    const parameterBytes = encoder.encode(JSON.stringify(initialInput)).byteLength;
+    const events: unknown[] = [];
+    for (let index = 0; index < 6; index++) {
+      const start = tool(index, `initial_${index}`, initialInput);
+      expect(encoder.encode(wire([start])).byteLength).toBeLessThan(MAX_TOOL_BYTES);
+      events.push(start, { type: 'content_block_stop', index });
+    }
+    events.push({ type: 'message_stop' });
+    const input = wire(events);
+    const rawBytes = encoder.encode(input).byteLength;
+    expect(parameterBytes).toBeLessThan(MAX_TOOL_BYTES);
+    expect(rawBytes).toBeLessThan(MAX_RESPONSE_BYTES);
+    expect(rawBytes + 6 * parameterBytes).toBeGreaterThan(MAX_RESPONSE_BYTES);
+    const config = options();
+    await expect(collect(transformAnthropicStream(source(input, 65536), context, config))).rejects.toThrow('8 MiB');
     expect(config.onToolCalls).not.toHaveBeenCalled();
   });
   it('cancels upstream immediately when downstream disconnects', async () => {
