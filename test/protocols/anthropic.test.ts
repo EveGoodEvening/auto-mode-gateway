@@ -2,11 +2,12 @@ import { readFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import scenes from '../fixtures/anthropic/scenes.json' with { type: 'json' };
 import signedReplay from '../fixtures/anthropic/signed-replay.json' with { type: 'json' };
+import orderedMixed from '../fixtures/anthropic/ordered-mixed.json' with { type: 'json' };
 import { anthropicAdapter, extractAnthropicRequest, prepareAnthropicRequest, createClaudeDeliveryState } from '../../src/protocols/anthropic/adapter.js';
 import { extractRequestContext } from '../../src/protocols/request-context.js';
 import { transformAnthropicStream } from '../../src/protocols/anthropic/stream.js';
 import { transformAnthropicNonstream } from '../../src/protocols/anthropic/nonstream.js';
-import { AnthropicResponseError, MAX_TOOL_BYTES, MAX_RESPONSE_BYTES } from '../../src/protocols/anthropic/safety.js';
+import { AnthropicResponseError, MAX_TOOL_BYTES, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES } from '../../src/protocols/anthropic/safety.js';
 import type { AdapterOptions, RequestContext } from '../../src/protocols/types.js';
 import type { Verdict } from '../../src/gate/types.js';
 
@@ -44,6 +45,47 @@ function jsonResponse(value: unknown): Response {
 }
 function tool(index: number, id: string, input: unknown = {}): unknown {
   return { type: 'content_block_start', index, content_block: { type: 'tool_use', id, name: 'Bash', input } };
+}
+
+function parsedEvents(text: string): Record<string, unknown>[] {
+  return text.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5)) as Record<string, unknown>);
+}
+function orderedEvents(content: readonly Record<string, unknown>[], firstIndex = 0): Record<string, unknown>[] {
+  return [...content.flatMap((block, offset) => {
+    const index = firstIndex + offset;
+    const isTool = block.type === 'tool_use';
+    return [
+      { type: 'content_block_start', index, content_block: isTool ? { ...block, input: {} } : block.type === 'text' ? { ...block, text: '' } : block },
+      ...(isTool || block.type === 'text' ? [{ type: 'content_block_delta', index, delta: isTool ? { type: 'input_json_delta', partial_json: JSON.stringify(block.input) } : { type: 'text_delta', text: block.text } }] : []),
+      { type: 'content_block_stop', index },
+    ];
+  }), { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: orderedMixed.usage }, { type: 'message_stop' }];
+}
+// Model a consumer that constructs history in start-arrival order, never sorted by index.
+function logicalContent(text: string): { index: unknown; block: Record<string, unknown> }[] {
+  const content: { index: unknown; block: Record<string, unknown> }[] = [];
+  const inputs = new Map<unknown, string>();
+  const open = new Set<unknown>();
+  for (const event of parsedEvents(text)) {
+    if (event.type === 'content_block_start') {
+      expect(open.has(event.index)).toBe(false);
+      open.add(event.index);
+      content.push({ index: event.index, block: { ...event.content_block as Record<string, unknown> } });
+    } else if (event.type === 'content_block_delta') {
+      expect(open.has(event.index)).toBe(true);
+      const item = content.find(candidate => candidate.index === event.index)!;
+      const delta = event.delta as Record<string, unknown>;
+      if (delta.type === 'input_json_delta') inputs.set(event.index, (inputs.get(event.index) ?? '') + String(delta.partial_json));
+      else if (delta.type === 'text_delta') item.block.text = String(item.block.text ?? '') + String(delta.text);
+      else if (delta.type === 'thinking_delta') item.block.thinking = String(item.block.thinking ?? '') + String(delta.thinking);
+      else if (delta.type === 'signature_delta') item.block.signature = String(item.block.signature ?? '') + String(delta.signature);
+    } else if (event.type === 'content_block_stop') {
+      expect(open.delete(event.index)).toBe(true);
+      if (inputs.has(event.index)) content.find(candidate => candidate.index === event.index)!.block.input = JSON.parse(inputs.get(event.index)!);
+    } else if (event.type === 'message_delta' || event.type === 'message_stop') expect(open.size).toBe(0);
+  }
+  expect(open.size).toBe(0);
+  return content;
 }
 
 afterEach(() => vi.useRealTimers());
@@ -120,24 +162,24 @@ describe('Anthropic transparent stream', () => {
     const input = wire(scenes.single);
     expect(await collect(transformAnthropicStream(source(input, size), context, options()))).toBe(input);
   });
-  it('passes text/thinking/ping immediately while all execution remains private pending explicit approval', async () => {
+  it('passes complete early text/thinking immediately before withholding tool and later text', async () => {
     const decision = Promise.withResolvers<Verdict>();
-    const config = options();
-    config.onToolCall = vi.fn(() => decision.promise);
-    const output = transformAnthropicStream(source(wire([
-      scenes.single[0], { ...scenes.text[2], index: 1 }, { ...scenes.thinking[1], index: 2 }, scenes.ping[0], ...scenes.single.slice(1),
-    ])), context, config).getReader();
-    const emitted: string[] = [];
-    for (let i = 0; i < 3; i++) emitted.push(new TextDecoder().decode((await output.read()).value));
-    expect(emitted.join('')).not.toContain('tool_use');
-    expect(emitted.join('')).toContain('text_delta');
-    expect(emitted.join('')).toContain('thinking_delta');
-    expect(emitted.join('')).toContain('ping');
-    const pending = output.read();
+    const config = { ...options(), onToolCall: vi.fn(() => decision.promise) };
+    const early = [...scenes.text.filter(event => event.type.startsWith('content_block')), ...scenes.thinking.filter(event => event.type.startsWith('content_block')).map(event => ({ ...event, index: 1 }))];
+    const input = [...early, ...orderedEvents(orderedMixed.content, 2)];
+    const reader = transformAnthropicStream(source(wire(input)), context, config).getReader();
+    let emitted = '';
+    for (let index = 0; index < early.length; index++) emitted += new TextDecoder().decode((await reader.read()).value);
+    expect(emitted).toBe(wire(early));
+    const pending = reader.read();
+    let settled = false;
+    void pending.then(() => { settled = true; });
     await vi.waitFor(() => expect(config.onToolCall).toHaveBeenCalledOnce());
+    expect(settled).toBe(false);
     decision.resolve(verdict());
-    expect(new TextDecoder().decode((await pending).value)).toContain('tool_use');
-    await output.cancel();
+    let rest = new TextDecoder().decode((await pending).value);
+    for (;;) { const item = await reader.read(); if (item.done) break; rest += new TextDecoder().decode(item.value); }
+    expect(logicalContent(rest)).toEqual(orderedMixed.content.map((block, index) => ({ index: index + 2, block })));
   });
   it('marks partial JSON unparseable with diagnostics and never calls allow', async () => {
     const config = options();
@@ -607,4 +649,399 @@ it.each([true, false])('registers bounded shadow observation before response com
   decision.resolve(verdict('block'));
   await Promise.all(observations);
   expect(settled).toBe(true);
+});
+
+describe('Anthropic ordered execution suffix', () => {
+  it.each(['native', 'allow', 'rewrite'] as const)('preserves tool0 then marker1 and nonstream parity for %s', async mode => {
+    const config: AdapterOptions = { ...options(), delivery: mode === 'native' ? 'native' : 'rewrite', onToolCall: vi.fn(async () => verdict(mode === 'allow' ? 'allow' : 'block')) };
+    const request = { ...context, safeguards: [] };
+    const output = await collect(transformAnthropicStream(source(wire(orderedEvents(orderedMixed.content)), 1), request, config));
+    const body = await (await transformAnthropicNonstream(jsonResponse({ type: 'message', content: orderedMixed.content, stop_reason: 'tool_use', usage: orderedMixed.usage }), request, config)).json() as { content: Record<string, unknown>[]; stop_reason: string; usage: unknown };
+    const content = logicalContent(output);
+    expect(content.map(item => item.index)).toEqual([0, 1]);
+    expect(content.map(item => item.block)).toEqual(body.content);
+    expect(content[1]!.block).toEqual(orderedMixed.content[1]);
+    if (mode === 'rewrite') expect(content[0]!.block).toEqual({ type: 'text', text: expect.stringContaining('fixture-deny') });
+    else expect(content[0]!.block).toEqual(orderedMixed.content[0]);
+    const frames = parsedEvents(output);
+    expect(frames.slice(-2).map(event => event.type)).toEqual(['message_delta', 'message_stop']);
+    expect(frames.at(-2)).toMatchObject({ delta: { stop_reason: body.stop_reason }, usage: body.usage });
+    expect(body.stop_reason).toBe(mode === 'rewrite' ? 'end_turn' : 'tool_use');
+    if (mode === 'native') expect(frames.at(-2)).toMatchObject({ delta: { safeguard_results: [{ status: { tool_uses: { ordered_probe: { outcome: 'flagged', explanation: expect.stringContaining('fixture-deny') } } } }] } });
+  });
+
+  it.each([false, true])('keeps all mixed multi-tool positions with total denial=%s', async total => {
+    const content = [orderedMixed.content[0]!, orderedMixed.content[1]!, { type: 'tool_use', id: 'second', name: 'Bash', input: { command: 'pwd' } }, { type: 'text', text: 'LAST_MARKER' }];
+    const config = { ...options(), onToolCall: vi.fn<AdapterOptions['onToolCall']>(async call => verdict(total || call.id === 'ordered_probe' ? 'block' : 'allow')) };
+    const output = await collect(transformAnthropicStream(source(wire(orderedEvents(content))), context, config));
+    const body = await (await transformAnthropicNonstream(jsonResponse({ type: 'message', content, stop_reason: 'tool_use' }), context, config)).json() as { content: Record<string, unknown>[]; stop_reason: string };
+    expect(logicalContent(output)).toEqual(body.content.map((block, index) => ({ index, block })));
+    expect(body.content[1]).toEqual(content[1]);
+    expect(body.content[3]).toEqual(content[3]);
+    expect(body.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('fixture-deny') });
+    expect(body.content[2]).toEqual(total ? { type: 'text', text: expect.stringContaining('fixture-deny') } : content[2]);
+    expect(parsedEvents(output).at(-2)).toMatchObject({ delta: { stop_reason: total ? 'end_turn' : 'tool_use' } });
+  });
+
+  it('withholds thinking, signature, redacted and future content plus unknown state until approval', async () => {
+    const decision = Promise.withResolvers<Verdict>();
+    const config = { ...options(), onToolCall: vi.fn(() => decision.promise) };
+    const content = [orderedMixed.content[0]!, { type: 'thinking', thinking: '', signature: '' }, { type: 'redacted_thinking', data: 'OPAQUE_REDACTED' }, { type: 'future_block', payload: { exact: 'FUTURE_DATA' } }, orderedMixed.content[1]!];
+    const events = orderedEvents(content);
+    const stop = events.findIndex(event => event.type === 'content_block_stop' && event.index === 1);
+    events.splice(stop, 0, { type: 'content_block_delta', index: 1, delta: { type: 'thinking_delta', thinking: 'LATE_THOUGHT' } }, { type: 'content_block_delta', index: 1, delta: { type: 'signature_delta', signature: 'EXACT_SIGNATURE' } });
+    const unknown = 'event: future_state\ndata: {"type":"future_state","value":"LATE_STATE"}\n\n';
+    const input = wire(events.slice(0, -2)) + unknown + wire(events.slice(-2));
+    const reader = transformAnthropicStream(source(input, 7), context, config).getReader();
+    const pending = reader.read();
+    let released = false;
+    void pending.then(() => { released = true; });
+    await vi.waitFor(() => expect(config.onToolCall).toHaveBeenCalledOnce());
+    expect(released).toBe(false);
+    decision.resolve(verdict());
+    let output = new TextDecoder().decode((await pending).value);
+    for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); }
+    expect(output).toBe(input);
+    expect(logicalContent(output).map(item => item.block)).toEqual([content[0], { type: 'thinking', thinking: 'LATE_THOUGHT', signature: 'EXACT_SIGNATURE' }, ...content.slice(2)]);
+  });
+
+  it('bypasses only ping, error and control-only frames while the suffix remains private', async () => {
+    let upstream!: ReadableStreamDefaultController<Uint8Array>;
+    const cancel = vi.fn();
+    const config = options();
+    const controls = ': keepalive\r\nid: control\r\nretry: 10\r\n\r\n' + wire([{ type: 'ping' }, { type: 'error', error: { type: 'overloaded_error', message: 'VISIBLE_ERROR' } }]);
+    const input = wire(orderedEvents(orderedMixed.content).slice(0, -2)) + controls;
+    const reader = transformAnthropicStream(new ReadableStream<Uint8Array>({ start(controller) { upstream = controller; controller.enqueue(encoder.encode(input)); }, cancel }), context, config).getReader();
+    let output = '';
+    for (let index = 0; index < 3; index++) output += new TextDecoder().decode((await reader.read()).value);
+    expect(output).toBe(controls);
+    expect(config.onToolCall).not.toHaveBeenCalled();
+    const pending = reader.read();
+    const rejected = expect(pending).rejects.toThrow();
+    upstream.error(new Error('fixture upstream failure'));
+    await rejected;
+    expect(output).not.toContain('AMP_ORDERED_MARKER');
+    expect(output).not.toContain('tool_use');
+  });
+
+  it.each(['text', 'thinking', 'redacted_thinking', 'signature'] as const)('bounds retained %s suffix using sub-cap frames without execution leakage', async kind => {
+    const payload = 'x'.repeat(256 * 1024);
+    const count = kind === 'text' ? 33 : 17;
+    const contentType = kind === 'signature' ? 'thinking' : kind;
+    const start = { type: 'content_block_start', index: 1, content_block: { type: contentType, [kind === 'signature' ? 'thinking' : kind]: '' } };
+    const delta = { type: 'content_block_delta', index: 1, delta: { type: `${kind}_delta`, [kind]: payload } };
+    const suffix = kind === 'redacted_thinking'
+      ? Array.from({ length: count }, (_, offset) => [{ type: 'content_block_start', index: offset + 1, content_block: { type: kind, data: payload } }, { type: 'content_block_stop', index: offset + 1 }]).flat()
+      : [start, ...Array.from({ length: count }, () => delta), { type: 'content_block_stop', index: 1 }];
+    const frames = [tool(0, 'bounded'), { type: 'content_block_stop', index: 0 }, ...suffix, { type: 'message_stop' }];
+    const raw = wire(frames);
+    for (const frame of suffix) expect(encoder.encode(wire([frame])).byteLength).toBeLessThan(MAX_TOOL_BYTES);
+    if (kind !== 'text') {
+      expect(encoder.encode(raw).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
+      expect(count * payload.length).toBeGreaterThan(MAX_REASONING_BYTES);
+    }
+    const config = options();
+    const reader = transformAnthropicStream(source(raw, 65536), context, config).getReader();
+    let output = '';
+    await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })()).rejects.toThrow(kind === 'text' ? '8 MiB' : '4 MiB');
+    expect(output).toBe('');
+    expect(config.onToolCall).not.toHaveBeenCalled();
+  });
+
+
+  it.each(['eof', 'duplicate'] as const)('discards every suffix byte on late %s', async failure => {
+    const events = orderedEvents(orderedMixed.content).slice(0, -2);
+    if (failure === 'duplicate') events.push({ type: 'content_block_start', index: 2, content_block: orderedMixed.content[0] }, { type: 'content_block_stop', index: 2 }, { type: 'message_stop' });
+    const config = options();
+    const reader = transformAnthropicStream(source(wire(events)), context, config).getReader();
+    let output = '';
+    await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })()).rejects.toThrow();
+    expect(output).toBe('');
+    expect(config.onToolCall).not.toHaveBeenCalled();
+  });
+
+  it('cancels held suffix and in-flight decisions without releasing late data', async () => {
+    const decision = Promise.withResolvers<Verdict>();
+    let signal: AbortSignal | undefined;
+    const config = { ...options(), onToolCall: vi.fn<AdapterOptions['onToolCall']>((_call, _context, current) => { signal = current; return decision.promise; }) };
+    const reader = transformAnthropicStream(source(wire(orderedEvents(orderedMixed.content))), context, config).getReader();
+    const pending = reader.read();
+    await vi.waitFor(() => expect(config.onToolCall).toHaveBeenCalledOnce());
+    await reader.cancel('ordered suffix disconnected');
+    expect(signal?.aborted).toBe(true);
+    expect(await pending).toMatchObject({ done: true, value: undefined });
+    decision.resolve(verdict());
+  });
+
+  it('serializes backpressured release without changing logical order', async () => {
+    const config = options();
+    const raw = wire(orderedEvents(orderedMixed.content));
+    const reader = transformAnthropicStream(source(raw, 7), context, config).getReader();
+    let output = '';
+    for (;;) {
+      const item = await reader.read();
+      if (item.done) break;
+      output += new TextDecoder().decode(item.value);
+      await Promise.resolve();
+    }
+    expect(output).toBe(raw);
+    expect(logicalContent(output)).toEqual(orderedMixed.content.map((block, index) => ({ index, block })));
+    expect(config.onToolCall).toHaveBeenCalledOnce();
+  });
+
+  it('shadow releases exact mixed suffix bytes before observation resolves', async () => {
+    const decision = Promise.withResolvers<Verdict>();
+    const config = { ...options(), mode: 'shadow' as const, onToolCall: vi.fn(() => decision.promise) };
+    const raw = wire(orderedEvents(orderedMixed.content));
+    expect(await collect(transformAnthropicStream(source(raw, 1), context, config))).toBe(raw);
+    decision.resolve(verdict('block'));
+  });
+});
+
+describe('Anthropic suffix allocation and deadline failures', () => {
+  it.each(['native', 'rewrite'] as const)('preflights %s replacement and terminal encodings before any execution release', async delivery => {
+    const frames = orderedEvents(orderedMixed.content);
+    const markerDelta = frames.findIndex(event => event.type === 'content_block_delta' && event.index === 1);
+    const emptyDelta = { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '' } };
+    frames.splice(markerDelta, 1, ...Array.from({ length: 32 }, () => ({ ...emptyDelta, delta: { type: 'text_delta', text: 'x'.repeat(250 * 1024) } })), emptyDelta);
+    const padding = MAX_RESPONSE_BYTES - 1500 - encoder.encode(wire(frames)).byteLength;
+    expect(padding).toBeGreaterThan(0);
+    emptyDelta.delta.text = 'x'.repeat(padding);
+    const raw = wire(frames);
+    expect(encoder.encode(raw).byteLength).toBe(MAX_RESPONSE_BYTES - 1500);
+    for (const frame of frames) expect(encoder.encode(wire([frame])).byteLength).toBeLessThan(MAX_TOOL_BYTES);
+    const config = { ...options(), delivery, onToolCall: vi.fn<AdapterOptions['onToolCall']>(async () => verdict('block', { reasons: ['r'.repeat(4000)] })) };
+    const reader = transformAnthropicStream(source(raw, 65536), { ...context, safeguards: [] }, config).getReader();
+    let output = '';
+    await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })()).rejects.toThrow('8 MiB');
+    expect(config.onToolCall).toHaveBeenCalledOnce();
+    expect(output).toBe('');
+  });
+
+  it('charges retained terminal payload together with the ordinary suffix before deciding', async () => {
+    const frames = orderedEvents(orderedMixed.content);
+    const terminal = frames.find(event => event.type === 'message_delta')!;
+    terminal.usage = { output_tokens: 7, extension: 'u'.repeat(256 * 1024) };
+    const deltaIndex = frames.findIndex(event => event.type === 'content_block_delta' && event.index === 1);
+    const paddingDelta = { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '' } };
+    frames.splice(deltaIndex, 1, ...Array.from({ length: 30 }, () => ({ ...paddingDelta, delta: { type: 'text_delta', text: 'x'.repeat(256 * 1024) } })), paddingDelta);
+    paddingDelta.delta.text = 'x'.repeat(MAX_RESPONSE_BYTES - 128 * 1024 - encoder.encode(wire(frames)).byteLength);
+    const raw = wire(frames);
+    expect(encoder.encode(raw).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
+    const config = options();
+    const reader = transformAnthropicStream(source(raw, 65536), context, config).getReader();
+    let output = '';
+    await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })()).rejects.toThrow('8 MiB');
+    expect(output).toBe('');
+    expect(config.onToolCall).not.toHaveBeenCalled();
+  });
+
+  it.each(['idle', 'completion', 'decision'] as const)('never releases the mixed suffix when the %s deadline expires', async deadline => {
+    vi.useFakeTimers();
+    const decision = Promise.withResolvers<Verdict>();
+    const cancel = vi.fn();
+    let upstream!: ReadableStreamDefaultController<Uint8Array>;
+    let signal: AbortSignal | undefined;
+    const config: AdapterOptions = { ...options(), onToolCall: vi.fn((_call, _context, current) => { signal = current; return decision.promise; }) };
+    const upstreamSource = new ReadableStream<Uint8Array>({ start(controller) { upstream = controller; controller.enqueue(encoder.encode(wire(orderedEvents(orderedMixed.content).slice(0, -2)))); }, cancel });
+    const reader = transformAnthropicStream(upstreamSource, context, config).getReader();
+    let output = '';
+    const consuming = (async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })();
+    const rejected = expect(consuming).rejects.toThrow('deadline');
+    if (deadline === 'decision') {
+      upstream.enqueue(encoder.encode(wire(orderedEvents([]))));
+      upstream.close();
+      await vi.advanceTimersByTimeAsync(60_001);
+      expect(signal?.aborted).toBe(true);
+    } else if (deadline === 'completion') {
+      for (let index = 0; index < 3; index++) {
+        await vi.advanceTimersByTimeAsync(20_000);
+        if (index < 2) upstream.enqueue(encoder.encode(wire([{ type: 'ping' }])));
+      }
+      await vi.advanceTimersByTimeAsync(1);
+    } else await vi.advanceTimersByTimeAsync(30_001);
+    await rejected;
+    expect(output).not.toContain('tool_use');
+    expect(output).not.toContain('AMP_ORDERED_MARKER');
+    expect(output).not.toContain('message_stop');
+    if (deadline !== 'decision') { expect(cancel).toHaveBeenCalled(); expect(config.onToolCall).not.toHaveBeenCalled(); }
+    decision.resolve(verdict());
+  });
+});
+
+it('delivers a complete pure-text block while upstream is still open without any decision', async () => {
+  let upstream!: ReadableStreamDefaultController<Uint8Array>;
+  const config = options();
+  const early = wire(orderedEvents([orderedMixed.content[1]!]).slice(0, -2));
+  const reader = transformAnthropicStream(new ReadableStream<Uint8Array>({ start(controller) { upstream = controller; controller.enqueue(encoder.encode(early)); } }), context, config).getReader();
+  let output = '';
+  for (let index = 0; index < 3; index++) output += new TextDecoder().decode((await reader.read()).value);
+  expect(output).toBe(early);
+  expect(logicalContent(output)).toEqual([{ index: 0, block: orderedMixed.content[1] }]);
+  expect(config.onToolCall).not.toHaveBeenCalled();
+  upstream.close();
+  expect(await reader.read()).toMatchObject({ done: true });
+});
+
+it('charges retained initial parameters and ordinary suffix to one total ledger', async () => {
+  const input = { command: 'x'.repeat(750 * 1024) };
+  const delta = { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'x'.repeat(256 * 1024) } };
+  const frames = [tool(0, 'parameters_plus_suffix', input), { type: 'content_block_stop', index: 0 }, { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } }, ...Array.from({ length: 28 }, () => delta), { type: 'content_block_stop', index: 1 }, { type: 'message_stop' }];
+  const raw = wire(frames);
+  expect(encoder.encode(raw).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
+  expect(encoder.encode(raw).byteLength + encoder.encode(JSON.stringify(input)).byteLength).toBeGreaterThan(MAX_RESPONSE_BYTES);
+  for (const frame of frames) expect(encoder.encode(wire([frame])).byteLength).toBeLessThan(MAX_TOOL_BYTES);
+  const config = options();
+  const reader = transformAnthropicStream(source(raw, 65536), context, config).getReader();
+  let output = '';
+  await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })()).rejects.toThrow('8 MiB');
+  expect(output).toBe('');
+  expect(config.onToolCall).not.toHaveBeenCalled();
+});
+
+describe('Anthropic nonstream shared representation budgets', () => {
+  it.each(['native', 'rewrite'] as const)('rejects individually sub-cap raw and parsed text before approval in %s', async delivery => {
+    const content = [orderedMixed.content[0]!, { type: 'text', text: 'x'.repeat(5 * 1024 * 1024) }];
+    const raw = JSON.stringify({ type: 'message', content, stop_reason: 'tool_use' });
+    const wireBytes = encoder.encode(raw).byteLength;
+    expect(wireBytes).toBeLessThan(MAX_RESPONSE_BYTES);
+    expect(wireBytes * 2).toBeGreaterThan(MAX_RESPONSE_BYTES);
+    expect(encoder.encode(JSON.stringify(content[0]!.input)).byteLength).toBeLessThan(MAX_TOOL_BYTES);
+    const onNativeDelivered = vi.fn();
+    const config = { ...options(), delivery, onNativeDelivered };
+    await expect(transformAnthropicNonstream(new Response(raw), { ...context, safeguards: [] }, config)).rejects.toThrow('8 MiB');
+    expect(config.onToolCall).not.toHaveBeenCalled();
+    expect(onNativeDelivered).not.toHaveBeenCalled();
+  });
+
+  it.each(['thinking', 'redacted_thinking', 'signature'] as const)('rejects individually sub-cap 2.25MiB raw and parsed %s before approval', async kind => {
+    const payload = 'x'.repeat(2304 * 1024);
+    const block = kind === 'thinking' ? { type: 'thinking', thinking: payload, signature: '' } : kind === 'redacted_thinking' ? { type: kind, data: payload } : { type: 'thinking', thinking: '', signature: payload };
+    const blockBytes = encoder.encode(JSON.stringify(block)).byteLength;
+    const raw = JSON.stringify({ type: 'message', content: [orderedMixed.content[0], block], stop_reason: 'tool_use' });
+    expect(encoder.encode(raw).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
+    expect(encoder.encode(raw).byteLength * 3).toBeLessThan(MAX_RESPONSE_BYTES);
+    expect(blockBytes).toBeLessThan(MAX_REASONING_BYTES);
+    expect(blockBytes * 2).toBeGreaterThan(MAX_REASONING_BYTES);
+    const config = options();
+    await expect(transformAnthropicNonstream(new Response(raw), context, config)).rejects.toThrow('4 MiB');
+    expect(config.onToolCall).not.toHaveBeenCalled();
+  });
+});
+
+it.each(['native', 'rewrite'] as const)('reserves %s nonstream serialization and encoded output before returning execution', async delivery => {
+  const value = { type: 'message', content: [orderedMixed.content[0], { type: 'text', text: 'x'.repeat(5 * 512 * 1024) }], stop_reason: 'tool_use' };
+  const raw = JSON.stringify(value);
+  expect(encoder.encode(raw).byteLength * 3).toBeLessThan(MAX_RESPONSE_BYTES);
+  const onNativeDelivered = vi.fn();
+  const config = { ...options(), delivery, onNativeDelivered, onToolCall: vi.fn<AdapterOptions['onToolCall']>(async () => verdict('block')) };
+  await expect(transformAnthropicNonstream(new Response(raw), { ...context, safeguards: [] }, config)).rejects.toThrow('8 MiB');
+  expect(config.onToolCall).toHaveBeenCalledOnce();
+  expect(onNativeDelivered).not.toHaveBeenCalled();
+});
+
+it.each([0, 1])('keeps the exact 1MiB nonstream tool-input boundary with overflow=%i', async overflow => {
+  const overhead = encoder.encode(JSON.stringify({ command: '' })).byteLength;
+  const input = { command: 'x'.repeat(MAX_TOOL_BYTES - overhead + overflow) };
+  expect(encoder.encode(JSON.stringify(input)).byteLength).toBe(MAX_TOOL_BYTES + overflow);
+  const value = { type: 'message', content: [{ ...orderedMixed.content[0], input }], stop_reason: 'tool_use' };
+  const config = options();
+  const transformed = transformAnthropicNonstream(jsonResponse(value), context, config);
+  if (overflow) {
+    await expect(transformed).rejects.toThrow('1 MiB');
+    expect(config.onToolCall).not.toHaveBeenCalled();
+  } else {
+    expect(await (await transformed).json()).toEqual(value);
+    expect(config.onToolCall).toHaveBeenCalledOnce();
+  }
+});
+
+it.each([0, 1])('enforces the exact 8MiB raw/decode/parsed reservation boundary with overflow=%i byte', async overflow => {
+  // The source numeric token has three bytes. Its canonical representation has
+  // five/six bytes, making the parse reservation larger by exactly two/three.
+  const numericToken = overflow ? '1e5' : '1e4';
+  const template = `{"type":"message","content":[${JSON.stringify(orderedMixed.content[0])},{"type":"text","text":""}],"stop_reason":"tool_use","numeric":${numericToken}}`;
+  const wireSize = (MAX_RESPONSE_BYTES - 2) / 3;
+  expect(Number.isInteger(wireSize)).toBe(true);
+  const raw = template.replace('"text":""', `"text":"${'x'.repeat(wireSize - encoder.encode(template).byteLength)}"`);
+  const rawBytes = encoder.encode(raw).byteLength;
+  const parsedBytes = encoder.encode(JSON.stringify(JSON.parse(raw))).byteLength;
+  expect(rawBytes).toBe(wireSize);
+  expect(rawBytes * 2 + parsedBytes).toBe(MAX_RESPONSE_BYTES + overflow);
+  const config = options();
+  const transformed = transformAnthropicNonstream(new Response(raw), context, config);
+  if (overflow) {
+    await expect(transformed).rejects.toThrow('8 MiB');
+    expect(config.onToolCall).not.toHaveBeenCalled();
+  } else {
+    expect(await (await transformed).text()).toBe(raw);
+    expect(config.onToolCall).toHaveBeenCalledOnce();
+  }
+});
+
+it.each([0, 1])('enforces the inclusive 4MiB retained reasoning peak with overflow=%i byte before approval', async overflow => {
+  const numericToken = overflow ? '1e4' : '1e3';
+  const template = `{"type":"thinking","thinking":"","signature":"BOUNDARY_SIGNATURE","numeric":${numericToken}}`;
+  const blockSize = (MAX_REASONING_BYTES - 1) / 3;
+  const rawBlock = template.replace('"thinking":""', `"thinking":"${'x'.repeat(blockSize - encoder.encode(template).byteLength)}"`);
+  const sourceBytes = encoder.encode(rawBlock).byteLength;
+  const parsedBytes = encoder.encode(JSON.stringify(JSON.parse(rawBlock))).byteLength;
+  // Original source, decoded source and retained parsed reasoning coexist.
+  expect(sourceBytes * 2 + parsedBytes).toBe(MAX_REASONING_BYTES + overflow);
+  const raw = `{"type":"message","content":[${JSON.stringify(orderedMixed.content[0])},${rawBlock}],"stop_reason":"tool_use"}`;
+  expect(encoder.encode(raw).byteLength * 3).toBeLessThan(MAX_RESPONSE_BYTES);
+  const config = options();
+  const transformed = transformAnthropicNonstream(new Response(raw), context, config);
+  if (overflow) {
+    await expect(transformed).rejects.toThrow('4 MiB');
+    expect(config.onToolCall).not.toHaveBeenCalled();
+  } else {
+    expect(await (await transformed).text()).toBe(raw);
+    expect(config.onToolCall).toHaveBeenCalledOnce();
+  }
+});
+
+it.each(['thinking', 'redacted_thinking', 'signature'] as const)('charges original escaped %s source bytes rather than twice its compact parsed size', async kind => {
+  const field = kind === 'redacted_thinking' ? 'data' : kind;
+  const empty = kind === 'redacted_thinking' ? { type: kind, data: '' } : { type: 'thinking', thinking: '', signature: '' };
+  const rawPayload = 'x'.repeat(1536 * 1024) + '\\u0061'.repeat(175_000);
+  const rawBlock = JSON.stringify(empty).replace(`"${field}":""`, `"${field}":"${rawPayload}"`);
+  const compactBlock = JSON.stringify(JSON.parse(rawBlock));
+  const rawBlockBytes = encoder.encode(rawBlock).byteLength;
+  const compactBytes = encoder.encode(compactBlock).byteLength;
+  expect(rawBlockBytes).toBeLessThan(MAX_REASONING_BYTES);
+  expect(compactBytes * 2).toBeLessThan(MAX_REASONING_BYTES);
+  expect(rawBlockBytes + compactBytes).toBeGreaterThan(MAX_REASONING_BYTES);
+  const raw = `{"type":"message","content":[${JSON.stringify(orderedMixed.content[0])},${rawBlock}],"stop_reason":"tool_use"}`;
+  expect(encoder.encode(raw).byteLength * 3).toBeLessThan(MAX_RESPONSE_BYTES);
+  const config = options();
+  await expect(transformAnthropicNonstream(new Response(raw), context, config)).rejects.toThrow('4 MiB');
+  expect(config.onToolCall).not.toHaveBeenCalled();
+});
+
+it.each(['native', 'rewrite'] as const)('reserves preserved %s reasoning serialization and encoding within the shared subset before delivery', async delivery => {
+  const thinking = { type: 'thinking', thinking: 'x'.repeat(1280 * 1024), signature: 'PRESERVED_SIGNATURE' };
+  const blockBytes = encoder.encode(JSON.stringify(thinking)).byteLength;
+  expect(blockBytes * 2).toBeLessThan(MAX_REASONING_BYTES);
+  expect(blockBytes * 4).toBeGreaterThan(MAX_REASONING_BYTES);
+  const raw = JSON.stringify({ type: 'message', content: [orderedMixed.content[0], thinking], stop_reason: 'tool_use' });
+  expect(encoder.encode(raw).byteLength * 4).toBeLessThan(MAX_RESPONSE_BYTES);
+  const onNativeDelivered = vi.fn();
+  const config = { ...options(), delivery, onNativeDelivered, onToolCall: vi.fn<AdapterOptions['onToolCall']>(async () => verdict('block')) };
+  await expect(transformAnthropicNonstream(new Response(raw), { ...context, safeguards: [] }, config)).rejects.toThrow('4 MiB');
+  expect(config.onToolCall).toHaveBeenCalledOnce();
+  expect(onNativeDelivered).not.toHaveBeenCalled();
+});
+
+
+it('rejects the decoded-source reasoning peak before approving an otherwise unchanged allow response', async () => {
+  const thinking = { type: 'thinking', thinking: 'x'.repeat(1536 * 1024), signature: 'EXACT_UNCHANGED_SIGNATURE' };
+  const blockBytes = encoder.encode(JSON.stringify(thinking)).byteLength;
+  expect(blockBytes * 2).toBeLessThan(MAX_REASONING_BYTES);
+  expect(blockBytes * 3).toBeGreaterThan(MAX_REASONING_BYTES);
+  const raw = JSON.stringify({ type: 'message', content: [orderedMixed.content[0], thinking], stop_reason: 'tool_use' });
+  expect(encoder.encode(raw).byteLength * 3).toBeLessThan(MAX_RESPONSE_BYTES);
+  const config = { ...options(), delivery: 'rewrite' as const };
+  await expect(transformAnthropicNonstream(new Response(raw), context, config)).rejects.toThrow('4 MiB');
+  expect(config.onToolCall).not.toHaveBeenCalled();
 });

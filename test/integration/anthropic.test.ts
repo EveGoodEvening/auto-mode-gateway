@@ -6,6 +6,7 @@ import { configSchema } from '../../src/config/schema.js';
 import { createApp } from '../../src/server/app.js';
 import { createMockDecision, type DecisionMode } from './mock-decision.js';
 import { anthropicSceneResponse, createMockRelay, startLoopback, type RelayScene, type RelaySceneName } from './mock-relay.js';
+import orderedMixed from '../fixtures/anthropic/ordered-mixed.json' with { type: 'json' };
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -55,6 +56,43 @@ function nativeResults(body: Record<string, unknown>) {
 }
 
 describe('Anthropic loopback enforcement integration', () => {
+  it.each(['native', 'allow', 'rewrite'] as const)('keeps actual tool0-marker1 arrival order across HTTP and nonstream in %s', async mode => {
+    const content = mode === 'allow' ? [{ ...orderedMixed.content[0]!, input: { command: 'pwd' } }, orderedMixed.content[1]!] : orderedMixed.content;
+    const { request } = await setup({ scene: { content }, delivery: mode === 'native' ? 'native' : 'rewrite', decision: 'deny' });
+    const body = await (await request({ safeguards })).json() as { content: Record<string, unknown>[]; stop_reason: string; usage: { output_tokens: number } };
+    const raw = await (await request({ safeguards, stream: true })).text();
+    const frames = events(raw);
+    const ordered: { index: unknown; block: Record<string, unknown> }[] = [];
+    const inputs = new Map<unknown, string>();
+    const open = new Set<unknown>();
+    for (const frame of frames) {
+      if (frame.type === 'content_block_start') {
+        expect(open.has(frame.index)).toBe(false);
+        open.add(frame.index);
+        ordered.push({ index: frame.index, block: { ...frame.content_block as Record<string, unknown> } });
+      } else if (frame.type === 'content_block_delta') {
+        expect(open.has(frame.index)).toBe(true);
+        const delta = frame.delta as Record<string, unknown>;
+        if (delta.type === 'input_json_delta') inputs.set(frame.index, (inputs.get(frame.index) ?? '') + String(delta.partial_json));
+        if (delta.type === 'text_delta') {
+          const item = ordered.find(candidate => candidate.index === frame.index)!;
+          item.block.text = String(item.block.text ?? '') + String(delta.text);
+        }
+      } else if (frame.type === 'content_block_stop') {
+        expect(open.delete(frame.index)).toBe(true);
+        if (inputs.has(frame.index)) ordered.find(candidate => candidate.index === frame.index)!.block.input = JSON.parse(inputs.get(frame.index)!);
+      } else if (frame.type === 'message_delta' || frame.type === 'message_stop') expect(open.size).toBe(0);
+    }
+    expect(ordered).toEqual(body.content.map((block, index) => ({ index, block })));
+    expect(ordered.map(item => item.index)).toEqual([0, 1]);
+    expect(ordered[1]!.block).toEqual(content[1]);
+    if (mode === 'rewrite') expect(ordered[0]!.block).toMatchObject({ type: 'text', text: expect.stringContaining('auto-mode-proxy') });
+    else expect(ordered[0]!.block).toEqual(content[0]);
+    expect(frames.slice(-2).map(frame => frame.type)).toEqual(['message_delta', 'message_stop']);
+    expect(frames.at(-2)).toMatchObject({ delta: { stop_reason: body.stop_reason }, usage: { output_tokens: body.usage.output_tokens } });
+    expect(body.stop_reason).toBe(mode === 'rewrite' ? 'end_turn' : 'tool_use');
+    if (mode === 'native') expect(nativeResults(frames.at(-2)!.delta as Record<string, unknown>)[0]?.status.tool_uses.ordered_probe?.outcome).toBe('flagged');
+  });
   it.each([false, true])('replaces forged native approval, forward=%s', async (forward) => {
     const { request } = await setup({ scene: 'forged-native', forward });
     const response = await request({ safeguards });
@@ -215,4 +253,32 @@ describe('Anthropic loopback enforcement integration', () => {
     expect(await response.json()).toMatchObject({ error: { type: 'overloaded_error' } });
     expect(decision.requests).toHaveLength(0);
   });
+});
+
+it.each(['text', 'thinking'] as const)('fails nonstream %s aggregate retention before any approval or execution delivery over HTTP', async kind => {
+  const block = kind === 'text'
+    ? { type: 'text', text: 'x'.repeat(5 * 1024 * 1024) }
+    : { type: 'thinking', thinking: 'x'.repeat(3 * 1024 * 1024), signature: 'EXACT_BOUND_SIGNATURE' };
+  for (const delivery of ['native', 'rewrite'] as const) {
+    const { request, decision } = await setup({ scene: { content: [orderedMixed.content[0]!, block] }, delivery, decision: 'allow' });
+    const response = await request({ safeguards, stream: false });
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    const body = await response.text();
+    expect(body).not.toContain('"type":"tool_use"');
+    expect(body).not.toContain('AMP_ORDERED_PROBE');
+    expect(body).not.toContain('EXACT_BOUND_SIGNATURE');
+    expect(decision.requests).toHaveLength(0);
+  }
+});
+
+it('fails the decoded reasoning peak before contacting an allowing provider or returning unchanged execution over HTTP', async () => {
+  const content = [orderedMixed.content[0]!, { type: 'thinking', thinking: 'x'.repeat(1536 * 1024), signature: 'UNCHANGED_PEAK_SIGNATURE' }];
+  const { request, decision } = await setup({ scene: { content }, delivery: 'rewrite', decision: 'allow' });
+  const response = await request({ stream: false });
+  expect(response.status).toBeGreaterThanOrEqual(400);
+  const body = await response.text();
+  expect(body).not.toContain('"type":"tool_use"');
+  expect(body).not.toContain('AMP_ORDERED_PROBE');
+  expect(body).not.toContain('UNCHANGED_PEAK_SIGNATURE');
+  expect(decision.requests).toHaveLength(0);
 });

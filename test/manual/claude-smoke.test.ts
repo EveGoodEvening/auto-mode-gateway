@@ -1,7 +1,15 @@
 import { spawn } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { attachCliProcess, createCliProbeSceneController, observedDenialReturnedToModel } from './claude-smoke.js';
-import type { RecordedRequest, RelayScene } from '../integration/mock-relay.js';
+import { attachCliProcess, createCliProbeSceneController, observedDenialReturnedToModel, observeMixedContentReplay } from './claude-smoke.js';
+import { anthropicSceneResponse, type RecordedRequest, type RelayScene } from '../integration/mock-relay.js';
+import { captureMixedContentDelivery, type MixedContentDelivery, type MixedContentProbe } from './claude-smoke.js';
+import { observedQaClaudeVersion, observeVersionOverrideRewrite, versionOverrideRewriteQaRoute, type VersionOverrideProbeSource, type VersionOverrideRewriteObservation } from './claude-smoke.js';
+import { createClaudeDeliveryState } from '../../src/protocols/anthropic/delivery.js';
+import { anthropicAdapter } from '../../src/protocols/anthropic/adapter.js';
+import { normalizeClaudeCode } from '../../src/gate/normalize/claude-code.js';
+import { createAuditRecord } from '../../src/audit/record.js';
+import type { Verdict } from '../../src/gate/types.js';
+import type { Config } from '../../src/config/schema.js';
 
 const PROBE = 'printf AMP_DENIAL_PROBE';
 
@@ -364,5 +372,419 @@ describe('manual CLI consecutive probe budget', () => {
     });
     expect(observedDenialReturnedToModel(requests, 'probe_1')).toBe(true);
     expect(observedDenialReturnedToModel(requests, 'probe_newer')).toBe(false);
+  });
+});
+
+interface MixedReplayFixture {
+  id: string;
+  marker: string;
+  denial: string;
+  tool: Record<string, unknown>;
+  result: Record<string, unknown>;
+  assistant: Record<string, unknown>[];
+  messages: Record<string, unknown>[];
+  requests: RecordedRequest[];
+  probes: MixedContentProbe[];
+  captured: MixedContentDelivery;
+  deliveries: Map<string, MixedContentDelivery>;
+}
+
+function mixedReplayFixture(delivery: 'native' | 'rewrite'): MixedReplayFixture {
+  const id = 'probe_mixed_1';
+  const marker = `AMP_TRAILING_TEXT_${id}`;
+  const denial = delivery === 'native'
+    ? '[auto-mode-proxy] mock-deny; fixed deny decision; risk=0.95'
+    : '[auto-mode-proxy] mocked decision. Tool Bash was blocked.';
+  const tool = { type: 'tool_use', id, name: 'Bash', input: { command: PROBE } };
+  const result: Record<string, unknown> = { type: 'tool_result', tool_use_id: id, is_error: true, content: denial };
+  const assistant: Record<string, unknown>[] = [
+    delivery === 'native' ? { ...tool } : { type: 'text', text: denial },
+    { type: 'text', text: marker },
+  ];
+  const initialMessages = [{ role: 'user', content: `Safely request ${PROBE} once.` }];
+  const messages: Record<string, unknown>[] = [
+    ...initialMessages,
+    { role: 'assistant', content: assistant },
+    delivery === 'native'
+      ? { role: 'user', content: [result] }
+      : { role: 'user', content: 'Acknowledge the preceding response without any tool.' },
+  ];
+  const requests = [sceneRequest(initialMessages), sceneRequest(messages)];
+  const probes = [{ id, marker, requestIndex: 0 }];
+  const texts: Record<number, string> = delivery === 'native' ? { 1: marker } : { 0: denial, 1: marker };
+  const captured: MixedContentDelivery = { texts, captureFailed: false };
+  if (delivery === 'native') {
+    captured.nativeToolResults = { [id]: { type: 'evaluated', outcome: 'flagged', explanation: denial } };
+  }
+  const deliveries = new Map([[id, captured]]);
+  return { id, marker, denial, tool, result, assistant, messages, requests, probes, captured, deliveries };
+}
+
+function expectReplayRejected(delivery: 'native' | 'rewrite', fixture: MixedReplayFixture): void {
+  const observed = observeMixedContentReplay(delivery, fixture.requests, fixture.probes, fixture.deliveries);
+  expect(observed.passed).toBe(false);
+  expect(observed.failures.some((failure) => failure.probeId === fixture.id)).toBe(true);
+}
+
+describe('manual CLI mixed content replay observer', () => {
+  it.each(['native', 'rewrite'] as const)('accepts the actual next-request %s replay correlated to captured delivery', (delivery) => {
+    const fixture = mixedReplayFixture(delivery);
+    const observed = observeMixedContentReplay(delivery, fixture.requests, fixture.probes, fixture.deliveries);
+    expect(observed.passed).toBe(true);
+    expect(observed.verifiedProbes).toBe(1);
+    expect(observed.failures).toEqual([]);
+  });
+
+  it.each([
+    { label: 'wrong tool ID', change: (f: MixedReplayFixture) => { f.assistant[0]!.id = 'different_probe'; } },
+    { label: 'wrong Bash command', change: (f: MixedReplayFixture) => { f.assistant[0]!.input = { command: 'printf unrelated' }; } },
+    { label: 'missing marker', change: (f: MixedReplayFixture) => { f.assistant.pop(); } },
+    { label: 'marker preceding the tool', change: (f: MixedReplayFixture) => { f.assistant.reverse(); } },
+    { label: 'successful correlated result', change: (f: MixedReplayFixture) => { f.result.is_error = false; } },
+    { label: 'mismatched result ID', change: (f: MixedReplayFixture) => { f.result.tool_use_id = 'other_probe'; } },
+    { label: 'error without denial explanation', change: (f: MixedReplayFixture) => { f.result.content = 'Temporary process error'; } },
+    { label: 'duplicated probe tool', change: (f: MixedReplayFixture) => { f.assistant.push({ ...f.tool }); } },
+    { label: 'marker associated with another assistant turn', change: (f: MixedReplayFixture) => {
+      f.assistant.pop();
+      f.messages.splice(2, 0, { role: 'assistant', content: [{ type: 'text', text: f.marker }] });
+    } },
+  ])('rejects native replay with $label', ({ change }) => {
+    const fixture = mixedReplayFixture('native');
+    change(fixture);
+    expectReplayRejected('native', fixture);
+  });
+
+  it.each([
+    { label: 'different denial text', change: (f: MixedReplayFixture) => { f.assistant[0]!.text = 'Another request was denied, not this captured response'; } },
+    { label: 'missing marker', change: (f: MixedReplayFixture) => { f.assistant.pop(); } },
+    { label: 'marker before denial', change: (f: MixedReplayFixture) => { f.assistant.reverse(); } },
+    { label: 'surviving emitted tool call', change: (f: MixedReplayFixture) => { f.assistant.push({ ...f.tool }); } },
+    { label: 'surviving emitted tool result', change: (f: MixedReplayFixture) => { f.messages[2]!.content = [f.result]; } },
+    { label: 'successful emitted result', change: (f: MixedReplayFixture) => {
+      f.result.is_error = false;
+      f.messages[2]!.content = [f.result];
+    } },
+    { label: 'denial and marker in separate assistant turns', change: (f: MixedReplayFixture) => {
+      f.assistant.pop();
+      f.messages.splice(2, 0, { role: 'assistant', content: [{ type: 'text', text: f.marker }] });
+    } },
+  ])('rejects rewrite replay with $label', ({ change }) => {
+    const fixture = mixedReplayFixture('rewrite');
+    change(fixture);
+    expectReplayRejected('rewrite', fixture);
+  });
+
+  it.each(['native', 'rewrite'] as const)('rejects %s replay when only a later request is correct', (delivery) => {
+    const fixture = mixedReplayFixture(delivery);
+    fixture.requests.splice(1, 0, sceneRequest([{ role: 'user', content: 'Unrelated immediate next request' }]));
+    expectReplayRejected(delivery, fixture);
+  });
+
+  it.each(['native', 'rewrite'] as const)('rejects %s replay when the marker appears only in the original user prompt', (delivery) => {
+    const fixture = mixedReplayFixture(delivery);
+    fixture.assistant.pop();
+    fixture.messages[0]!.content = `Original user prompt mentions ${fixture.marker}, not an assistant replay.`;
+    expectReplayRejected(delivery, fixture);
+  });
+
+  it.each(['native', 'rewrite'] as const)('rejects %s replay without captured delivered-response evidence', (delivery) => {
+    const fixture = mixedReplayFixture(delivery);
+    fixture.deliveries.clear();
+    expectReplayRejected(delivery, fixture);
+  });
+
+  it.each(['native', 'rewrite'] as const)('rejects %s replay after delivered-response capture failure', (delivery) => {
+    const fixture = mixedReplayFixture(delivery);
+    fixture.captured.captureFailed = true;
+    expectReplayRejected(delivery, fixture);
+  });
+
+  it.each(['native', 'rewrite'] as const)('rejects %s replay with a different captured marker', (delivery) => {
+    const fixture = mixedReplayFixture(delivery);
+    fixture.captured.texts[1] = 'AMP_TRAILING_TEXT_other_probe';
+    expectReplayRejected(delivery, fixture);
+  });
+
+  it('rejects rewrite denial replay that differs from actual captured proxy text', () => {
+    const fixture = mixedReplayFixture('rewrite');
+    fixture.captured.texts[0] = '[auto-mode-proxy] A different actual reason. Tool Bash was blocked.';
+    expectReplayRejected('rewrite', fixture);
+  });
+
+  it('rejects rewrite replay even when a non-proxy denial string matches the captured text', () => {
+    const fixture = mixedReplayFixture('rewrite');
+    fixture.captured.texts[0] = 'An unrelated request was denied.';
+    fixture.assistant[0]!.text = fixture.captured.texts[0];
+    expectReplayRejected('rewrite', fixture);
+  });
+
+  it('rejects rewrite replay even when captured proxy text lacks a block explanation', () => {
+    const fixture = mixedReplayFixture('rewrite');
+    fixture.captured.texts[0] = '[auto-mode-proxy] The request completed normally.';
+    fixture.assistant[0]!.text = fixture.captured.texts[0];
+    expectReplayRejected('rewrite', fixture);
+  });
+});
+
+describe('manual CLI authoritative native mixed denial', () => {
+  it('accepts the exact per-ID flagged proxy explanation preserved in the returned tool result', () => {
+    const fixture = mixedReplayFixture('native');
+    expect(fixture.captured.nativeToolResults?.[fixture.id]).toEqual({
+      type: 'evaluated', outcome: 'flagged', explanation: fixture.denial,
+    });
+    const observed = observeMixedContentReplay('native', fixture.requests, fixture.probes, fixture.deliveries);
+    expect(observed).toEqual({ passed: true, verifiedProbes: 1, failures: [] });
+  });
+
+  it.each([
+    { label: 'missing native result capture', change: (f: MixedReplayFixture) => { delete f.captured.nativeToolResults; } },
+    { label: 'native result for a different probe ID', change: (f: MixedReplayFixture) => {
+      f.captured.nativeToolResults = { different_probe: { type: 'evaluated', outcome: 'flagged', explanation: f.denial } };
+    } },
+    { label: 'not_flagged native outcome', change: (f: MixedReplayFixture) => { f.captured.nativeToolResults![f.id]!.outcome = 'not_flagged'; } },
+    { label: 'non-evaluated native result', change: (f: MixedReplayFixture) => { f.captured.nativeToolResults![f.id]!.type = 'unavailable'; } },
+    { label: 'missing native explanation', change: (f: MixedReplayFixture) => { delete f.captured.nativeToolResults![f.id]!.explanation; } },
+    { label: 'empty native explanation', change: (f: MixedReplayFixture) => { f.captured.nativeToolResults![f.id]!.explanation = ''; } },
+    { label: 'whitespace-only native explanation', change: (f: MixedReplayFixture) => { f.captured.nativeToolResults![f.id]!.explanation = '   '; } },
+    { label: 'non-proxy explanation even when replay matches', change: (f: MixedReplayFixture) => {
+      f.captured.nativeToolResults![f.id]!.explanation = 'Permission denied';
+      f.result.content = 'Permission denied';
+    } },
+    { label: 'generic Permission denied tool result', change: (f: MixedReplayFixture) => { f.result.content = 'Permission denied'; } },
+    { label: 'different proxy denial tool result', change: (f: MixedReplayFixture) => {
+      f.result.content = '[auto-mode-proxy] A different decision blocked another operation';
+    } },
+    { label: 'different captured authoritative explanation', change: (f: MixedReplayFixture) => {
+      f.captured.nativeToolResults![f.id]!.explanation = '[auto-mode-proxy] A different authoritative decision blocked this operation';
+    } },
+  ])('rejects $label even with correct call ID, command, marker, and error flag', ({ change }) => {
+    const fixture = mixedReplayFixture('native');
+    change(fixture);
+    expectReplayRejected('native', fixture);
+  });
+});
+
+describe('manual CLI authoritative native SSE capture', () => {
+  it('captures the evaluated flagged per-ID explanation from the actual terminal safeguard_results delta', async () => {
+    const id = 'probe_native_capture';
+    const marker = `AMP_TRAILING_TEXT_${id}`;
+    const explanation = '[auto-mode-proxy] mock-deny; fixed deny decision; risk=0.95';
+    const nativeToolResults = { [id]: { type: 'evaluated', outcome: 'flagged', explanation } };
+    const events = [
+      { type: 'message_start', message: { id: 'message_native_capture', type: 'message', role: 'assistant', content: [] } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id, name: 'Bash', input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify({ command: PROBE }) } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: { type: 'text', text: marker } },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'message_delta', delta: {
+        stop_reason: 'tool_use',
+        safeguard_results: [{ type: 'dangerous_tool_use', status: { type: 'available', tool_uses: nativeToolResults } }],
+      } },
+      { type: 'message_stop' },
+    ];
+    const body = events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
+    const response = new Response(body, { headers: { 'content-type': 'text/event-stream' } });
+    const captured = await captureMixedContentDelivery(response.clone());
+    expect(captured).toEqual({ texts: { 1: marker }, captureFailed: false, nativeToolResults });
+    expect(await response.text()).toBe(body);
+  });
+});
+
+describe('manual CLI mixed content delivered SSE capture', () => {
+  it('captures text starts and deltas by actual content-block index', async () => {
+    const marker = 'AMP_TRAILING_TEXT_probe_capture';
+    const denial = '[auto-mode-proxy] mocked decision. Tool Bash was blocked.';
+    const events = [
+      { type: 'message_start', message: { id: 'message_capture', type: 'message', role: 'assistant', content: [] } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '[auto-mode-proxy]' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ' mocked decision. Tool Bash was blocked.' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: { type: 'text', text: 'AMP_TRAILING_' } },
+      { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'TEXT_probe_capture' } },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'message_stop' },
+    ];
+    const body = events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
+    const response = new Response(body, { headers: { 'content-type': 'text/event-stream' } });
+    const captured = await captureMixedContentDelivery(response.clone());
+    expect(captured).toEqual({ texts: { 0: denial, 1: marker }, captureFailed: false });
+    // Observe a delivered clone, leaving the actual client response readable.
+    expect(await response.text()).toBe(body);
+  });
+
+  it('does not report JSON response bodies as successful streaming capture', async () => {
+    const response = Response.json({ content: [{ type: 'text', text: 'AMP_TRAILING_TEXT_probe_capture' }] });
+    expect((await captureMixedContentDelivery(response)).captureFailed).toBe(true);
+  });
+});
+
+interface VersionOverrideQaFixture {
+  input: VersionOverrideRewriteObservation;
+  sources: Map<string, VersionOverrideProbeSource>;
+  captures: Map<string, MixedContentDelivery>;
+  auditRecords: Record<string, unknown>[];
+  requests: RecordedRequest[];
+}
+
+async function versionOverrideQaFixture(): Promise<VersionOverrideQaFixture> {
+  const route = versionOverrideRewriteQaRoute();
+  const selector = createClaudeDeliveryState();
+  const scenes = createCliProbeSceneController({ mixedContent: true });
+  const history: unknown[] = [];
+  const requests: RecordedRequest[] = [];
+  const sources = new Map<string, VersionOverrideProbeSource>();
+  const captures = new Map<string, MixedContentDelivery>();
+  const auditRecords: Record<string, unknown>[] = [];
+  for (let index = 0; index < 3; index++) {
+    const user = { role: 'user', content: `Request one fixed harmless QA probe ${index + 1}.` };
+    const request = sceneRequest([...history, user]);
+    request.headers.set('user-agent', 'claude-cli/2.1.311 (unit-fixture)');
+    request.body.stream = true;
+    // Synthetic unit data models the observed client dropping safeguards after
+    // its first rewrite; later requests must NOT count as override hits.
+    if (index === 0) request.body.safeguards = [{ type: 'dangerous_tool_use' }];
+    requests.push(request);
+    scenes.beginTurn('denial');
+    const scene = scenes.sceneForRequest(request);
+    const probe = scenes.mixedProbes.at(-1)!;
+    const tool = scene.content?.[0];
+    if (!tool || tool.type !== 'tool_use') throw new Error('Expected the real safe QA scene');
+    sources.set(probe.id, { userAgent: request.headers.get('user-agent'), safeguards: Object.hasOwn(request.body, 'safeguards') });
+    const context = anthropicAdapter.extractRequest(new TextEncoder().encode(JSON.stringify(request.body)))!;
+    const delivery = selector.select(context, { route: '/cc', version: observedQaClaudeVersion(request.headers.get('user-agent')) ?? undefined }, route);
+    const verdict: Verdict = { outcome: 'block', reasons: ['QA fixed deny'], latency_ms: 0, cost_usd: null, policy_version: 'qa-loopback' };
+    const transformed = await anthropicAdapter.transformResponse(anthropicSceneResponse({ ...scene, stream: true }, request), context, {
+      signal: new AbortController().signal, mode: 'enforce', delivery, onToolCall: async () => verdict,
+    });
+    const captured = await captureMixedContentDelivery(transformed.clone(), { includeStructure: true });
+    await transformed.text();
+    captures.set(probe.id, captured);
+    auditRecords.push(createAuditRecord({
+      action: normalizeClaudeCode({ id: probe.id, name: 'Bash', input: tool.input, raw: tool }, { workdir: '/qa-project' }),
+      verdict, route: '/cc', protocol: 'anthropic-messages', agent_hint: 'claude-code/2.1.311', delivery: delivery === 'rewrite' ? 'rewrite' : 'safeguard',
+    }));
+    history.push(user, { role: 'assistant', content: [
+      { type: 'text', text: captured.texts[0] }, { type: 'text', text: captured.texts[1] },
+    ] });
+    const continuation = { role: 'user', content: `Harmless continuation ${index + 1}; use no tool.` };
+    const next = sceneRequest([...history, continuation]);
+    requests.push(next);
+    scenes.beginTurn('normal');
+    const normal = scenes.sceneForRequest(next);
+    history.push(continuation, { role: 'assistant', content: normal.content });
+  }
+  return { input: { route, probes: scenes.mixedProbes, sources, deliveries: captures, auditRecords,
+    strictRewriteReplay: observeMixedContentReplay('rewrite', requests, scenes.mixedProbes, captures) },
+  sources, captures, auditRecords, requests };
+}
+
+describe('manual CLI exact-version override rewrite QA', () => {
+  it('uses the existing auto-route exact selector, not an explicit rewrite route or unknown-version downgrade', () => {
+    const route = versionOverrideRewriteQaRoute();
+    expect(route).toEqual({ claude_delivery: 'auto', claude_delivery_by_version: { '2.1.311': 'rewrite' } });
+    const selector = createClaudeDeliveryState();
+    const context = { stream: true, safeguards: [{ type: 'dangerous_tool_use' }] };
+    expect(selector.select(context, { route: '/cc', version: '2.1.311' }, route)).toBe('rewrite');
+    expect(selector.select(context, { route: '/cc', version: '2.1.310' }, route)).toBe('native');
+    expect(selector.select(context, { route: '/cc' }, route)).toBe('native');
+    expect(selector.select(context, { route: '/cc', version: '2.1.311' }, { ...route, claude_delivery: 'native' })).toBe('native');
+  });
+
+  it.each([
+    { header: 'claude-cli/2.1.311 (external,cli)', version: '2.1.311' },
+    { header: 'claude-code/2.1.311', version: '2.1.311' },
+    { header: 'claude-cli/2.1.311-rc.1', version: '2.1.311-rc.1' },
+    { header: 'claude-cli/2.1.311garbage', version: null },
+    { header: 'model/claude-sonnet-5', version: null },
+    { header: null, version: null },
+  ])('extracts only observed user-agent version metadata: $header', ({ header, version }) => {
+    expect(observedQaClaudeVersion(header)).toBe(version);
+  });
+
+  it('proves one genuine override hit and all three strict rewrites without inventing later opt-ins', async () => {
+    const fixture = await versionOverrideQaFixture();
+    expect(fixture.input.strictRewriteReplay).toEqual({ passed: true, verifiedProbes: 3, failures: [] });
+    const observed = observeVersionOverrideRewrite(fixture.input);
+    expect(observed.passed).toBe(true);
+    expect(observed.configuration).toEqual(versionOverrideRewriteQaRoute());
+    expect(observed.provenOverrideHits).toBe(1);
+    expect(observed.verifiedRewriteProbes).toBe(3);
+    expect(observed.noOptInRewriteProbes).toBe(2);
+    expect(observed.probes.map((probe) => probe.selectedBy)).toEqual(['exact_version_override', 'no_original_safeguards', 'no_original_safeguards']);
+    expect(observed.probes.every((probe) => probe.observedAgentVersion === '2.1.311' && probe.rewriteAuditBlock && probe.auditServerVersionMatches && probe.capturedRewriteOnly)).toBe(true);
+    expect(observed.failures).toEqual([]);
+  });
+
+  it.each(['native', 'rewrite'] as const)('cannot call an explicit %s route an exact-version override hit', async (delivery) => {
+    const fixture = await versionOverrideQaFixture();
+    fixture.input.route = { ...fixture.input.route, claude_delivery: delivery };
+    expect(observeVersionOverrideRewrite(fixture.input).passed).toBe(false);
+  });
+
+  const invalidOverrideTables: { label: string; overrides: NonNullable<Config['routes'][number]['claude_delivery_by_version']> }[] = [
+    { label: 'wrong exact version', overrides: { '2.1.310': 'rewrite' as const } },
+    { label: 'wrong selected delivery', overrides: { '2.1.311': 'native' as const } },
+    { label: 'broader unrequested version scope', overrides: { '2.1.311': 'rewrite' as const, '2.1.310': 'rewrite' as const } },
+  ];
+  it.each(invalidOverrideTables)('rejects $label', async ({ overrides }) => {
+    const fixture = await versionOverrideQaFixture();
+    fixture.input.route = { claude_delivery: 'auto', claude_delivery_by_version: overrides };
+    expect(observeVersionOverrideRewrite(fixture.input).passed).toBe(false);
+  });
+
+  it.each([null, 'claude-cli/2.1.310', 'claude-cli/2.1.311-rc.1'])('fails an actual source version mismatch even when audits claim the target version: %s', async (userAgent) => {
+    const fixture = await versionOverrideQaFixture();
+    const id = fixture.input.probes[0]!.id;
+    fixture.sources.set(id, { userAgent, safeguards: true });
+    expect(observeVersionOverrideRewrite(fixture.input).passed).toBe(false);
+  });
+
+  it('fails when every rewrite is explained by missing client opt-in, not the override', async () => {
+    const fixture = await versionOverrideQaFixture();
+    for (const probe of fixture.input.probes) fixture.sources.set(probe.id, { userAgent: 'claude-cli/2.1.311', safeguards: false });
+    const observed = observeVersionOverrideRewrite(fixture.input);
+    expect(observed.passed).toBe(false);
+    expect(observed.provenOverrideHits).toBe(0);
+    expect(observed.failures.some((failure) => failure.reason === 'no_genuine_opt_in_version_override_hit')).toBe(true);
+  });
+
+  it.each(['missing', 'wrong-version', 'native-delivery', 'wrong-command', 'duplicate'] as const)('rejects %s per-probe audit provenance despite otherwise valid strict replay', async (kind) => {
+    const fixture = await versionOverrideQaFixture();
+    const first = fixture.auditRecords[0]!;
+    if (kind === 'missing') fixture.auditRecords.shift();
+    if (kind === 'wrong-version') first.agent_hint = 'claude-code/2.1.310';
+    if (kind === 'native-delivery') first.delivery = 'safeguard';
+    if (kind === 'wrong-command') first.action = { raw: { type: 'tool_use', id: fixture.input.probes[0]!.id, name: 'Bash', input: { command: 'printf unrelated' } } };
+    if (kind === 'duplicate') fixture.auditRecords.push(first);
+    expect(observeVersionOverrideRewrite(fixture.input).passed).toBe(false);
+  });
+
+  it.each(['missing-sequence', 'truncated', 'tool-start', 'argument-delta', 'native-result'] as const)('rejects %s wire evidence rather than inferring rewrite from audit totals', async (kind) => {
+    const fixture = await versionOverrideQaFixture();
+    const captured = fixture.captures.get(fixture.input.probes[0]!.id)!;
+    if (kind === 'missing-sequence') delete captured.blockSequence;
+    if (kind === 'truncated') captured.omittedSequenceEvents = 1;
+    if (kind === 'tool-start') captured.blockSequence!.push({ event: 'start', index: 0, kind: 'tool_use' });
+    if (kind === 'argument-delta') captured.blockSequence!.push({ event: 'delta', index: 0, kind: 'input_json_delta' });
+    if (kind === 'native-result') captured.nativeToolResults = {};
+    expect(observeVersionOverrideRewrite(fixture.input).passed).toBe(false);
+  });
+
+  it('requires the unchanged original strict rewrite observer for every marker/replay', async () => {
+    const fixture = await versionOverrideQaFixture();
+    const target = fixture.input.probes[2]!;
+    const next = fixture.requests[target.requestIndex + 1]!;
+    const messages = next.body.messages;
+    if (!Array.isArray(messages)) throw new Error('Expected generated replay messages');
+    for (const message of messages) {
+      if (!message || typeof message !== 'object' || !('content' in message) || !Array.isArray(message.content)) continue;
+      for (const block of message.content) {
+        if (block && typeof block === 'object' && 'text' in block && block.text === target.marker) block.text = 'CORRUPTED_OWN_MARKER';
+      }
+    }
+    fixture.input.strictRewriteReplay = observeMixedContentReplay('rewrite', fixture.requests, fixture.input.probes, fixture.captures);
+    expect(fixture.input.strictRewriteReplay.passed).toBe(false);
+    expect(observeVersionOverrideRewrite(fixture.input).passed).toBe(false);
   });
 });

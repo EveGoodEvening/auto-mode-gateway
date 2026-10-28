@@ -1,10 +1,11 @@
 import { parse as parsePartial } from 'partial-json';
 import type { AdapterOptions, RequestContext, ToolCall } from '../types.js';
 import type { Verdict } from '../../gate/types.js';
+import type { Answers } from '../../decision/types.js';
 
 export const MAX_TOOL_BYTES = 1024 * 1024;
 export const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
-// Thinking remains byte-transparent until a real upstream compatibility error supplies evidence.
+// Early thinking passes through; ordered suffix retention shares this subset cap, without stripping.
 export const MAX_REASONING_BYTES = 4 * 1024 * 1024;
 export const IDLE_TIMEOUT_MS = 30_000;
 export const COMPLETION_TIMEOUT_MS = 60_000;
@@ -85,8 +86,31 @@ export async function decide(calls: readonly ToolCall[], context: RequestContext
 
 export function explanation(verdict: Verdict): string {
   if (verdict.rule === 'provider-unavailable' || verdict.rule === 'decision-timeout') return '[auto-mode-proxy] decision providers unavailable';
-  const probabilities = verdict.probabilities ? Object.entries(verdict.probabilities).map(([name, probability]) => `${name}=${probability}`).join(', ') : '';
-  return `[auto-mode-proxy] ${[verdict.rule, ...verdict.reasons, probabilities].filter(Boolean).join('; ').slice(0, 4096) || 'tool execution blocked'}`;
+  let text = '';
+  const append = (value: string): void => {
+    text += value.slice(0, Math.max(0, 4096 - text.length));
+  };
+  // Preserve the existing joined-prefix format without first allocating an unbounded full join.
+  if (verdict.rule) append(verdict.rule);
+  for (const part of verdict.reasons) {
+    if (!part) continue;
+    if (text) append('; ');
+    append(part);
+    if (text.length === 4096) break;
+  }
+  if (text.length < 4096 && verdict.probabilities) {
+    let first = true;
+    for (const name in verdict.probabilities) {
+      if (!Object.hasOwn(verdict.probabilities, name)) continue;
+      if (first) { if (text) append('; '); first = false; }
+      else append(', ');
+      append(name);
+      append('=');
+      append(String(verdict.probabilities[name as keyof Answers]));
+      if (text.length === 4096) break;
+    }
+  }
+  return `[auto-mode-proxy] ${text || 'tool execution blocked'}`;
 }
 
 export function blockedText(call: ToolCall, verdict: Verdict): string {
