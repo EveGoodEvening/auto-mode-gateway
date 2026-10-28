@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Action, ActionContext } from '../../src/gate/types.js';
 import { resolvePolicy } from '../../src/policy/effective.js';
+import { isReadonlyCommand } from '../../src/policy/readonly-allowlist.js';
 import { normalizePolicyPath, sensitivePaths } from '../../src/policy/sensitive-paths.js';
 
 const context: ActionContext = { platform: 'linux', project_dir: '/work/project', workdir: '/work/project', home_dir: '/home/user' };
@@ -71,6 +72,60 @@ describe('sensitivePaths lexical policy', () => {
     'grep -drecurse token src', 'rg token src', 'find src -type f',
   ])('reviews general recursive sensitive descendant scope in %s', (text) => {
     expect(sensitivePaths({ kind: 'command', tool: 'Bash', text, paths: [], content_truncated: false, raw: {} }, context).reasons).toContain('sensitive_path_scope');
+  });
+
+  it.each(['text', 'argv'] as const)('reviews inert recursive git grep sensitive scope via %s', (form) => {
+    const action: Action = {
+      kind: 'command', tool: form === 'text' ? 'Bash' : 'exec_command',
+      ...(form === 'text' ? { text: 'git --no-pager grep token' } : { argv: ['git', '--no-pager', 'grep', 'token'] }),
+      paths: [], content_truncated: false, raw: {},
+    };
+    const result = sensitivePaths(action, context);
+    expect(result.review).toBe(true);
+    expect(result.reasons).toContain('sensitive_path_scope');
+    expect(isReadonlyCommand(action, undefined, context)).toBe(false);
+
+    const emptySensitivePolicy = resolvePolicy({ sensitive_path_globs: [] });
+    const emptySensitiveResult = sensitivePaths(action, context, emptySensitivePolicy);
+    expect(emptySensitiveResult.review).toBe(false);
+    expect(emptySensitiveResult.reasons).not.toContain('sensitive_path_scope');
+    // Shell policy may independently require Git review even without sensitive globs.
+  });
+
+  it.each([
+    [], ['--no-pager'], ['-P'], ['--paginate'], ['-p'], ['--bare'], ['--no-replace-objects'],
+    ['--literal-pathspecs'], ['--glob-pathspecs'], ['--noglob-pathspecs'], ['--icase-pathspecs'],
+    ['--no-optional-locks'], ['--no-lazy-fetch'], ['--no-advice'],
+    ['-C', '/work/project'], ['-C/work/project'], ['-c', 'core.pager=cat'], ['-ccore.pager=cat'],
+    ['--git-dir', '/work/project/.git'], ['--git-dir=/work/project/.git'],
+    ['--work-tree', '/work/project'], ['--work-tree=/work/project'],
+    ['--namespace', 'scope'], ['--namespace=scope'],
+    ['--config-env', 'core.pager=PAGER'], ['--config-env=core.pager=PAGER'],
+    ['--super-prefix', 'scope'], ['--super-prefix=scope'],
+    ['--exec-path=/usr/lib/git-core'], ['--attr-source=HEAD'],
+    ['--no-pager', '-C', '/work/project', '-c', 'core.pager=cat', '--no-optional-locks'],
+  ].flatMap((flags) => (['text', 'argv'] as const).map((form) => [form, flags] as const)))(
+    'reviews recursive Git grep scope via %s with globals %j', (form, flags) => {
+      const argv = ['git', ...flags, 'grep', 'token'];
+      const action: Action = {
+        kind: 'command', tool: form === 'text' ? 'Bash' : 'exec_command',
+        ...(form === 'text' ? { text: argv.join(' ') } : { argv }),
+        paths: [], content_truncated: false, raw: {},
+      };
+      expect(sensitivePaths(action, context).reasons).toContain('sensitive_path_scope');
+      expect(sensitivePaths(action, context).review).toBe(true);
+      expect(isReadonlyCommand(action, undefined, context)).toBe(false);
+      expect(sensitivePaths(action, context, resolvePolicy({ sensitive_path_globs: [] })).review).toBe(false);
+    },
+  );
+
+  it.each([
+    ['git', '-C', 'grep', 'status'], ['git', '--namespace', 'grep', 'status'],
+    ['git', '--no-pager', 'show', 'grep'], ['git', '--git-dir=grep', 'status'],
+    ['git', '-c', 'grep'], ['git', '--exec-path', 'grep'],
+  ])('does not mistake a Git global value or operand for recursive scope in %j', (...argv) => {
+    const action: Action = { kind: 'command', tool: 'exec_command', argv, paths: [], content_truncated: false, raw: {} };
+    expect(sensitivePaths(action, context).reasons).not.toContain('sensitive_path_scope');
   });
 
   it('preserves nonrecursive explicit safe-file reads', () => {

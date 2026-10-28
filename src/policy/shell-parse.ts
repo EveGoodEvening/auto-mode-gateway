@@ -120,23 +120,26 @@ const WRAPPER_VALUE_OPTIONS: Readonly<Record<string, readonly string[]>> = {
 };
 const WRAPPER_FLAGS: Readonly<Record<string, readonly string[]>> = {
   env: ['-i', '--ignore-environment', '-0', '--null'],
-  sudo: ['-n', '--non-interactive', '-E', '--preserve-env', '-H', '--set-home', '-S', '--stdin', '-k', '--reset-timestamp', '-b', '--background'],
+  sudo: ['-n', '--non-interactive', '-E', '--preserve-env', '-H', '--set-home', '-S', '--stdin', '-k', '--reset-timestamp', '-b', '--background', '-i', '--login', '-s', '--shell', '-A', '--askpass', '-P', '--preserve-groups'],
   doas: ['-n', '-L'], command: ['-p'], exec: ['-c', '-l'], builtin: [],
   nohup: [], nice: [], time: ['-p', '-a', '--append'],
   chroot: ['--skip-chdir'], setsid: ['-c', '--ctty', '-f', '--fork', '-w', '--wait'],
 };
 
-/** Locate the executable through supported prefix wrappers, never through arbitrary operands. */
-export function shellCommand(argv: readonly string[]): readonly string[] {
+/** Undefined means a wrapper's execution could not be resolved, not a harmless command. */
+export function shellCommand(argv: readonly string[]): readonly string[] | undefined {
   let index = 0;
+  let wrapped = false;
   const assignment = /^[A-Za-z_][A-Za-z0-9_]*=/u;
   while (index < argv.length) {
     while (assignment.test(argv[index] ?? '')) index += 1;
+    if (index >= argv.length) return wrapped ? undefined : [];
     const wrapper = shellProgram(argv[index] ?? '');
-    if (!Object.hasOwn(WRAPPER_FLAGS, wrapper)) {
-      return argv.slice(index);
-    }
+    if (!Object.hasOwn(WRAPPER_FLAGS, wrapper)) return argv.slice(index);
+    wrapped = true;
     index += 1;
+    const takesValue = WRAPPER_VALUE_OPTIONS[wrapper] ?? [];
+    const flags = WRAPPER_FLAGS[wrapper] ?? [];
     while (index < argv.length) {
       const option = argv[index]!;
       if (option === '--') {
@@ -144,19 +147,33 @@ export function shellCommand(argv: readonly string[]): readonly string[] {
         break;
       }
       if (!option.startsWith('-') || option === '-') break;
-      const name = option.split('=', 1)[0]!;
-      const takesValue = WRAPPER_VALUE_OPTIONS[wrapper] ?? [];
-      if (takesValue.includes(name)) {
-        index += option.includes('=') ? 1 : 2;
-      } else if (takesValue.some((flag) => flag.length === 2 && option.startsWith(flag) && option.length > 2)) {
-        index += 1;
+      if (option.startsWith('--')) {
+        const equals = option.indexOf('=');
+        const name = equals < 0 ? option : option.slice(0, equals);
+        if (takesValue.includes(name)) {
+          if (equals < 0 && index + 1 >= argv.length) return undefined;
+          index += equals < 0 ? 2 : 1;
+        } else if (flags.includes(option) || (wrapper === 'sudo' && name === '--preserve-env' && equals >= 0)) {
+          index += 1;
+        } else return undefined;
       } else {
-        if (!(WRAPPER_FLAGS[wrapper] ?? []).includes(name)) return [];
-        index += 1;
+        // Parse clusters left-to-right. A value option consumes the cluster suffix
+        // or the next token; values are never searched for executable basenames.
+        let consumesNext = false;
+        for (let offset = 1; offset < option.length; offset += 1) {
+          const flag = `-${option[offset]!}`;
+          if (takesValue.includes(flag)) {
+            consumesNext = offset === option.length - 1;
+            if (consumesNext && index + 1 >= argv.length) return undefined;
+            break;
+          }
+          if (!flags.includes(flag)) return undefined;
+        }
+        index += consumesNext ? 2 : 1;
       }
     }
     // chroot's first operand is a new root directory, not an executable.
     if (wrapper === 'chroot') index += 1;
   }
-  return [];
+  return wrapped ? undefined : [];
 }

@@ -5,6 +5,13 @@ import { DEFAULT_POLICY, type EffectivePolicy } from './effective.js';
 import { sensitivePaths } from './sensitive-paths.js';
 import { parseShell, shellProgram } from './shell-parse.js';
 
+const GIT_METADATA_FLAGS: Readonly<Record<string, true>> = {
+  '--show-prefix': true,
+  '--show-toplevel': true,
+  '--is-inside-work-tree': true,
+  '--is-bare-repository': true,
+};
+
 /** Syntax-only strings are useful for classification; Actions additionally require safe path context. */
 export function isReadonlyCommand(input: Action | string, policy: EffectivePolicy = DEFAULT_POLICY, context: ActionContext = {}): boolean {
   if (typeof input !== 'string') {
@@ -31,22 +38,14 @@ export function isReadonlyCommand(input: Action | string, policy: EffectivePolic
     if (positionalLimit !== undefined && args.filter((arg) => !arg.startsWith('-')).length > positionalLimit) return false;
     if (program === 'find' && args.some((arg) => policy.find_unsafe_arguments.includes(arg))) return false;
     if (program === 'git') {
-      const noPager = args[0] === '--no-pager';
-      const commandIndex = noPager ? 1 : 0;
-      const subcommand = args[commandIndex] ?? '';
+      // Only metadata queries with no index, worktree-content or object access
+      // have an audited helper-free path. Disabling diff/textconv is insufficient:
+      // fsmonitor, filters and lazy object fetching are independent execution paths.
+      if (args[0] !== '--no-pager') return false;
+      const subcommand = args[1] ?? '';
       if (!policy.readonly_git_subcommands.includes(subcommand)) return false;
-      // Pager configuration can launch a process; status does not paginate by default.
-      if (subcommand !== 'status' && !noPager) return false;
-      if (['diff', 'log', 'show'].includes(subcommand)) {
-        const end = args.indexOf('--', commandIndex + 1);
-        const options = args.slice(commandIndex + 1, end < 0 ? undefined : end);
-        // Repository attributes/config may enable helpers even without an enabling flag.
-        if (!options.includes('--no-ext-diff') || !options.includes('--no-textconv')) return false;
-      }
-      if (subcommand === 'blame') {
-        const end = args.indexOf('--', commandIndex + 1);
-        if (!args.slice(commandIndex + 1, end < 0 ? undefined : end).includes('--no-textconv')) return false;
-      }
+      if (subcommand !== 'rev-parse' || args.length < 3) return false;
+      if (!args.slice(2).every((arg) => Object.hasOwn(GIT_METADATA_FLAGS, arg))) return false;
       if (args.some((arg) => {
         const option = arg.split('=', 1)[0]!;
         return policy.git_unsafe_arguments.some((flag) => option === flag

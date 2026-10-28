@@ -53,14 +53,19 @@ export function normalizeApplyPatch(action: Action, patch: unknown, context: Act
     if (operation === 'Add') {
       if (!line.startsWith('+')) malformed = true;
     } else if (operation === 'Update') {
-      if (line === '@@' || (line.startsWith('@@ ') && line.slice(3).trim().length > 0)) {
-        if (endOfFile || (hunk && hunkLines === 0)) malformed = true;
+      const updateLine = line.trimEnd();
+      if (updateLine === '@@' || updateLine.startsWith('@@ ')) {
+        if (hunk && hunkLines === 0) malformed = true;
         hunk = true;
         hunkLines = 0;
-      } else if (line === '*** End of File') {
+        endOfFile = false;
+      } else if (endOfFile && updateLine === '') {
+        continue;
+      } else if (updateLine === '*** End of File') {
         if (!hunk || hunkLines === 0 || endOfFile) malformed = true;
         endOfFile = true;
-      } else if (hunk && !endOfFile && /^[ +-]/.test(line)) {
+      } else if (!endOfFile && (line === '' || /^[ +-]/.test(line))) {
+        hunk = true;
         hunkLines++;
       } else malformed = true;
     } else malformed = true;

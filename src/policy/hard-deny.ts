@@ -40,7 +40,9 @@ export function hardDeny(action: Action, policy: EffectivePolicy = DEFAULT_POLIC
     const parsed = parseShell(pending.pop()!, policy);
     for (let index = 0; index < parsed.segments.length; index += 1) {
       const segment = parsed.segments[index]!;
-      const [executable = '', ...args] = shellCommand(segment.argv);
+      const resolved = shellCommand(segment.argv);
+      if (resolved === undefined) return 'unresolved-execution-wrapper';
+      const [executable = '', ...args] = resolved;
       const program = shellProgram(executable);
       if (policy.shell_interpreters.includes(program)) {
         const flag = args.findIndex((arg) => /^-[^-]*c/u.test(arg));
@@ -63,7 +65,9 @@ export function hardDeny(action: Action, policy: EffectivePolicy = DEFAULT_POLIC
         // Inspect the entire connected pipeline, including intervening decoders/filters.
         for (let next = index + 1; next < parsed.segments.length; next += 1) {
           const target = parsed.segments[next]!;
-          if (policy.shell_interpreters.includes(shellProgram(shellCommand(target.argv)[0] ?? ''))) return 'download-execution';
+          const resolvedTarget = shellCommand(target.argv);
+          if (resolvedTarget === undefined) return 'unresolved-execution-wrapper';
+          if (policy.shell_interpreters.includes(shellProgram(resolvedTarget[0] ?? ''))) return 'download-execution';
           if (target.operator !== '|' && target.operator !== '|&') break;
         }
       }

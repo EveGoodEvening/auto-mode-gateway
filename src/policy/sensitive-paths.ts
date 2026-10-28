@@ -78,6 +78,25 @@ function matchesSensitive(path: string, globs: readonly string[], win: boolean):
 function recursiveSearch(argv: readonly string[]): boolean {
   const program = shellProgram(argv[0] ?? '');
   if (program === 'rg' || program === 'find') return true;
+  if (program === 'git') {
+    // Locate the subcommand without mistaking global option values for it.
+    // Git grep searches repository descendants even without a recursive flag.
+    for (let index = 1; index < argv.length; index++) {
+      const arg = argv[index]!;
+      if (!arg.startsWith('-')) return arg === 'grep';
+      if (['--no-pager', '--paginate', '-P', '-p', '--bare', '--no-replace-objects',
+        '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs',
+        '--no-optional-locks', '--no-lazy-fetch', '--no-advice'].includes(arg)) continue;
+      if (['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--super-prefix'].includes(arg)) {
+        if (++index >= argv.length) return false;
+        continue;
+      }
+      if (/^-(?:C|c).+/.test(arg)
+        || /^--(?:git-dir|work-tree|namespace|config-env|super-prefix|exec-path|attr-source)=/.test(arg)) continue;
+      return false;
+    }
+    return false;
+  }
   if (program !== 'grep') return false;
   for (let index = 1; index < argv.length; index++) {
     const arg = argv[index]!;
