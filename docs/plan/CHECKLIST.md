@@ -38,6 +38,7 @@
   - commander 子命令：`init`（交互生成配置、签发 token、打印三种 agent 接入片段）、`serve [--config] [--log-level]`、`check`（校验配置并向每个决策提供方发送固定 canary 问题，打印延迟与结果）、`eval`、`audit tail [-n]`、`token new`。`token new` 生成 `amp_` + 32 字节 base64url。
   - 位置：`src/cli/index.ts`、`src/cli/{init,serve,check,eval,audit,token}.ts`。
   - 完成标准：`auto-mode-proxy init` 在临时目录生成可被 P0-2 加载的配置；`check` 对 mock provider 返回成功；`token new` 输出符合格式。
+  - Current local evidence: version/help/init/token/real built serve plus C07 real `check` against loopback mock and built `audit tail` are locally verified CLI portions. `eval` remains unavailable until C12; full P0-3 stays unchecked until every original portion is accepted. Audit command availability does not close the P2-8 credential-boundary defect below.
 
 ### Phase 1：直通代理与 Anthropic Messages 适配器
 
@@ -112,12 +113,15 @@
   - `decide(action, ctx) → Verdict{outcome:"allow"|"block"|"uncertain", reasons[], probabilities?, provider?, rule?, latency_ms, cost_usd}`：截断/不可用执行动作安全检查 → 硬拒绝 → 敏感路径标记 → 非敏感只读/管理豁免及泛化 other 直接 allow → 缓存 → 决策链 → 阈值。敏感标记跳过豁免而进入 review；真正泛化 other（含显式 tool_map other）保留原直接 allow，不以未知名称或无执行语义上下文本身为 block 理由；可见 command/path 与不可解析执行输入由 P2-1 先归一为相应待审动作。P4-3 前 uncertain 一律 block；P4-3 后二审确实不可用才应用 on_provider_failure。缓存保留 action/POLICY_VERSION/chain IDs、TTL 600 s/LRU 10000，并加入完整本地内容摘要、有效脱敏 state、policy/provider/二审配置和模式/故障策略隔离；不缓存故障 allow，原始凭证不进键或日志。
   - 位置：`src/gate/decide.ts`、`src/gate/cache.ts`、`src/decision/chain.ts`。
   - 完成标准：单测覆盖每条分支、failover、缓存命中、fail-closed/fail-open。
+  - Historical C07 full1331test gates and actual gate/cache smoke passed; independent provider/transport and gate/cache/chain reviews (`agent://c07-review-1`, `agent://c07-review-2`) CLEAN. P2-7 local acceptance retained; no HTTP tool-use gate installation or live-provider acceptance claimed.
 
 - [x] P2-8 审计日志
   - JSONL 追加写（异步、失败不影响请求）；记录 `ts, route, protocol, agent_hint(user-agent/x-claude-code-request-class), session_id(x-claude-code-session-id 或 x-codex-* 或无), tool, action(脱敏), rule, provider, probabilities, verdict, delivery("safeguard"|"rewrite"|"shadow"|"passthrough"), latency_ms, cost_usd, policy_version`；`audit tail` 命令按行格式化输出。
   - 位置：`src/audit/{logger,record}.ts`、`src/cli/audit.ts`。
   - 完成标准：集成测试后文件可被逐行 `JSON.parse`；grep 不到任何 token/key 明文。
-  - C07 parent typecheck/lint/test/build passed1331tests with maxWorkers2. Direct actual pipeline smoke: built check success on mock, model allow then cache allow, harddeny block,2total provider calls including canary,3JSONL audit records, configured secrets absent. Actual built audit tail returned parseable block record. Independent review underway; no live provider/HTTP-gate acceptance claimed.
+  - Historical pre-correction evidence only: C07 parent typecheck/lint/test/build passed1331tests with maxWorkers2. Actual pipeline smoke exercised built check on mock, model allow then cache allow, harddeny block,2total provider calls including canary,3JSONL audit records with configured secrets absent in that sample, and built audit tail returning a parseable block record. It did not cover a credential crossing the excerpt boundary and cannot establish current P2-8 acceptance. No live provider/HTTP-gate acceptance claimed.
+  - Audit source review `agent://c07-review-3` found the exact partial-credential boundary defect: normalization truncates `action.content_excerpt` at 2048 UTF-8 bytes before whole-literal configured-credential redaction. A credential straddling that boundary can leave all but its last character in the excerpt of a 2049-byte write; full-literal redaction of `action.raw` and historical tail cannot remove that unmatched prefix, even when the write is blocked.
+  - Correction implemented: shared audit sanitizer recursively omits unsafe already-truncated excerpts in writer/currenttail/historicaltail, preserving digest/truncated/block metadata. Parent reproduced2fails/5leakassertions (`artifact://172`) then same2regressions passed; full1333test gates passed. Direct normalized2049-byte boundary Write->realJSONL->built audit tail smoke blocked, omittedexcerpt, retainedtruncatedflag and leakednoprefix. Independent correction review underway; CLI current-accounting issue corrected.
 
 ### Phase 3：Claude Code 投递与改道
 

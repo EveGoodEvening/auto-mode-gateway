@@ -26,4 +26,12 @@ The missing configured provider credentials block only the external canary porti
 
 ## Protection boundary
 
-C06 CLOSED `45f2791`. C07 local gates passed1331tests; actual built check and gate/cache/audit-tail exercised with disposable loopback provider and private tempfiles. One canary plus one uncached decision produced2provider requests; cache avoided a second decision call, hard deny avoided provider access,3JSONL records contained no configured credential sentinels. These are local integration results, not live model evidence. Independent C07 review is underway. HTTP tool-use gate installation is C08; until then transparent transport is disposable-mock-only.
+C06 CLOSED `45f2791`. Before independent review, C07 local gates passed 1331 tests; the actual built check and gate/cache/audit-tail were exercised with a disposable loopback provider and private tempfiles. One canary plus one uncached decision produced 2 provider requests; cache avoided a second decision call, hard deny avoided provider access, and 3 JSONL records contained no configured credential sentinels. Those local integration results are not live model evidence and did not cover the audit truncation defect below.
+
+Independent audit review found the pretruncated configured-credential prefix leak. Parent reproduced2failing tests/5leakassertions with fakecredentials before correction, including historicalrecords without recoverable fullsource. After correction, same2regressions and full1333test gates passed; direct actualJSONL/built-tail boundary smoke observed block,truncationmetadata,omittedexcerpt,and no almostfullcredentialprefix. Independent correction review is underway; no live-provider evidence claimed.
+
+The required invariant is to redact whole credentials against complete source before any audit truncation, or omit unsafe pretruncated excerpts when their safety cannot be established. Historical audit tail must not re-emit such partial excerpts. Truncation flags, full-source digest and fail-closed verdict evidence must remain available without exposing the excerpt.
+
+The implemented and locally verified correction conservatively omits own content_excerpt when own data content_truncated is true, recursively before policy redaction in newwriter/currenttail/historicaltail. It retains digest/truncation/block metadata and sanitizedraw; no replacementexcerpt is reconstructed. Known unsafe historical records are sanitized on read without modifying the file.
+
+Real provider credentials remain absent in the inspected environment/configuration, so external live acceptance remains blocked as described above. HTTP tool-use gate installation remains C08; until then transparent transport is disposable-mock-only.

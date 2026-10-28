@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +9,8 @@ import { AUDIT_FAILURE_DIAGNOSTIC, createAuditLogger } from '../../src/audit/log
 import { collectConfigSecrets, createAuditRecord, type AuditInput } from '../../src/audit/record.js';
 import { readAuditTail, registerAuditCommand } from '../../src/cli/audit.js';
 import { configSchema } from '../../src/config/schema.js';
+import { createGate } from '../../src/gate/decide.js';
+import { normalizeToolCall } from '../../src/gate/normalize/index.js';
 import { resolvePolicy } from '../../src/policy/effective.js';
 import { buildState } from '../../src/policy/state-builder.js';
 
@@ -35,6 +38,19 @@ function input(text = 'printf harmless'): AuditInput {
     action: { kind: 'command', tool: 'exec_command', text, paths: [], content_truncated: false, raw: { justification: 'AUDIT_ONLY_JUSTIFICATION', assistant: 'AUDIT_ONLY_ASSISTANT', result: 'AUDIT_ONLY_RESULT' } },
     verdict: { outcome: 'block', reasons: ['risk'], rule: 'threshold', provider: 'mock', probabilities: { destructive: 0.9, exfiltration: 0.1, remote_code_exec: 0.1, security_weakening: 0.1, outside_scope: 0.1, matches_user_request: 0.1 }, latency_ms: 12, cost_usd: 0.0000042, input_tokens: 100, output_tokens: 1 },
   };
+}
+
+function boundaryWrite() {
+  const config = configuration(join(directory, 'audit.jsonl'));
+  const token = `amp_${'A'.repeat(43)}`;
+  config.auth.client_tokens = [token];
+  config.routes[0]!.protocol = 'anthropic-messages';
+  const policy = resolvePolicy(config.policy);
+  const content = 'é'.repeat(1001) + token;
+  const toolInput = { file_path: '/project/note.txt', content };
+  const context = { platform: 'linux', project_dir: '/project', workdir: '/project', route: '/mock', protocol: 'anthropic-messages' as const, delivery: 'rewrite' as const };
+  const action = normalizeToolCall(context.protocol, { id: 'audit-boundary', name: 'Write', input: toolInput, raw: { type: 'tool_use', id: 'audit-boundary', name: 'Write', input: toolInput } }, context, undefined, policy);
+  return { config, policy, content, action, context, almostFullPrefix: token.slice(0, -1) };
 }
 
 describe('private JSONL audit logger', () => {
@@ -67,6 +83,41 @@ describe('private JSONL audit logger', () => {
     for (const secret of [...secrets, 'UNCONFIGURED_TOKEN_SENTINEL', 'PRIVATE_SENTINEL']) expect(output).not.toContain(secret);
     expect(JSON.parse(output)).toMatchObject({ action: { raw: { justification: expect.stringContaining('[REDACTED:credential]') } } });
     expect(source.action.text).toContain('CLIENT_LITERAL_SENTINEL');
+  });
+
+  it('keeps a boundary-truncated configured credential out of persisted and current tail records', async () => {
+    const { config, policy, content, action, context, almostFullPrefix } = boundaryWrite();
+    const digest = createHash('sha256').update(content, 'utf8').digest('hex');
+    expect(Buffer.byteLength(content, 'utf8')).toBe(2049);
+    expect(Buffer.byteLength(action.content_excerpt ?? '', 'utf8')).toBe(2048);
+    expect(action.content_excerpt?.endsWith(almostFullPrefix)).toBe(true);
+    expect(action).toMatchObject({ kind: 'file_write', tool: 'Write', content_truncated: true, content_digest: digest });
+
+    const logger = createAuditLogger(config, { policy });
+    const gate = createGate(config, { policy, audit: logger.append });
+    expect(await gate.decide(action, context)).toMatchObject({ outcome: 'block', rule: 'content-truncated' });
+    await gate.flushAudit();
+    await logger.flush();
+    const persisted = await readFile(config.audit.path, 'utf8');
+    const lines = await readAuditTail(config.audit.path, 10, collectConfigSecrets(config), policy);
+    const configPath = join(directory, 'config.json');
+    await writeFile(configPath, JSON.stringify(config));
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const program = new Command().exitOverride();
+    registerAuditCommand(program);
+    await program.parseAsync(['audit', 'tail', '--config', configPath, '-n', '1'], { from: 'user' });
+    const printed = stdout.mock.calls.map(([chunk]) => String(chunk)).join('');
+
+    expect.soft(persisted.includes(almostFullPrefix), 'persistent JSONL must not expose the truncated credential prefix').toBe(false);
+    expect.soft(lines.join('\n').includes(almostFullPrefix), 'readAuditTail must not expose the truncated credential prefix').toBe(false);
+    expect.soft(printed.includes(almostFullPrefix), 'actual audit CLI must not expose the truncated credential prefix').toBe(false);
+    const evidence = { verdict: 'block', rule: 'content-truncated', action: { kind: 'file_write', tool: 'Write', content_truncated: true, content_digest: digest } };
+    expect(persisted.trimEnd().split('\n')).toHaveLength(1);
+    expect(lines).toHaveLength(1);
+    expect(stdout).toHaveBeenCalledTimes(1);
+    for (const serialized of [persisted, lines[0]!, printed]) expect(JSON.parse(serialized)).toMatchObject(evidence);
+    expect(action.content_excerpt?.endsWith(almostFullPrefix)).toBe(true);
+    expect(action).toMatchObject({ content_truncated: true, content_digest: digest });
   });
 
   it('uses effective custom redaction and never places audit-only raw data in provider state', async () => {
@@ -169,6 +220,35 @@ describe('real audit tail', () => {
     expect(lines.join('')).not.toContain(secret);
     expect(lines.join('')).not.toContain('CUSTOM_SENTINEL');
     expect(lines.join('')).not.toContain('historical-secret');
+  });
+
+  it('safely tails historical truncated actions with an old partial credential excerpt', async () => {
+    const { config, policy, content, action, context, almostFullPrefix } = boundaryWrite();
+    const digest = createHash('sha256').update(content, 'utf8').digest('hex');
+    const historical = {
+      ts: '2026-01-01T00:00:00.000Z', ...context,
+      tool: action.tool, verdict: 'block', raw_outcome: 'block', rule: 'content-truncated', reasons: ['content-truncated'],
+      action: { kind: action.kind, tool: action.tool, paths: action.paths, content_excerpt: action.content_excerpt, content_truncated: true, content_digest: digest },
+    };
+    await writeFile(config.audit.path, `${JSON.stringify(historical)}\n`);
+    const original = await readFile(config.audit.path, 'utf8');
+    expect(original.includes(almostFullPrefix)).toBe(true);
+    const lines = await readAuditTail(config.audit.path, 10, collectConfigSecrets(config), policy);
+    const configPath = join(directory, 'config.json');
+    await writeFile(configPath, JSON.stringify(config));
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const program = new Command().exitOverride();
+    registerAuditCommand(program);
+    await program.parseAsync(['audit', 'tail', '--config', configPath, '-n', '1'], { from: 'user' });
+    const printed = stdout.mock.calls.map(([chunk]) => String(chunk)).join('');
+
+    expect.soft(lines.join('\n').includes(almostFullPrefix), 'historical readAuditTail must not expose the partial credential excerpt').toBe(false);
+    expect.soft(printed.includes(almostFullPrefix), 'historical actual audit CLI must not expose the partial credential excerpt').toBe(false);
+    expect(lines).toHaveLength(1);
+    expect(stdout).toHaveBeenCalledTimes(1);
+    const evidence = { verdict: 'block', raw_outcome: 'block', rule: 'content-truncated', reasons: ['content-truncated'], action: { kind: 'file_write', tool: 'Write', content_truncated: true, content_digest: digest } };
+    for (const serialized of [lines[0]!, printed]) expect(JSON.parse(serialized)).toMatchObject(evidence);
+    expect(await readFile(config.audit.path, 'utf8')).toBe(original);
   });
 
   it('runs registered audit tail -n against a real loaded config and file', async () => {

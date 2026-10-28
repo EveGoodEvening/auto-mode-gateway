@@ -49,6 +49,9 @@ export function collectConfigSecrets(config: Config): readonly string[] {
 }
 
 /** Shared by append and tail: parsed historical records are not trusted output.
+ * Already-truncated excerpts cannot establish full-literal credential safety, so
+ * they are omitted at every nesting depth before policy redaction. Full raw
+ * content and content identity/block metadata remain available for sanitization.
  * A final literal pass covers property names and custom replacement strings.
  * It operates on data, never JSON punctuation (credentials may contain quotes). */
 export function sanitizeAuditValue(value: unknown, credentials: readonly string[] = [], policy: EffectivePolicy = DEFAULT_POLICY): unknown {
@@ -57,7 +60,7 @@ export function sanitizeAuditValue(value: unknown, credentials: readonly string[
     for (const secret of literals) text = text.split(secret).join('[REDACTED:credential]');
     return text;
   }
-  const seen = new WeakMap<object, object>();
+  let seen = new WeakMap<object, object>();
   function visit(input: unknown): unknown {
     if (typeof input === 'string') return scrub(input);
     if (typeof input === 'function') return undefined;
@@ -66,7 +69,10 @@ export function sanitizeAuditValue(value: unknown, credentials: readonly string[
     if (previous) return previous;
     const result = Array.isArray(input) ? [] : {};
     seen.set(input, result);
+    const truncated = Object.getOwnPropertyDescriptor(input, 'content_truncated');
+    const omitExcerpt = truncated && 'value' in truncated && truncated.value === true;
     for (const key of Object.keys(input)) {
+      if (omitExcerpt && key === 'content_excerpt') continue;
       const descriptor = Object.getOwnPropertyDescriptor(input, key);
       if (!descriptor || !('value' in descriptor)) continue;
       Object.defineProperty(result, scrub(key), {
@@ -75,7 +81,9 @@ export function sanitizeAuditValue(value: unknown, credentials: readonly string[
     }
     return result;
   }
-  const serialized = JSON.stringify(visit(redact(value, credentials, policy)));
+  const projected = visit(value);
+  seen = new WeakMap<object, object>();
+  const serialized = JSON.stringify(visit(redact(projected, credentials, policy)));
   if (serialized === undefined) throw new Error('Invalid audit record');
   return JSON.parse(serialized) as unknown;
 }
