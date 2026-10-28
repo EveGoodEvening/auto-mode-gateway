@@ -496,7 +496,7 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
       return response;
     });
     const gateway = await run.step(() => startLoopback(ingress).then(ownListener));
-    await run.step(() => writeFile(join(codexHome, 'config.toml'), `model_provider = "amp"\n\n[features]\nhooks = false\napps = false\nplugins = false\nmulti_agent = false\nmulti_agent_v2 = false\ncode_mode = false\nenable_mcp_apps = false\nskill_search = false\n\n[model_providers.amp]\nname = "auto-mode-proxy"\nbase_url = "${gateway.url}/codex/v1"\nenv_key = "AMP_TOKEN"\nwire_api = "responses"\nsupports_websockets = false\n`, { mode: 0o600, signal: run.signal }));
+    await run.step(() => writeFile(join(codexHome, 'config.toml'), `model = "gpt-5.5"\nmodel_provider = "amp"\n\n[agents]\nenabled = false\n\n[features]\nhooks = false\napps = false\nplugins = false\nmulti_agent = false\nmulti_agent_v2 = false\ncode_mode = false\ncode_mode_only = false\nenable_mcp_apps = false\nskill_search = false\n\n[model_providers.amp]\nname = "auto-mode-proxy"\nbase_url = "${gateway.url}/codex/v1"\nenv_key = "AMP_TOKEN"\nwire_api = "responses"\nsupports_websockets = false\n`, { mode: 0o600, signal: run.signal }));
     const turns = ['deny', 'normal', 'deny', 'normal', 'mixed', 'normal', 'normal', 'normal'] as const;
     const results: { kind: string; exitCode: number | null; completed: boolean }[] = [];
     for (const kind of turns) {

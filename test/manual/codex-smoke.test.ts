@@ -205,6 +205,23 @@ describe('installed Codex replay evidence boundaries', () => {
     expect(capture.sourceItem).toMatchObject({ name: 'exec_command', namespace: 'functions' });
     expect(observeCodexReplay(requests, capture).passed).toBe(true);
   });
+  it('rejects the actual741 code-mode-only declaration names instead of inventing exec_command', () => {
+    const { requests } = fixture('deny', true);
+    const request = requests[0]!;
+    request.body.model = 'gpt-6.1-sol';
+    delete request.body.tools;
+    // Sanitized recorded names/types only; no captured headers/history are imported.
+    const additional = (request.body.input as Record<string, unknown>[])[1]!;
+    additional.tools = [
+      { type: 'namespace', name: 'functions', tools: [
+        { type: 'custom', name: 'exec' },
+        ...['wait', 'request_user_input', 'request_user_input_async'].map((name) => ({ type: 'function', name })),
+      ] },
+      { type: 'namespace', name: 'clock', tools: [{ type: 'function', name: 'sleep' }] },
+      { type: 'namespace', name: 'collaboration', tools: ['followup_task', 'interrupt_agent', 'list_agents', 'send_message', 'spawn_agent', 'wait_agent'].map((name) => ({ type: 'function', name })) },
+    ];
+    expect(() => codexProbeScene(request, 'inert', 'marker')).toThrow('Codex exec_command declaration missing, ambiguous or unsupported');
+  });
   it.each(['absent', 'ambiguous', 'dotted-alias', 'invented-top-namespace'] as const)('does not invent a declaration for %s', (failure) => {
     const { requests } = fixture('deny', failure === 'ambiguous');
     const source = requests[0]!;

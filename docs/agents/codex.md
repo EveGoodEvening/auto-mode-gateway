@@ -10,7 +10,7 @@ Codex uses the **Responses API only**. Do not configure `wire_api = "chat"`. The
 
 ## CLI configuration
 
-Merge this into `~/.codex/config.toml` (or the `config.toml` in an intentionally isolated `CODEX_HOME`). Preserve unrelated user settings, avoid duplicate keys, and choose a model ID actually supported by your relay. Top-level keys **must precede the first table**:
+Merge this into `~/.codex/config.toml` (or the `config.toml` in an intentionally isolated `CODEX_HOME`). Preserve unrelated user settings, avoid duplicate keys, and choose a relay-supported model whose native catalog exposes **direct tools**, not Code Mode Only. Top-level keys **must precede the first table**:
 
 ```toml
 model = "<relay-supported-model>"
@@ -25,6 +25,12 @@ supports_websockets = false
 ```
 
 Provide `AMP_TOKEN` securely in the environment of the process launching Codex; do not put its value in TOML, command arguments, a repository, screenshots or diagnostic output. The base URL includes `/codex/v1`, **not** `/responses`; the generation request is `POST /codex/v1/responses`. For a remote gateway use an owned HTTPS address, not cleartext over a public interface. `supports_websockets = false` deliberately keeps generation on the protected HTTP Responses transport.
+
+**Native model metadata matters in Codex 0.164.0.** The observed default selection `gpt-6.1-sol` has [`tool_mode: "code_mode_only"`, MultiAgent V2 and Responses-lite metadata](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/models-manager/models.json#L177-L240). That [model tool mode takes precedence over fallback feature flags](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/core/src/tools/mod.rs#L65-L87): `features.code_mode = false` alone does **not** expose `exec_command`. Its custom `exec` accepts JavaScript, not shell-command JSON; this is **UNSUPPORTED/BLOCKED**, never an alias for `exec_command`. The first installed-client fixture correctly failed closed before any scene/decision because the actual declaration was absent.
+
+Choose an actually provider-supported **direct-tool catalog model** for the configuration above; do not inject a replacement catalog or fake declarations. For intentional isolation, disable both `features.code_mode` and `features.code_mode_only`; `[agents] enabled = false` disables model-selected collaboration under the [native precedence rules](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/core/src/config/mod.rs#L1658-L1685). Make only explicit operator-approved configuration changes, not silent global profile changes.
+
+The fresh **private LOCAL-MOCK** fixture selects bundled [`gpt-5.5`](https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/models-manager/models.json#L1340-L1398) with those code-mode flags false and agents disabled. Its direct-tool catalog metadata is a **static candidate only** until a new actual capture proves the declarations. This is not default `gpt-6.1-sol` direct-tool support, a claim that your relay serves `gpt-5.5`, or real-model/provider/cache acceptance. The failed run's private evidence is preserved; further fixture launch remains withheld pending the configuration-delta checks/review and explicit parent release.
 
 Start `codex` normally. CLI 0.164 supports `--yolo` (bypasses local approvals and sandboxing) and `--approve-for-me` (automatic approval review); these are different client modes, not proxy bypasses. Keep the client's normal sandbox/approval settings for ordinary use. Neither `--full-auto` nor the removed Chat Completions transport is the current recipe. In a disposable parent-controlled denial QA workspace, test each supported mode separately, using **only** fixed harmless `printf AMP_DENIAL_PROBE` and a deterministic mock denial. Never send destructive acceptance strings to a real auto-executing agent.
 
