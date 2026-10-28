@@ -1,0 +1,7 @@
+{
+  "content": [
+    { "type": "tool_use", "id": "ordered_probe", "name": "Bash", "input": { "command": "printf AMP_ORDERED_PROBE" } },
+    { "type": "text", "text": "AMP_ORDERED_MARKER" }
+  ],
+  "usage": { "input_tokens": 11, "output_tokens": 7 }
+}
