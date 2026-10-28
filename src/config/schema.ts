@@ -58,6 +58,8 @@ const upstreamSchema = z.strictObject({
   api_key: nonempty.optional(),
   auth_header: z.enum(['authorization', 'x-api-key', 'both']).default('authorization'),
   forward_safeguards: z.boolean().default(false),
+  // Independent of safeguards forwarding; only the dangerous beta is removed.
+  strip_beta: z.boolean().default(true),
   extra_headers: headers.optional(),
 });
 const providerSchema = z.strictObject({

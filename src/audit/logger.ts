@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 
 import type { Config } from '../config/schema.js';
 import { resolvePolicy, type EffectivePolicy } from '../policy/effective.js';
-import { collectConfigSecrets, createAuditRecord, type AuditInput, type AuditSink } from './record.js';
+import { collectConfigSecrets, createAuditRecord, sanitizeAuditValue, type AuditInput, type AuditSink } from './record.js';
 
 export const AUDIT_FAILURE_DIAGNOSTIC = 'Audit log append failed; request processing continues.';
 export interface AuditLoggerOptions {
@@ -12,6 +12,7 @@ export interface AuditLoggerOptions {
   diagnostic?: (message: string) => void;
 }
 export interface AuditLogger {
+  appendEvent(input: { event: 'suspected_classifier'; route: string; protocol: Config['routes'][number]['protocol']; session_id?: string }): Promise<void>;
   append: AuditSink;
   flush(): Promise<void>;
 }
@@ -27,11 +28,10 @@ export function createAuditLogger(config: Config, options: AuditLoggerOptions = 
   const failed = () => {
     try { diagnostic(AUDIT_FAILURE_DIAGNOSTIC); } catch { /* Diagnostics cannot break requests either. */ }
   };
-  function append(input: AuditInput): Promise<void> {
-    // Snapshot before enqueue: callers can reuse/mutate their action after deciding.
+  function enqueue(record: unknown): Promise<void> {
     let line: string;
     try {
-      line = `${JSON.stringify(createAuditRecord(input, credentials, policy))}\n`;
+      line = `${JSON.stringify(record)}\n`;
     } catch {
       failed();
       return Promise.resolve();
@@ -49,5 +49,19 @@ export function createAuditLogger(config: Config, options: AuditLoggerOptions = 
     }).catch(failed);
     return pending;
   }
-  return { append, flush: () => pending };
+  return {
+    append(input: AuditInput) {
+      // Snapshot before enqueue; never retain mutable execution input.
+      try { return enqueue(createAuditRecord(input, credentials, policy)); }
+      catch { failed(); return Promise.resolve(); }
+    },
+    appendEvent(input) {
+      // No action, verdict or provider success is invented for a fingerprint hint.
+      try {
+        return enqueue(sanitizeAuditValue({ ts: new Date().toISOString(), event: input.event, route: input.route,
+          protocol: input.protocol, session_id: input.session_id ?? null }, credentials, policy));
+      } catch { failed(); return Promise.resolve(); }
+    },
+    flush: () => pending,
+  };
 }

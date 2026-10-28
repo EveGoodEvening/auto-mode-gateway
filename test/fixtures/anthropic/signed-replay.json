@@ -1,0 +1,25 @@
+{
+  "request": {
+    "model": "fixture-model",
+    "stream": false,
+    "safeguards": [{"type": "dangerous_tool_use"}],
+    "messages": [
+      {"role": "user", "content": "Inspect the fixture"},
+      {"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "Original signed fixture reasoning", "signature": "fixture-original-signature"},
+        {"type": "tool_use", "id": "previous_tool", "name": "Read", "input": {"path": "fixture.txt"}}
+      ]},
+      {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "previous_tool", "content": "Fixture content"}]}
+    ]
+  },
+  "response": {
+    "id": "signed_fixture_response",
+    "type": "message",
+    "content": [
+      {"type": "thinking", "thinking": "New signed fixture reasoning", "signature": "fixture-new-signature"},
+      {"type": "tool_use", "id": "signed_tool", "name": "Bash", "input": {"command": "printf AMP_DENIAL_PROBE"}}
+    ],
+    "stop_reason": "tool_use",
+    "usage": {"output_tokens": 7}
+  }
+}

@@ -91,20 +91,26 @@ async function writePrivate(path: string, text: string, force: boolean): Promise
 function snippets(token: string): string {
   return `
 Setup guidance only: agent compatibility and protection are not yet verified.
+C08 implements Claude Messages enforcement only; parent verification is pending.
+Codex/Responses and WorkBuddy/Chat are unprotected until their adapter rollouts.
+Do not send real tool traffic to those routes. Shadow mode does not block tools.
+Native delivery is not proof that this client supports safeguard_results.
 The issued client token below is a secret; do not paste this output into logs.
 
 Claude Code CLI:
 export ANTHROPIC_BASE_URL='http://127.0.0.1:8484/cc'
 export ANTHROPIC_AUTH_TOKEN='${token}'
 export ANTHROPIC_API_KEY=""
+# Recommended gateway metadata hints (not proof of native capability):
 export CLAUDE_CODE_GATEWAY_HINT_HEADERS=1
-# Optional classifier cost hint:
+# Optional classifier cost hint; requires a configured trusted classifier route:
 export CLAUDE_CODE_AUTO_MODE_MODEL=claude-haiku-5-5
 Claude Desktop: Developer Mode → Configure Third-Party Inference; use
 http://127.0.0.1:8484/cc and the client token above. Desktop does not read
 ANTHROPIC_BASE_URL. If loopback is rejected, use your own HTTPS gateway.
+Desktop connection remains unverified; see docs/agents/claude-code.md.
 
-Codex CLI / Desktop:
+Codex CLI / Desktop (future protected rollout; setup only):
 export AMP_TOKEN='${token}'
 # Merge into ~/.codex/config.toml. Keep model_provider at the TOP LEVEL,
 # before any [table] headers (not inside an existing table):
@@ -119,7 +125,8 @@ supports_websockets = false
 # Desktop must inherit AMP_TOKEN: macOS launchctl setenv AMP_TOKEN <token>;
 # Windows setx AMP_TOKEN <token>, then restart the GUI. These persist a secret.
 
-WorkBuddy: Settings > Models > Add model > Custom (设置 > 模型 > 添加模型 > 自定义)
+WorkBuddy (future protected rollout; setup only):
+Settings > Models > Add model > Custom (设置 > 模型 > 添加模型 > 自定义)
 Full Chat Completions URL: http://127.0.0.1:8484/workbuddy/v1/chat/completions
 API Key: ${token}
 Enable tool calls; choose AI 智能审批 = 自动审批, not 完全访问.

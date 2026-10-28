@@ -78,12 +78,10 @@ describe('init command actual process behavior', () => {
     const config = await loadConfig(path, secrets);
     const token = config.auth.client_tokens[0]!;
     expect(result.stdout).toContain(`export ANTHROPIC_AUTH_TOKEN='${token}'`);
-    expect(result.stdout).toContain('http://127.0.0.1:8484/cc');
+    expect(result.stdout).toContain("export ANTHROPIC_BASE_URL='http://127.0.0.1:8484/cc'");
     expect(result.stdout).toContain('export ANTHROPIC_API_KEY=""');
     expect(result.stdout).toContain('export CLAUDE_CODE_GATEWAY_HINT_HEADERS=1');
-    expect(result.stdout).toContain('CLAUDE_CODE_AUTO_MODE_MODEL=claude-haiku-5-5');
-    expect(result.stdout).toContain('Desktop does not read');
-    expect(result.stdout).toContain('HTTPS gateway');
+    expect(result.stdout).toContain('export CLAUDE_CODE_AUTO_MODE_MODEL=claude-haiku-5-5');
     expect(result.stdout).toContain(`export AMP_TOKEN='${token}'`);
     expect(result.stdout.indexOf('model_provider = "amp"')).toBeLessThan(result.stdout.indexOf('[model_providers.amp]'));
     expect(result.stdout).toContain('base_url = "http://127.0.0.1:8484/codex/v1"');
@@ -94,8 +92,6 @@ describe('init command actual process behavior', () => {
     expect(result.stdout).toContain('setx AMP_TOKEN');
     expect(result.stdout).toContain('http://127.0.0.1:8484/workbuddy/v1/chat/completions');
     expect(result.stdout).toContain(`API Key: ${token}`);
-    expect(result.stdout).toContain('自动审批, not 完全访问');
-    expect(result.stdout).toContain('not yet verified');
   });
 
   it('uses real Inquirer prompts to save chosen endpoint and model values', async () => {

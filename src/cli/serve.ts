@@ -18,7 +18,10 @@ export async function runServer(config: Config): Promise<void> {
     hostname: config.listen.host,
     port: config.listen.port,
   }, () => {
-    logger.warn('Transparent transport only: tool-use enforcement is not installed; use disposable mocks only');
+    if (config.gate.mode === 'shadow') logger.warn('Shadow mode records hypothetical Anthropic decisions without blocking tools');
+    if (config.routes.some((route) => route.protocol !== 'anthropic-messages')) {
+      logger.warn('Only Anthropic Messages tool-use enforcement is installed; other protocol routes are unprotected');
+    }
     logger.info('Server listening');
   });
   let closing = false;
@@ -45,7 +48,9 @@ export async function runServer(config: Config): Promise<void> {
   });
   server.once('close', () => {
     cleanup();
-    resolve();
+    const expired = Promise.withResolvers<void>();
+    const auditDeadline = setTimeout(expired.resolve, 5_000);
+    void Promise.race([app.flushAudit(), expired.promise]).then(resolve, reject).finally(() => clearTimeout(auditDeadline));
   });
   server.once('error', () => {
     cleanup();
@@ -60,7 +65,7 @@ export async function runServer(config: Config): Promise<void> {
 
 export function registerServeCommand(program: Command): void {
   program.command('serve')
-    .description('Run authenticated transparent transport (not yet tool-use protection).')
+    .description('Run authenticated transport with Anthropic tool-use enforcement.')
     .option('--config <path>', 'configuration file path')
     .addOption(new Option('--log-level <level>', 'override configured log level')
       .choices(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']))

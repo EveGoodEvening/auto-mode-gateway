@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import pkg from '../../package.json' with { type: 'json' };
 import { configSchema } from '../../src/config/schema.js';
 import { createStatus } from '../../src/server/status.js';
+import type { GateStats } from '../../src/gate/types.js';
 
 function fixture() {
   return configSchema.parse({
@@ -45,12 +46,10 @@ describe('management status', () => {
     expect(createStatus(config).response(new Headers({ authorization: 'Bearer client-secret' }), '192.0.2.1').status).toBe(403);
   });
 
-  it('reports version, monotonic uptime, sanitized routes, unknown provider health and independent counters', async () => {
-    const status = createStatus(fixture());
-    status.counters.allow = 2;
-    status.counters.block = 1;
-    status.counters.uncertain = 3;
-    status.providerHealth.trusted = 'unhealthy';
+  it('reports version, monotonic uptime, sanitized routes and actual decision health/counters', async () => {
+    const stats: GateStats = { decisions: 6, allow: 2, block: 1, uncertain: 3, cache_hits: 1,
+      provider_failures: 1, provider_health: { trusted: { successes: 0, failures: 1 } } };
+    const status = createStatus(fixture(), () => stats);
     const response = status.response(new Headers(), '127.0.0.1');
     expect(response.headers.get('cache-control')).toBe('no-store');
     const text = await response.text();
@@ -58,20 +57,38 @@ describe('management status', () => {
     expect(body.version).toBe(pkg.version);
     expect(body.uptime_seconds).toBeGreaterThanOrEqual(0);
     expect(body.uptime_seconds).toBeLessThan(10);
-    expect(body.routes).toEqual([{ prefix: '/cc', protocol: 'anthropic-messages', upstream: 'relay' }]);
+    expect(body.routes).toEqual([{ prefix: '/cc', protocol: 'anthropic-messages', upstream: 'relay', protected: true }]);
     expect(body.provider_health).toEqual({ trusted: 'unhealthy' });
     expect(body.counters).toEqual({ allow: 2, block: 1, uncertain: 3 });
-    expect(body.protected).toBe(false);
-    expect(body.transport).toBe('unprotected-transparent');
+    expect(body.protected).toBe(true);
+    expect(body.transport).toBe('tool-use-gate');
+    expect(body.decisions).toBe(6);
+    expect(body.cache_hits).toBe(1);
+    expect(body.provider_failures).toBe(1);
     for (const secret of ['client-secret', 'admin-secret', 'relay-secret', 'provider-secret', '/private/project', 'https://']) {
       expect(text).not.toContain(secret);
     }
     const untouched = await createStatus(fixture()).response(new Headers(), '127.0.0.1').json() as {
-      provider_health: typeof status.providerHealth;
-      counters: typeof status.counters;
+      provider_health: Record<string, string>;
+      counters: { allow: number; block: number; uncertain: number };
     };
     expect(untouched.provider_health).toEqual({ trusted: 'unknown' });
     expect(untouched.counters).toEqual({ allow: 0, block: 0, uncertain: 0 });
+  });
+
+  it('does not advertise unfinished protocols or shadow as protected', async () => {
+    const config = fixture();
+    config.routes.push({ ...config.routes[0]!, prefix: '/cx', protocol: 'openai-responses' });
+    const stats: GateStats = { decisions: 0, allow: 0, block: 0, uncertain: 0, cache_hits: 0,
+      provider_failures: 0, provider_health: {} };
+    const status = createStatus(config, () => stats);
+    const mixed = await status.response(new Headers(), '127.0.0.1').json() as { protected: boolean; routes: { protected: boolean }[] };
+    expect(mixed.protected).toBe(false);
+    expect(mixed.routes.map((route) => route.protected)).toEqual([true, false]);
+    config.gate.mode = 'shadow';
+    const shadow = await status.response(new Headers(), '127.0.0.1').json() as { protected: boolean; routes: { protected: boolean }[] };
+    expect(shadow.protected).toBe(false);
+    expect(shadow.routes.every((route) => !route.protected)).toBe(true);
   });
 
   it('prevents caching access-denied responses too', async () => {

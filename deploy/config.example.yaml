@@ -20,6 +20,8 @@ routes:
     upstream: relay-a
     project_dirs: ["${PROJECT_DIR}"]
     claude_delivery: auto
+    # Without original safeguards opt-in, delivery is always rewrite. With it,
+    # explicit native/rewrite wins over exact-version overrides and scoped auto.
     # Add claude_delivery_by_version only for exact versions with recorded
     # compatibility evidence. Absence is not evidence of native incompatibility.
   - prefix: /codex
@@ -44,12 +46,18 @@ upstreams:
     api_key: "${RELAY_A_KEY}"
     auth_header: both
     forward_safeguards: false
+    # Enforce strips only dangerous-tool-use-2026-09-03, preserving other betas.
+    # Independent of forward_safeguards; shadow preserves the original request.
+    strip_beta: true
+    # strip_beta: false # Local mock opt-out; use live only after recording
+    #                  # successful preserved-beta compatibility for this upstream.
     extra_headers: { x-client-name: auto-mode-proxy }
   relay-b:
     base_url: https://relay2.example.com/v1
     api_key: "${RELAY_B_KEY}"
     auth_header: authorization
     forward_safeguards: false
+    strip_beta: true
 gate:
   mode: enforce
   on_provider_failure: block
@@ -87,9 +95,13 @@ decision:
       provider:
         only: [anthropic]
         allow_fallbacks: false
+    # Alternative Vercel pin uses the same second_stage.pin object type:
+    # pin: { providerOptions: { gateway: { only: [anthropic] } } }
 classifier_reroute:
   enabled: true
   provider: second_stage
+  # Enabled rerouting requires the configured trusted decision.second_stage;
+  # pin examples above are configuration, not verified upstream compatibility.
   model_map:
     claude-haiku-5-5: anthropic/claude-haiku-5.5
 audit:

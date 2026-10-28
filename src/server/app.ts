@@ -1,10 +1,17 @@
+import { createHmac, randomBytes } from 'node:crypto';
 import type { HttpBindings } from '@hono/node-server';
 import { Hono } from 'hono';
 import pino from 'pino';
 
 import type { Config } from '../config/schema.js';
-import { anthropicAdapter } from '../protocols/anthropic/adapter.js';
-import type { AdapterOptions } from '../protocols/types.js';
+import { createAuditLogger } from '../audit/logger.js';
+import { createGate } from '../gate/decide.js';
+import { normalizeToolCall } from '../gate/normalize/index.js';
+import type { GateContext } from '../gate/types.js';
+import { resolvePolicy } from '../policy/effective.js';
+import { anthropicAdapter, createClaudeDeliveryState, prepareAnthropicRequest } from '../protocols/anthropic/adapter.js';
+import { isClassifierRequest, isSuspectedClassifierRequest, prepareClassifierTarget } from '../protocols/anthropic/classifier-fingerprint.js';
+import type { RequestContext } from '../protocols/types.js';
 import { authenticate, buildUpstreamHeaders } from './auth.js';
 import { errorResponse } from './errors.js';
 import { resolveRoute } from './router.js';
@@ -49,14 +56,17 @@ async function boundedBody(request: Request, limit: number): Promise<Uint8Array<
   return bytes;
 }
 
-// C05 is an unprotected transparent stage for disposable mocks only. C08 must
-// replace this explicit callback with the real gate before any agent ingress.
-const transparentStageAllow: AdapterOptions['onToolCalls'] = async () => 'allow';
-
-/** Authenticated transport with the fixture-only Anthropic transparent adapter. */
-export function createApp(config: Config): Hono<{ Bindings: HttpBindings }> {
+/** Authenticated transport; only the installed Anthropic adapter enforces tool use. */
+export function createApp(config: Config) {
   const app = new Hono<{ Bindings: HttpBindings }>();
-  const status = createStatus(config);
+  const policy = resolvePolicy(config.policy);
+  const audit = createAuditLogger(config, { policy });
+  const gate = createGate(config, { policy, audit: audit.append });
+  const observations = new Set<Promise<void>>();
+  const status = createStatus(config, gate.stats);
+  const deliveryState = createClaudeDeliveryState();
+  // Process-local HMAC prevents stored correlation keys from exposing credentials.
+  const identityKey = randomBytes(32);
   const logger = pino({ level: config.log_level }, process.stderr);
 
   app.onError(() => {
@@ -94,39 +104,110 @@ export function createApp(config: Config): Hono<{ Bindings: HttpBindings }> {
       }
       throw error;
     }
-    const headers = buildUpstreamHeaders(request.headers, resolved.upstream, config.auth.mode);
+    const generation = request.method === 'POST' && resolved.route.protocol === 'anthropic-messages'
+      && resolved.pathname === '/v1/messages';
+    const extracted = generation && body ? anthropicAdapter.extractRequest(body) : undefined;
+    const sourceHeaders = new Headers(request.headers);
+    const bearer = /^Bearer[\t ]+(\S+)$/i.exec(sourceHeaders.get('authorization') ?? '')?.[1];
+    const supplied = [bearer, sourceHeaders.get('x-api-key')].filter((value): value is string => Boolean(value));
+    const identityCredential = config.auth.mode === 'vault'
+      ? config.auth.client_tokens.find((token) => supplied.includes(token))
+      : supplied.sort().join('\0');
+    const identity = identityCredential ? createHmac('sha256', identityKey).update(identityCredential).digest('hex') : undefined;
+    const session = sourceHeaders.get('x-session-id') ?? sourceHeaders.get('x-claude-code-session-id') ?? undefined;
+    const version = /\bclaude-(?:cli|code)\/(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)(?:\s|$)/i.exec(sourceHeaders.get('user-agent') ?? '')?.[1];
+    const scope = { identity, route: resolved.route.prefix, session, version };
+    const requestContext: RequestContext = extracted ?? { stream: false };
+    requestContext.source = { headers: sourceHeaders, route: resolved.route.prefix, identity, session_id: session, agent_version: version };
+    let upstream = resolved.upstream;
+    let pathname = resolved.pathname + url.search;
+    let headers = buildUpstreamHeaders(request.headers, upstream, config.auth.mode);
+    let delivery: 'native' | 'rewrite' = 'rewrite';
+    let rerouted = false;
+    if (generation && body) {
+      let parsed: unknown;
+      try { parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)); } catch { /* Preserve invalid request for upstream validation. */ }
+      deliveryState.observeRequest(scope, isClassifierRequest(parsed));
+      delivery = deliveryState.select(requestContext, scope, resolved.route);
+      if (isSuspectedClassifierRequest(parsed)) {
+        void audit.appendEvent({ event: 'suspected_classifier', route: resolved.route.prefix, protocol: resolved.route.protocol, session_id: session });
+      }
+      let target;
+      try { target = prepareClassifierTarget(parsed, request.headers, config); }
+      catch {
+        return errorResponse(502, 'api_error', 'Trusted classifier target is unavailable');
+      }
+      if (target) {
+        rerouted = true;
+        upstream = { ...resolved.upstream, base_url: target.url.origin, api_key: undefined, extra_headers: undefined };
+        pathname = target.url.pathname + target.url.search;
+        headers = target.headers;
+        body = target.body as Uint8Array<ArrayBuffer>;
+      } else {
+        const prepared = prepareAnthropicRequest(body, headers, requestContext, upstream, config.gate.mode);
+        body = prepared.body as Uint8Array<ArrayBuffer>;
+        headers = prepared.headers;
+      }
+    }
     const forwarded = new Request(request.url, {
       method: request.method,
       headers,
       body,
       signal: AbortSignal.any([request.signal, controller.signal]),
     });
-    const response = await forwardUpstream(
-      forwarded, resolved.upstream, resolved.pathname + url.search, config,
-      {
-        signal: controller.signal,
-        onError: (httpStatus) => logger.error({ status: httpStatus }, 'Upstream transport failed'),
-      },
-    );
-    // count_tokens, unknown endpoints, other methods/protocols and upstream
-    // errors remain opaque transport. Extraction never rewrites request bytes.
+    const response = await forwardUpstream(forwarded, upstream, pathname, config, {
+      signal: controller.signal,
+      onError: (httpStatus) => logger.error({ status: httpStatus }, 'Upstream transport failed'),
+    });
+    // Classifier responses are opaque trusted transport, not agent tool generations.
+    if (!generation || rerouted || !response.ok) return response;
     const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
-    if (request.method !== 'POST' || resolved.route.protocol !== 'anthropic-messages'
-      || resolved.pathname !== '/v1/messages' || !response.ok) {
-      return response;
-    }
-    // The relay controls MIME. Never let an executable generation evade the
-    // adapter just by claiming a different (or absent) content type.
     if (mediaType !== 'text/event-stream' && mediaType !== 'application/json') {
       controller.abort();
       await response.body?.cancel().catch(() => {});
       return errorResponse(502, 'api_error', 'Unsupported upstream generation content type');
     }
-    const extracted = body ? anthropicAdapter.extractRequest(body) : undefined;
-    return anthropicAdapter.transformResponse(response, extracted ?? { stream: mediaType === 'text/event-stream' }, {
+    if (!extracted) requestContext.stream = mediaType === 'text/event-stream';
+    const classifierContext = requestContext.classifier_context;
+    const client = classifierContext !== null && typeof classifierContext === 'object' && !Array.isArray(classifierContext)
+      ? classifierContext as Record<string, unknown> : {};
+    const workdir = typeof client.live_cwd === 'string' ? client.live_cwd : undefined;
+    const trusted = Array.isArray(client.trusted_directories)
+      ? client.trusted_directories.filter((value): value is string => typeof value === 'string') : [];
+    const gateContext: GateContext = {
+      project_dir: resolved.route.project_dirs?.[0] ?? workdir,
+      workdir,
+      trusted_directories: trusted,
+      lastUserText: requestContext.lastUserText,
+      route: resolved.route.prefix,
+      protocol: resolved.route.protocol,
+      agent_hint: version ? `claude-code/${version}` : undefined,
+      session_id: session,
+      delivery: config.gate.mode === 'shadow' ? 'shadow' : delivery === 'native' ? 'safeguard' : 'rewrite',
+    };
+    return anthropicAdapter.transformResponse(response, requestContext, {
       signal: forwarded.signal,
-      onToolCalls: transparentStageAllow,
+      mode: config.gate.mode,
+      delivery,
+      holdKeepaliveMs: config.gate.hold_keepalive_ms,
+      onNativeDelivered: () => deliveryState.nativeDelivered(scope),
+      trackObservation(work) {
+        const settled = work.then(() => {}, () => {});
+        observations.add(settled);
+        void settled.then(() => observations.delete(settled));
+      },
+      onToolCall: (call, _context, signal) => gate.decide(
+        normalizeToolCall(resolved.route.protocol, call, gateContext, resolved.route, policy),
+        { ...gateContext, signal },
+      ),
     });
   });
-  return app;
+  return Object.assign(app, {
+    async flushAudit() {
+      // Call after response disposal: shadow verdicts may enqueue audit later.
+      while (observations.size > 0) await Promise.all([...observations]);
+      await gate.flushAudit();
+      await audit.flush();
+    },
+  });
 }

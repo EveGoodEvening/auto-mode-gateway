@@ -1,3 +1,5 @@
+import type { Verdict } from '../gate/types.js';
+
 /** A complete execution input; incomplete/invalid inputs never reach a decision callback. */
 export interface ToolCall {
   id: string;
@@ -19,16 +21,30 @@ export interface RequestContext {
   classifier_context?: unknown;
   /** Latest user message text, including explicit empty text; excludes nested tool results. */
   lastUserText?: string;
+  /** Authenticated ingress metadata; never extracted from model-generated output. */
+  source?: {
+    headers: Headers;
+    route: string;
+    identity?: string;
+    session_id?: string;
+    agent_version?: string;
+  };
 }
 
-/** Temporary C05 seam, not an installed security gate. C08 replaces fixture-only allow. */
+/** Complete calls receive individual real verdicts; adapters control safe delivery. */
 export interface AdapterOptions {
   signal: AbortSignal;
-  onToolCalls: (
-    calls: readonly ToolCall[],
+  mode?: 'enforce' | 'shadow';
+  delivery?: 'native' | 'rewrite';
+  holdKeepaliveMs?: number;
+  onNativeDelivered?: () => void;
+  /** Register detached shadow work so shutdown can drain its eventual audit. */
+  trackObservation?: (work: Promise<void>) => void;
+  onToolCall: (
+    call: ToolCall,
     context: RequestContext,
     signal: AbortSignal,
-  ) => Promise<'allow' | 'block'>;
+  ) => Promise<Verdict>;
 }
 
 export interface ProtocolAdapter {

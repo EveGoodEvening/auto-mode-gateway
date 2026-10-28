@@ -34,6 +34,10 @@ describe('configuration defaults and supported shapes', () => {
     expect(result.trust_proxy).toBe(false);
     expect(result.log_level).toBe('info');
     expect(result.upstreams.relay?.auth_header).toBe('authorization');
+    expect(result.upstreams.relay?.forward_safeguards).toBe(false);
+    expect(result.upstreams.relay?.strip_beta).toBe(true);
+    expect(result.routes[0]?.claude_delivery).toBe('auto');
+    expect(result.routes[0]?.claude_delivery_by_version).toBeUndefined();
     expect(result.decision.providers.trusted?.envelope).toBe('none');
     expect(result.decision.providers.trusted?.pricing).toBeUndefined();
   });
@@ -60,6 +64,58 @@ describe('configuration defaults and supported shapes', () => {
     expect(result.routes[2]?.tool_map?.status).toBe('other');
     expect(result.decision.second_stage?.model).toBe('anthropic/claude-haiku-5.5');
     expect(result.decision.providers.trusted?.pricing?.input_usd_per_million).toBe(0);
+  });
+
+  it.each([
+    { forward_safeguards: false, strip_beta: false },
+    { forward_safeguards: false, strip_beta: true },
+    { forward_safeguards: true, strip_beta: false },
+    { forward_safeguards: true, strip_beta: true },
+  ])('keeps safeguards forwarding and beta stripping independent: %j', (options) => {
+    const input = validInput();
+    const config = configSchema.parse({
+      ...input,
+      upstreams: { relay: { ...input.upstreams.relay, ...options } },
+    });
+    expect(config.upstreams.relay).toMatchObject(options);
+  });
+
+  it.each([false, true])('defaults to beta stripping with forward_safeguards=%s', (forward_safeguards) => {
+    const input = validInput();
+    const config = configSchema.parse({
+      ...input,
+      upstreams: { relay: { ...input.upstreams.relay, forward_safeguards } },
+    });
+    expect(config.upstreams.relay?.forward_safeguards).toBe(forward_safeguards);
+    expect(config.upstreams.relay?.strip_beta).toBe(true);
+  });
+
+  it.each(['auto', 'native', 'rewrite'])('accepts explicit delivery selector %s without changing exact overrides', (claude_delivery) => {
+    const input = validInput();
+    const claude_delivery_by_version = { '2.1.311': 'native', '2.1.312': 'rewrite' };
+    const config = configSchema.parse({
+      ...input,
+      routes: [{ ...input.routes[0], claude_delivery, claude_delivery_by_version }],
+    });
+    expect(config.routes[0]?.claude_delivery).toBe(claude_delivery);
+    expect(config.routes[0]?.claude_delivery_by_version).toEqual(claude_delivery_by_version);
+  });
+
+  it.each([
+    { provider: { only: ['anthropic'], allow_fallbacks: false } },
+    { providerOptions: { gateway: { only: ['anthropic'] } } },
+  ])('accepts trusted classifier target pin shape %j', (pin) => {
+    const input = validInput();
+    const config = configSchema.parse({
+      ...input,
+      decision: {
+        ...input.decision,
+        second_stage: { base_url: 'https://trusted.example', api_key: 'disposable-classifier', pin },
+      },
+      classifier_reroute: { enabled: true, provider: 'second_stage' },
+    });
+    expect(config.classifier_reroute).toEqual({ enabled: true, provider: 'second_stage' });
+    expect(config.decision.second_stage?.pin).toEqual(pin);
   });
 
   it('fills defaults inside partially specified sections', () => {
@@ -133,6 +189,12 @@ describe('routing and reference integrity', () => {
   it.each(['*', '2.x', '>=2.1.311'])('rejects wildcard/range version override %s', (version) => {
     expect(configSchema.safeParse({ ...validInput(), routes: [{ ...validInput().routes[0], claude_delivery_by_version: { [version]: 'native' } }] }).success).toBe(false);
   });
+
+  it('rejects unknown delivery modes and auto as an exact-version override', () => {
+    const input = validInput();
+    expectIssue({ ...input, routes: [{ ...input.routes[0], claude_delivery: 'automatic' }] }, ['routes', 0, 'claude_delivery']);
+    expectIssue({ ...input, routes: [{ ...input.routes[0], claude_delivery_by_version: { '2.1.311': 'auto' } }] }, ['routes', 0, 'claude_delivery_by_version', '2.1.311']);
+  });
 });
 
 describe('numeric, URL and strict object boundaries', () => {
@@ -155,6 +217,12 @@ describe('numeric, URL and strict object boundaries', () => {
   it('accepts probability endpoints and rejects inverted allow/block thresholds', () => {
     expect(configSchema.safeParse({ ...validInput(), policy: { thresholds: { risk_allow: 0, risk_block: 1, intent_mismatch: 0, intent_risk: 1, outside_scope_allow: 1 } } }).success).toBe(true);
     expectIssue({ ...validInput(), policy: { thresholds: { risk_allow: 0.7, risk_block: 0.7 } } }, ['policy', 'thresholds', 'risk_allow']);
+  });
+
+  it.each(['false', 'true', 0, 1, null])('requires actual independent booleans for forwarding and beta options: %s', (value) => {
+    const input = validInput();
+    expectIssue({ ...input, upstreams: { relay: { ...input.upstreams.relay, forward_safeguards: value } } }, ['upstreams', 'relay', 'forward_safeguards']);
+    expectIssue({ ...input, upstreams: { relay: { ...input.upstreams.relay, strip_beta: value } } }, ['upstreams', 'relay', 'strip_beta']);
   });
 
   it.each(['file:///tmp/key', 'ftp://relay.example', 'https://user:secret@relay.example', 'https://relay.example?key=secret', 'https://relay.example#secret'])('rejects unsafe endpoint %s', (base_url) => {

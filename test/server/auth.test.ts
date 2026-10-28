@@ -4,7 +4,7 @@ import { authenticate, authenticateAdmin, buildUpstreamHeaders } from '../../src
 
 const vault: Config['auth'] = { mode: 'vault', client_tokens: ['amp_first', 'amp_é'], admin_token: 'admin-only' };
 const upstream: Config['upstreams'][string] = {
-  base_url: 'https://relay.example', api_key: 'upstream-secret', auth_header: 'authorization', forward_safeguards: false,
+  base_url: 'https://relay.example', api_key: 'upstream-secret', auth_header: 'authorization', forward_safeguards: false, strip_beta: true,
 };
 
 describe('authenticate', () => {
@@ -53,7 +53,7 @@ describe('buildUpstreamHeaders', () => {
   });
 
   it('removes client credentials even if the upstream has no key', () => {
-    const withoutKey: Config['upstreams'][string] = { base_url: upstream.base_url, auth_header: 'authorization', forward_safeguards: false };
+    const withoutKey: Config['upstreams'][string] = { base_url: upstream.base_url, auth_header: 'authorization', forward_safeguards: false, strip_beta: true };
     const output = buildUpstreamHeaders(new Headers({ authorization: 'Bearer client-secret', 'x-api-key': 'client-secret' }), withoutKey, 'vault');
     expect(output.has('authorization')).toBe(false);
     expect(output.has('x-api-key')).toBe(false);
