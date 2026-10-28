@@ -158,7 +158,7 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
                 try {
                   if (!reviewer) {
                     if (!reviewConfig) throw new Error('Reviewer unavailable');
-                    reviewer = new LlmReviewProvider(reviewConfig);
+                    reviewer = new LlmReviewProvider(reviewConfig, { credentials: secrets, policy });
                   }
                   const reviewed = await Promise.race([
                     reviewer.review(state, result.answers, { signal: controller.signal, deadline_ms: Date.now() + Math.max(0, DECISION_DEADLINE_MS - (now() - started)) }),

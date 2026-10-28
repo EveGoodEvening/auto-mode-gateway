@@ -1,9 +1,15 @@
 import type { Config } from '../config/schema.js';
+import type { EffectivePolicy } from '../policy/effective.js';
 import { redactText } from '../policy/redact.js';
 import { withinDeadline } from './http.js';
 import { DecisionError, type Answers, type DecisionOptions, type DecisionState, type DecisionUsage } from './types.js';
 
 type ReviewConfig = NonNullable<Config['decision']['second_stage']>;
+/** Complete factory credentials and the resolved policy must precede any reason cap. */
+export interface ReviewRedactionContext {
+  credentials: readonly string[];
+  policy: EffectivePolicy;
+}
 export interface ReviewResult {
   verdict: 'allow' | 'block';
   reason: string;
@@ -103,7 +109,7 @@ export class LlmReviewProvider implements ReviewProvider {
   private readonly headers: Headers;
   private readonly routing: Record<string, unknown>;
   private readonly credentials: string[];
-  constructor(private readonly config: ReviewConfig) {
+  constructor(private readonly config: ReviewConfig, private readonly redaction: ReviewRedactionContext) {
     try {
       this.url = new URL(config.base_url);
       if (!['https:', 'http:'].includes(this.url.protocol) || this.url.username || this.url.password || this.url.search || this.url.hash) throw new DecisionError('configuration');
@@ -129,7 +135,7 @@ export class LlmReviewProvider implements ReviewProvider {
         const options = object(pin.providerOptions) ? pin.providerOptions : {};
         this.routing.providerOptions = { ...options, gateway: { ...(object(options.gateway) ? options.gateway : {}), only: ['anthropic'] } };
       }
-      this.credentials = [config.api_key, ...Object.values(config.headers ?? {})];
+      this.credentials = [config.api_key, ...Object.values(config.headers ?? {}), ...redaction.credentials];
     } catch { throw new DecisionError('configuration'); }
   }
 
@@ -165,7 +171,7 @@ export class LlmReviewProvider implements ReviewProvider {
         const outputPrice = this.config.pricing?.output_usd_per_million;
         const finalCost = !parsed.cache_tokens && parsed.usage.input_tokens !== undefined && parsed.usage.output_tokens !== undefined && inputPrice !== undefined && outputPrice !== undefined
           ? (parsed.usage.input_tokens * inputPrice + parsed.usage.output_tokens * outputPrice) / 1_000_000 : null;
-        return { verdict: parsed.verdict, reason: redactText(parsed.reason, this.credentials).slice(0, 1024), provider: 'second_stage', model: parsed.model ?? this.config.model, latency_ms: Date.now() - started, usage, cost_usd: fallback ? null : finalCost,
+        return { verdict: parsed.verdict, reason: redactText(parsed.reason, this.credentials, this.redaction.policy).slice(0, 1024), provider: 'second_stage', model: parsed.model ?? this.config.model, latency_ms: Date.now() - started, usage, cost_usd: fallback ? null : finalCost,
           ...(fallback ? { final_response: { input_tokens: parsed.usage.input_tokens ?? null, output_tokens: parsed.usage.output_tokens ?? null, cost_usd: finalCost } } : {}) };
       }
     }, deadline, options.signal);

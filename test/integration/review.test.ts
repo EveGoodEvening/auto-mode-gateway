@@ -6,12 +6,16 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { configSchema } from '../../src/config/schema.js';
 import { createApp } from '../../src/server/app.js';
 import { createMockRelay, startLoopback } from './mock-relay.js';
+import { collectConfigSecrets } from '../../src/audit/record.js';
+import { readAuditTail } from '../../src/cli/audit.js';
+import { createGate } from '../../src/gate/decide.js';
+import { resolvePolicy } from '../../src/policy/effective.js';
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 const scores = { destructive: 0.4, exfiltration: 0.1, remote_code_exec: 0.1, security_weakening: 0.1, outside_scope: 0.1, matches_user_request: 0.9 };
 type ReviewMode = 'allow' | 'block' | 'invalid' | 'ambiguous' | 'unavailable' | 'format-fallback';
-async function setup(options: { kind?: 'systemone' | 'openai-decisions'; mode?: ReviewMode; failure?: 'allow' | 'block'; unknownPricing?: boolean; decisionRetry?: boolean; command?: string; probabilities?: typeof scores } = {}) {
+async function setup(options: { kind?: 'systemone' | 'openai-decisions'; mode?: ReviewMode; failure?: 'allow' | 'block'; unknownPricing?: boolean; decisionRetry?: boolean; command?: string; probabilities?: typeof scores; reason?: string; credential?: string } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'amp-review-'));
   cleanups.push(() => rm(dir, { recursive: true, force: true }));
   const auditPath = join(dir, 'audit.jsonl');
@@ -36,7 +40,7 @@ async function setup(options: { kind?: 'systemone' | 'openai-decisions'; mode?: 
     }
     const text = options.mode === 'invalid' ? 'not json private-review-key'
       : options.mode === 'ambiguous' ? '{"verdict":"allow","verdict":"block","reason":"ambiguous"}'
-        : JSON.stringify({ verdict: options.mode === 'block' ? 'block' : 'allow', reason: 'Final safety decision private-review-key' });
+        : JSON.stringify({ verdict: options.mode === 'block' ? 'block' : 'allow', reason: options.reason ?? 'Final safety decision private-review-key' });
     return c.json({ id: 'msg_review', type: 'message', role: 'assistant', model: 'claude-haiku-5-5', content: [{ type: 'text', text }], stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 20, output_tokens: 3 } });
   });
   const trusted = await startLoopback(trustedApp); cleanups.push(trusted.close);
@@ -49,25 +53,26 @@ async function setup(options: { kind?: 'systemone' | 'openai-decisions'; mode?: 
     routes: [{ prefix: '/cc', protocol: 'anthropic-messages', upstream: 'relay', project_dirs: ['/project'] }],
     upstreams: { relay: { base_url: upstream.url, api_key: 'private-relay-key' } },
     gate: { on_provider_failure: options.failure ?? 'block', provider_timeout_ms: 500 },
-    decision: { chain: ['first'], providers: { first: { kind, base_url: trusted.url + '/v1', model: 'fixture-model', api_key: 'private-first-key', pricing: { input_usd_per_million: 1, output_usd_per_million: 2 } } },
+    decision: { chain: ['first'], providers: { first: { kind, base_url: trusted.url + '/v1', model: 'fixture-model', api_key: options.credential ?? 'private-first-key', pricing: { input_usd_per_million: 1, output_usd_per_million: 2 } } },
       second_stage: { base_url: trusted.url + '/v1', api_key: 'private-review-key', model: 'claude-haiku-5-5', ...(options.unknownPricing ? {} : { pricing: { input_usd_per_million: 3, output_usd_per_million: 4 } }) } },
     audit: { path: auditPath }, log_level: 'silent',
   });
   const app = createApp(config);
   cleanups.push(app.flushAudit);
   const proxy = await startLoopback(app); cleanups.push(proxy.close);
-  async function request(stream = false) {
-    const response = await fetch(proxy.url + '/cc/v1/messages', { method: 'POST', headers: { authorization: 'Bearer private-client-key', 'content-type': 'application/json' }, body: JSON.stringify({ model: 'fixture', max_tokens: 100, stream, messages: [{ role: 'user', content: 'Install inert in project' }] }) });
+  async function request(stream = false, native = false) {
+    const response = await fetch(proxy.url + '/cc/v1/messages', { method: 'POST', headers: { authorization: 'Bearer private-client-key', 'content-type': 'application/json' }, body: JSON.stringify({ model: 'fixture', max_tokens: 100, stream, messages: [{ role: 'user', content: 'Install inert in project' }],
+      ...(native ? { safeguards: [{ type: 'dangerous_tool_use', classifier_context: { v: 1, live_cwd: '/project', trusted_directories: ['/project'] } }] } : {}) }) });
     expect(response.status).toBe(200);
     return response.text();
   }
   async function records(): Promise<Record<string, unknown>[]> {
     await app.flushAudit();
     const text = await readFile(auditPath, 'utf8');
-    for (const key of ['private-client-key', 'private-relay-key', 'private-first-key', 'private-review-key']) expect(text).not.toContain(key);
+    for (const key of collectConfigSecrets(config)) expect(text).not.toContain(key);
     return text.trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>);
   }
-  return { request, records, calls };
+  return { request, records, calls, config };
 }
 
 function hasExecution(text: string, stream: boolean): boolean {
@@ -150,6 +155,46 @@ describe('real HTTP gray-area decisions and reviewer transitions', () => {
       { stage: 'review', input_tokens: null, output_tokens: null, cost_usd: null,
         final_response: { input_tokens: 20, output_tokens: 3, cost_usd: expect.any(Number) } },
     ] });
+  });
+  it.each([false, true])('redacts a different configured credential before reason1024 across factory/cache/HTTP/audit/tail, stream=%s', async stream => {
+    const credential = 'C09CrossLiteralQ7zN4pR8vB6wY2mF9';
+    const prefix = credential.slice(0, -1);
+    const fixture = await setup({ mode: 'block', credential, reason: 'x'.repeat(1024 - credential.length + 1) + credential });
+    const secrets = collectConfigSecrets(fixture.config);
+    const policy = resolvePolicy(fixture.config.policy);
+    const config = { ...fixture.config, audit: { ...fixture.config.audit, path: fixture.config.audit.path + '.factory' } };
+    const gate = createGate(config); cleanups.push(gate.flushAudit);
+    const action = { kind: 'command' as const, tool: 'Bash', text: 'npm install inert', paths: [], content_truncated: false, raw: {} };
+    const context = { platform: 'linux', project_dir: '/project', workdir: '/project', lastUserText: 'Install inert in project' };
+    const first = await gate.decide(action, context);
+    const cached = await gate.decide(action, context);
+    expect(first).toMatchObject({ outcome: 'block', rule: 'llm-review', raw_outcome: 'uncertain' });
+    expect(cached).toMatchObject({ outcome: 'block', cache_hit: true });
+    expect(first.reasons.every(reason => reason.length <= 1024)).toBe(true);
+    expect(cached.reasons).toEqual(first.reasons);
+    for (const verdict of [first, cached]) {
+      expect(JSON.stringify(verdict)).not.toContain(credential);
+      expect(JSON.stringify(verdict)).not.toContain(prefix);
+    }
+    expect(fixture.calls).toEqual({ decision: 1, review: 1 });
+    await gate.flushAudit();
+    for (const text of [await readFile(config.audit.path, 'utf8'), ...(await readAuditTail(config.audit.path, 10, secrets, policy))]) {
+      expect(text).not.toContain(credential);
+      expect(text).not.toContain(prefix);
+    }
+    for (const native of [false, true]) {
+      const text = await fixture.request(stream, native);
+      expect(text).not.toContain(credential);
+      expect(text).not.toContain(prefix);
+      if (!native) expect(hasExecution(text, stream)).toBe(false);
+    }
+    const records = await fixture.records();
+    expect(records).toHaveLength(2);
+    for (const record of records) expect(record).toMatchObject({ verdict: 'block', raw_outcome: 'uncertain' });
+    for (const text of [await readFile(fixture.config.audit.path, 'utf8'), ...(await readAuditTail(fixture.config.audit.path, 10, secrets, policy))]) {
+      expect(text).not.toContain(credential);
+      expect(text).not.toContain(prefix);
+    }
   });
   it.each(['rm -rf /', 'npm install inert'] as const)('never lets a reviewer override earlier fail-closed boundaries for %s', async command => {
     const fixture = await setup({ command, failure: 'allow', probabilities: { ...scores, destructive: 0.9 } });

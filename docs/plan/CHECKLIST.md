@@ -172,7 +172,8 @@
 
 ### Phase 4：OpenAI Decisions 适配器与 LLM 二审
 
-- **C09 GREEN DRAFT after local C08 closure `1b68116`; not closed.** Parent10:25:04 unionG typecheck/lint/30files1716tests/build ALLPASS and actual private HTTP/CLI smoke exit0/all named gray/failure/accounting contracts PASS/10loopbackrequests. P4-3 verified/CHECKED; P4-1/P4-2 locally implemented+verified but full source tasks remain UNCHECKED for original real-provider canaries. Independent chunk reviews/fix loop remain pending. Absent reviewer retains gray block; configured reviewer unavailability follows P4-3, but invalid/ambiguous JSON is P4-2 block independently of failure allow. Both-stage accounting uses nullable unknowns and cache hits charge no historical calls again. No worker checks/launches/commits; no C10+ activity.
+- **Historical pre-privacy-fix C09 functional checkpoint after local C08 `1b68116`, not closure:** parent10:25:04 unionG typecheck/lint/30files1716tests/build ALLPASS and actual private HTTP/CLI smoke exit0/all named gray/failure/accounting contracts PASS/10loopbackrequests. P4-3 own functional criteria were checked at that checkpoint, then reopened below for C09-SEC-001. P4-1/P4-2 full source tasks remain UNCHECKED for original real canaries. R1 absent-reviewer gray block, configured unavailability policy, invalid JSON unconditional block and nullable/no-double-charge accounting remain required. No worker runs/commits or C10+ activity.
+- **CURRENT privacy fix VERIFIED; HIGH `C09-SEC-001` pending independent re-review, not CLOSED.** Parent actual same harness BEFORE8TRUE → AFTER8FALSE across gate/cache/audit/tail/HTTP native+rewrite, decision3/review3/cacheHittrue, no credential/prefix output. Required complete configured-secret/effective-policy constructor context now precedes unchanged1024 reason cap. Current parent10:51:38 unionG typecheck/lint/30files1721tests/build ALLPASS and functional HTTP/CLI10 unchanged ALLPASS. P4-3 restored CHECKED own criteria; independent S1/S2 re-reviews remain before C09 closure. P4-1/P4-2 real canaries unattempted/unchecked with exact expected keys/default config absent. No worker runs/commits or independent-CLEAN claim.
 
 
 - [ ] P4-1 OpenAI Decisions 决策适配器
@@ -191,7 +192,7 @@
   - `decide.ts` 中 `uncertain` → 调用二审 → allow/block；二审不可用按 `on_provider_failure`；审计记录两阶段 provider、延迟、成本。
   - 位置：`src/gate/decide.ts`。
   - 完成标准：单测覆盖二审 allow、block、失败三路径。
-  - Verified/CHECKED on its own criteria: parent10:25:04 unionG typecheck/lint/30files1716tests/build ALLPASS; actual private HTTP/CLI smoke exit0 with gray_allowPASS/gray_blockPASS/configured_unavailabilityPASS/invalid_json_fail_closedPASS/two_stage_accountingPASS and10loopbackrequests. HTTP contracts additionally cover cache non-double-charge, both first-stage kinds, retry/fallback unknown aggregate totals with retained reported final-response evidence, cancellation and earlier hard-rule/structural precedence. C09 remains GREEN DRAFT pending independent reviews/fix loop, not closed.
+  - Restored VERIFIED/CHECKED on own criteria after privacy correction: parent actual same8sink harness BEFORE8TRUE→AFTER8FALSE, decision3/review3/cacheHittrue, no credential/prefix printed; current10:51:38 typecheck/lint/30files1721tests/build ALLPASS and actual functional HTTP/CLI smoke10 ALLPASS unchanged. Required full-config-credentials/resolved-policy constructor context sanitizes whole reviewer reason before unchanged1024 cap. Real-factory/cache/HTTP native+rewrite/JSONL/tail all-but-one-prefix regressions are retained. HIGH C09-SEC-001 remains pending independent S1/S2 re-review, not CLOSED/CLEAN; C09 closure pending. R1/failure/unknown-accounting semantics unchanged; no worker runs.
 
 ### Phase 5：Codex（OpenAI Responses）适配器
 
