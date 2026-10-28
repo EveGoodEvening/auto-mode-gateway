@@ -2,6 +2,8 @@ import { parse as parsePartial } from 'partial-json';
 import type { AdapterOptions, RequestContext, ToolCall } from '../types.js';
 import type { Verdict } from '../../gate/types.js';
 import type { Answers } from '../../decision/types.js';
+import { ResponseBudget, type ResponseReservation } from '../response-budget.js';
+import { assertSseField } from '../sse.js';
 
 export const MAX_TOOL_BYTES = 1024 * 1024;
 export const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -129,38 +131,96 @@ export function safeguardResults(calls: readonly ToolCall[], decisions: Readonly
 }
 
 export function encodeEvent(value: Record<string, unknown>): Uint8Array {
-  return new TextEncoder().encode(`event: ${String(value.type)}\ndata: ${JSON.stringify(value)}\n\n`);
+  const type = value.type;
+  assertSseField('event', type);
+  return new TextEncoder().encode(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);
 }
 
 /** Observations are capped and detached: shadow never delays or changes original delivery. */
-export function shadowStream(source: ReadableStream<Uint8Array>, observe: (bytes: Uint8Array<ArrayBuffer>) => Promise<unknown>, trackObservation?: (work: Promise<void>) => void): ReadableStream<Uint8Array> {
+export function shadowStream(source: ReadableStream<Uint8Array>, observe: (source: ReadableStream<Uint8Array>, budget: ResponseBudget, signal: AbortSignal) => Promise<unknown>, trackObservation?: (work: Promise<void>) => void): ReadableStream<Uint8Array> {
   const reader = source.getReader();
-  let chunks: Uint8Array[] = [];
-  let size = 0;
-  let overflow = false;
-  return new ReadableStream({
+  let readerReleased = false;
+  const releaseReader = (): void => { if (!readerReleased) { readerReleased = true; reader.releaseLock(); } };
+  const budget = new ResponseBudget(MAX_RESPONSE_BYTES, MAX_REASONING_BYTES);
+  budget.reserve(1024);
+  const cancellation = new AbortController();
+  const queue = new Map<number, Uint8Array>();
+  let head = 0;
+  let tail = 0;
+  let queuedBytes = 0;
+  let ended = false;
+  let stopped = false;
+  let wake: (() => void) | undefined;
+  const stop = (reason: unknown): void => {
+    if (stopped) return;
+    stopped = true;
+    cancellation.abort(reason);
+    for (const [index, bytes] of queue) {
+      queue.delete(index);
+      queuedBytes -= bytes.byteLength;
+      budget.releaseBytes(bytes);
+    }
+    wake?.();
+    wake = undefined;
+  };
+  const observed = new ReadableStream<Uint8Array>({
     async pull(controller) {
+      while (!queue.size && !ended && !stopped) {
+        const notification = Promise.withResolvers<void>();
+        wake = notification.resolve;
+        await notification.promise;
+      }
+      if (stopped) { controller.error(cancellation.signal.reason); return; }
+      const bytes = queue.get(head);
+      if (bytes) { queue.delete(head++); queuedBytes -= bytes.byteLength; controller.enqueue(bytes); }
+      else controller.close();
+    },
+    cancel(reason) { stop(reason); },
+  }, { highWaterMark: 0 });
+  const work = Promise.resolve().then(() => observe(observed, budget, cancellation.signal)).then(() => {}, () => {}).finally(() => {
+    stop(new AnthropicResponseError('Shadow observation ended'));
+    budget.close();
+  });
+  try { trackObservation?.(work); } catch { /* Bookkeeping cannot affect delivery. */ }
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      let original: ResponseReservation | undefined;
       try {
         const item = await reader.read();
         if (item.done) {
-          if (!overflow) {
-            const bytes = new Uint8Array(size);
-            let offset = 0;
-            for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-            chunks = [];
-            const work = Promise.resolve().then(() => observe(bytes)).then(() => {}, () => {});
-            try { trackObservation?.(work); } catch { /* Observation bookkeeping cannot change shadow delivery. */ }
-          }
+          ended = true;
+          wake?.();
+          wake = undefined;
+          releaseReader();
           controller.close();
           return;
         }
-        size += item.value.byteLength;
-        if (size > MAX_RESPONSE_BYTES) { overflow = true; chunks = []; }
-        else if (!overflow) chunks.push(item.value.slice());
+        if (!stopped) {
+          let copied: ResponseReservation | undefined;
+          try {
+            if (queuedBytes + item.value.byteLength > MAX_RESPONSE_BYTES / 2) throw new AnthropicResponseError('Shadow observer too slow');
+            original = budget.reserve(item.value.byteLength, item.value.byteLength);
+            copied = budget.reserve(item.value.byteLength + 256, item.value.byteLength);
+            const bytes = item.value.slice();
+            budget.registerBytes(bytes, copied);
+            queue.set(tail++, bytes);
+            queuedBytes += bytes.byteLength;
+            copied = undefined;
+            wake?.();
+            wake = undefined;
+          } catch (error) {
+            copied?.release();
+            stop(error);
+          }
+        }
         controller.enqueue(item.value);
-      } catch (error) { chunks = []; controller.error(error); }
+      } catch (error) {
+        stop(error); controller.error(error);
+        if (!readerReleased) { try { await reader.cancel(error); } catch { /* Preserve the delivery failure. */ } finally { releaseReader(); } }
+      }
+      finally { original?.release(); }
     },
-    async cancel(reason) { chunks = []; await reader.cancel(reason); },
+    async cancel(reason) { stop(reason); if (!readerReleased) { try { await reader.cancel(reason); } catch { /* Cancellation is terminal. */ } finally { releaseReader(); } } },
   }, { highWaterMark: 0 });
 }
 

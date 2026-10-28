@@ -1,50 +1,42 @@
 import type { AdapterOptions, RequestContext, ToolCall } from '../types.js';
 import type { Verdict } from '../../gate/types.js';
-import { parseSse, pingKeepalive, type SseFrame } from '../sse.js';
-import { ResponsesResponseError, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES, MAX_TOOL_BYTES, IDLE_TIMEOUT_MS, COMPLETION_TIMEOUT_MS, DECISION_TIMEOUT_MS, bounded, blockedText, execution, callFor, unique, record, blockedMessage, same, sameExecution, utf8Bytes, jsonBytes, encodeEvent, shadowStream } from './safety.js';
-import { parsedBound, reasoningBound, propertySpan } from './nonstream.js';
+import { parseSse, pingKeepalive, sseDataSegments, sseReasoningBytes, type SseFrame } from '../sse.js';
+import { ResponsesResponseError, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES, MAX_TOOL_BYTES, IDLE_TIMEOUT_MS, COMPLETION_TIMEOUT_MS, DECISION_TIMEOUT_MS, bounded, blockedText, execution, callFor, record, blockedMessage, same, sameExecution, utf8Bytes, jsonBytes, encodeEvent, shadowStream } from './safety.js';
+import { parsedBound } from './nonstream.js';
+import { JsonRetentionScanner } from '../json-retention.js';
+import { ResponseBudget, type ResponseAccounting, type ResponseReservation } from '../response-budget.js';
 
-type Item = { initial?: Record<string, unknown>; final?: Record<string, unknown>; parameters: string; parameterBytes: number; parameterId?: string; delta: boolean; parametersDone?: string; call?: ToolCall; decision?: Promise<Verdict> };
-type Queued = { frame: SseFrame; value?: Record<string, unknown> };
+type Item = { initial?: Record<string, unknown>; final?: Record<string, unknown>; parameters: string; parameterBytes: number; parameterId?: string; parameterReservation?: ResponseReservation; delta: boolean; parametersDone?: string; call?: ToolCall; decision?: Promise<Verdict> };
+type Queued = { frame?: SseFrame; value?: Record<string, unknown> };
 
-export function transformResponsesStream(source: ReadableStream<Uint8Array>, context: RequestContext, options: AdapterOptions): ReadableStream<Uint8Array> {
+export function transformResponsesStream(source: ReadableStream<Uint8Array>, context: RequestContext, options: AdapterOptions, accounting?: ResponseAccounting): ReadableStream<Uint8Array> {
   if (options.signal.aborted) {
     const reason: unknown = options.signal.reason ?? new ResponsesResponseError('Response cancelled');
     void source.cancel(reason).catch(() => undefined);
     return new ReadableStream<Uint8Array>({ start(controller) { controller.error(reason); } });
   }
-  if (options.mode === 'shadow') return shadowStream(source, async bytes => {
-    const observed = transformResponsesStream(new Response(bytes).body!, context, { ...options, mode: 'enforce' });
+  if (options.mode === 'shadow') return shadowStream(source, async (observedSource, budget, observationSignal) => {
+    const observed = transformResponsesStream(observedSource, context, { ...options, signal: AbortSignal.any([options.signal, observationSignal]), mode: 'enforce' }, { budget });
     for await (const chunk of observed) void chunk;
   }, options.trackObservation);
-  const abort = new AbortController();
-  const signal = AbortSignal.any([options.signal, abort.signal]);
-  let lastByte = Date.now();
-  const original = source.getReader();
-  const timed = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        const item = await bounded(original.read(), IDLE_TIMEOUT_MS - (Date.now() - lastByte), signal);
-        if (Date.now() - lastByte >= IDLE_TIMEOUT_MS) throw new ResponsesResponseError('Upstream idle deadline exceeded');
-        if (item.done) { original.releaseLock(); controller.close(); }
-        else { if (item.value.byteLength) lastByte = Date.now(); controller.enqueue(item.value); }
-      } catch (error) { controller.error(error); await original.cancel(error).catch(() => undefined); }
-    },
-    async cancel(reason) { await original.cancel(reason).catch(() => undefined); },
-  }, { highWaterMark: 0 });
-  const reader = parseSse(timed).getReader();
+  const budget = accounting?.budget ?? new ResponseBudget(MAX_RESPONSE_BYTES, MAX_REASONING_BYTES);
+  const workspace = budget.reserve(8192);
+  const ownedRaw = new Set<Uint8Array>();
+  const retained = new Set<ResponseReservation>();
   const items = new Map<number, Item>();
   const lifecycle = new Map<number, { type: unknown; id: unknown; done: boolean }>();
   const queue: Queued[] = [];
   const output: Uint8Array[] = [];
+  const abort = new AbortController();
+  const signal = AbortSignal.any([options.signal, abort.signal]);
   let outputCursor = 0;
   let held = false;
   let terminal = false;
   let terminalEvent: Record<string, unknown> | undefined;
+  let terminalState: { output: unknown[]; ids: Set<unknown> } | undefined;
   let finished = false;
   let stopped = false;
-  let retained = 0;
-  let reasoningRetained = 0;
+  let currentFrame: SseFrame | undefined;
   let completionDeadline = Infinity;
   let decisionDeadline = Infinity;
   let decisionTimer: NodeJS.Timeout | undefined;
@@ -53,53 +45,97 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
   let decisionChain: Promise<unknown> = Promise.resolve();
   let sequence = -1;
   let generated = 0;
+  let lastByte = Date.now();
+  let originalReleased = false;
+  const original = source.getReader();
+  const releaseOriginal = (): void => { if (!originalReleased) { originalReleased = true; original.releaseLock(); } };
+  const timed = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const item = await bounded(original.read(), IDLE_TIMEOUT_MS - (Date.now() - lastByte), signal);
+        if (Date.now() - lastByte >= IDLE_TIMEOUT_MS) throw new ResponsesResponseError('Upstream idle deadline exceeded');
+        if (item.done) { releaseOriginal(); controller.close(); }
+        else { if (item.value.byteLength) lastByte = Date.now(); controller.enqueue(item.value); }
+      } catch (error) {
+        controller.error(error);
+        if (!originalReleased) { try { await original.cancel(error); } catch { /* Preserve the original failure. */ } finally { releaseOriginal(); } }
+      }
+    },
+    async cancel(reason) { if (!originalReleased) { try { await original.cancel(reason); } catch { /* Cancellation is terminal. */ } finally { releaseOriginal(); } } },
+  }, { highWaterMark: 0 });
+  const reader = parseSse(timed, {
+    budget, potentialReasoning: true,
+    classifyReasoning: (raw, partial) => sseReasoningBytes(raw, 'responses', index => lifecycle.has(index) ? lifecycle.get(index)!.type === 'reasoning' : undefined, budget, partial),
+  }).getReader();
   const keepalive = pingKeepalive(options.holdKeepaliveMs ?? 10_000);
+
+  function reserve(bytes: number, reasoning = 0): ResponseReservation {
+    const allocation = budget.reserve(bytes + 128, reasoning);
+    retained.add(allocation);
+    return allocation;
+  }
+  function release(allocation: ResponseReservation | undefined): void { if (allocation) { allocation.release(); retained.delete(allocation); } }
+  function releaseRaw(bytes: Uint8Array): void { ownedRaw.delete(bytes); budget.releaseBytes(bytes); }
+  function releaseRetained(): void {
+    items.clear(); lifecycle.clear(); terminalEvent = undefined; terminalState = undefined;
+    for (const allocation of retained) allocation.release();
+    retained.clear();
+  }
   function discard(): void {
+    currentFrame?.release(); currentFrame = undefined;
+    for (const entry of queue) { entry.frame?.release(); entry.frame = undefined; entry.value = undefined; }
     queue.length = 0;
-    output.length = 0;
-    outputCursor = 0;
-    items.clear();
-    lifecycle.clear();
-    terminalEvent = undefined;
-    clearTimeout(completionTimer);
-    clearTimeout(decisionTimer);
+    output.length = 0; outputCursor = 0;
+    releaseRetained();
+    for (const bytes of ownedRaw) budget.releaseBytes(bytes);
+    ownedRaw.clear();
+    clearTimeout(completionTimer); clearTimeout(decisionTimer);
     keepalive.close();
     if (abortListener) signal.removeEventListener('abort', abortListener);
-  }
-  function reserve(bytes: number): void {
-    if (retained + bytes > MAX_RESPONSE_BYTES) throw new ResponsesResponseError('Response exceeds 8 MiB');
-    retained += bytes;
+    workspace.release();
+    if (!accounting) budget.close();
   }
   function barrier(): void {
     if (!held) {
-      held = true;
-      completionDeadline = Date.now() + COMPLETION_TIMEOUT_MS;
+      held = true; completionDeadline = Date.now() + COMPLETION_TIMEOUT_MS;
       completionTimer = setTimeout(() => abort.abort(new ResponsesResponseError('Completion deadline exceeded')), COMPLETION_TIMEOUT_MS);
       keepalive.setHeld(true);
     }
   }
-  function emit(value: Record<string, unknown>, raw?: SseFrame, immediate = false): void {
-    // An immediate control event can overtake held data; released events are renumbered if needed.
+  function reasoningJson(value: Record<string, unknown>): { whole: boolean; bytes: number } {
+    const text = value.type === 'response.output_text.delta' || value.type === 'response.output_text.done' || (record(value.part) && value.part.type === 'output_text');
+    const whole = String(value.type).includes('reasoning') || (record(value.item) && value.item.type === 'reasoning')
+      || (record(value.part) && value.part.type === 'reasoning_text')
+      || (typeof value.output_index === 'number' && (lifecycle.get(value.output_index)?.type === 'reasoning' || (!lifecycle.has(value.output_index) && !text)));
+    let bytes = 0;
+    if (record(value.response) && Array.isArray(value.response.output)) for (const item of value.response.output) {
+      if (record(item) && item.type === 'reasoning') bytes += jsonBytes(item);
+    }
+    return { whole, bytes };
+  }
+  function emit(value: Record<string, unknown>, raw?: SseFrame): void {
     if (raw && (value.sequence_number === undefined || (typeof value.sequence_number === 'number' && Number.isSafeInteger(value.sequence_number) && value.sequence_number > sequence))) {
       if (typeof value.sequence_number === 'number') sequence = value.sequence_number;
       output.push(raw.raw);
       return;
     }
     if (!Number.isSafeInteger(sequence + 1)) throw new ResponsesResponseError('Outgoing sequence number overflow');
-    const next: Record<string, unknown> = { ...value, sequence_number: ++sequence };
-    // JSON serialization, formatted SSE text and encoded bytes can coexist at the peak.
-    const bytes = jsonBytes(next) * 3 + utf8Bytes(String(next.type)) * 2 + 32;
-    if (immediate || !held) {
-      if (retained + bytes > MAX_RESPONSE_BYTES) throw new ResponsesResponseError('Response exceeds 8 MiB');
-    } else {
-      reserve(bytes);
-      const item = record(next.item) ? next.item : undefined;
-      const subset = String(next.type).includes('reasoning') || item?.type === 'reasoning' || (record(next.part) && next.part.type === 'reasoning_text') || (typeof next.output_index === 'number' && lifecycle.get(next.output_index)?.type === 'reasoning') ? bytes
-        : record(next.response) && Array.isArray(next.response.output) ? next.response.output.filter((entry: unknown) => record(entry) && entry.type === 'reasoning').reduce<number>((sum, entry: unknown) => sum + jsonBytes(entry) * 3, 0) : 0;
-      if (reasoningRetained + subset > MAX_REASONING_BYTES) throw new ResponsesResponseError('Reasoning exceeds 4 MiB');
-      reasoningRetained += subset;
-    }
-    output.push(encodeEvent(next));
+    let properties = 0;
+    for (const key in value) if (Object.hasOwn(value, key)) properties++;
+    const json = jsonBytes(value) + 64;
+    const header = utf8Bytes(String(value.type)) + 16;
+    const peak = json * 5 + header * 3 + properties * 128 + 1024;
+    const reasoning = reasoningJson(value);
+    const allocation = budget.reserve(peak, reasoning.whole ? peak : Math.min(peak, reasoning.bytes * 5 + (reasoning.bytes ? properties * 128 + 1024 : 0)));
+    try {
+      const next: Record<string, unknown> = { ...value, sequence_number: ++sequence };
+      const bytes = encodeEvent(next);
+      allocation.resize(bytes.byteLength + 256, reasoning.whole ? bytes.byteLength : Math.min(bytes.byteLength, reasoning.bytes));
+      budget.registerBytes(bytes, allocation);
+      ownedRaw.add(bytes);
+      output.push(bytes);
+    } catch (error) { allocation.release(); throw error; }
+    if (raw) { raw.release(); ownedRaw.delete(raw.raw); }
   }
   function indexOf(value: Record<string, unknown>): number {
     if (typeof value.output_index !== 'number' || !Number.isSafeInteger(value.output_index) || value.output_index < 0) throw new ResponsesResponseError('Invalid output index');
@@ -109,8 +145,7 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
     for (const key of ['type', 'id', 'call_id', 'name', 'action', 'encrypted_function_args']) if (initial[key] != null && !same(initial[key], final[key])) throw new ResponsesResponseError('Contradictory execution identity');
     if (!sameExecution({ namespace: initial.namespace }, { namespace: final.namespace })) throw new ResponsesResponseError('Contradictory execution namespace');
     for (const key of ['arguments', 'input']) {
-      const before = initial[key];
-      const after = final[key];
+      const before = initial[key]; const after = final[key];
       if (before !== undefined && (typeof before !== 'string' || typeof after !== 'string' || !after.startsWith(before))) throw new ResponsesResponseError('Contradictory execution parameters');
     }
   }
@@ -121,15 +156,11 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
     if (item.initial) identity(item.initial, final);
     if (item.parameterId !== undefined && item.parameterId !== final.id) throw new ResponsesResponseError('Contradictory parameter item identity');
     const field = final.type === 'custom_tool_call' ? 'input' : 'arguments';
-    if (final.type !== 'local_shell_call') {
-      if (item.delta && item.parameters !== final[field]) throw new ResponsesResponseError('Contradictory execution deltas');
-      if (item.parametersDone !== undefined && item.parametersDone !== final[field]) throw new ResponsesResponseError('Contradictory completed parameters');
-    }
-    // The parsed function input is distinct from the retained wire arguments string.
+    if (final.type !== 'local_shell_call' && ((item.delta && item.parameters !== final[field]) || (item.parametersDone !== undefined && item.parametersDone !== final[field]))) throw new ResponsesResponseError('Contradictory completed parameters');
+    item.parameters = ''; release(item.parameterReservation); delete item.parameterReservation;
     if (final.type === 'function_call' && typeof final.arguments === 'string') reserve(parsedBound(final.arguments));
-    item.call = callFor(final);
-    item.final = final;
-    items.set(index, item);
+    reserve(512);
+    item.call = callFor(final); item.final = final; items.set(index, item);
     if (decisionDeadline === Infinity) {
       decisionDeadline = Date.now() + DECISION_TIMEOUT_MS;
       decisionTimer = setTimeout(() => abort.abort(new ResponsesResponseError('Decision deadline exceeded')), DECISION_TIMEOUT_MS);
@@ -138,7 +169,6 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
       if (signal.aborted) throw new ResponsesResponseError('Response cancelled');
       return bounded(Promise.resolve().then(() => options.onToolCall(item.call!, context, signal)), decisionDeadline - Date.now(), signal);
     });
-    // Observe failure immediately; propagate it before any held output is released.
     decisionChain = item.decision.catch(() => undefined);
     void item.decision.catch(() => undefined);
   }
@@ -150,79 +180,75 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
       return;
     }
     if (!Array.isArray(message.content) || !record(message.content[0])) throw new ResponsesResponseError('Invalid blocked message');
-    const content = message.content[0];
-    const text = content.text;
+    const content = message.content[0]; const text = content.text;
     emit({ type: 'response.output_text.delta', item_id: id, output_index: index, content_index: 0, delta: text });
     emit({ type: 'response.output_text.done', item_id: id, output_index: index, content_index: 0, text });
     emit({ type: 'response.content_part.done', item_id: id, output_index: index, content_index: 0, part: content });
     emit({ type: 'response.output_item.done', output_index: index, item: message });
   }
-  async function finish(value: Record<string, unknown>): Promise<void> {
+  function validateTerminal(value: Record<string, unknown>): { output: unknown[]; ids: Set<unknown> } {
     if (!record(value.response) || !Array.isArray(value.response.output)) throw new ResponsesResponseError('Invalid terminal Responses snapshot');
     const finalOutput = value.response.output;
-    const calls: ToolCall[] = [];
-    const itemIds = new Set<unknown>();
+    reserve((items.size + lifecycle.size + finalOutput.length) * 256 + 2048);
+    const ids = new Set<unknown>(); const callIds = new Set<string>();
     for (const [index, item] of items) {
       if (!item.final || !item.call) throw new ResponsesResponseError('Incomplete execution item');
       if (!sameExecution(item.final, record(finalOutput[index]) ? finalOutput[index] : {})) throw new ResponsesResponseError('Contradictory terminal execution snapshot');
-      calls.push(item.call);
+      if (callIds.has(item.call.id)) throw new ResponsesResponseError('Duplicate tool ID');
+      callIds.add(item.call.id);
     }
     for (let index = 0; index < finalOutput.length; index++) {
       const item: unknown = finalOutput[index];
       if (record(item) && item.id != null) {
-        if (typeof item.id !== 'string' || !item.id || itemIds.has(item.id)) throw new ResponsesResponseError('Duplicate or invalid output item identity');
-        itemIds.add(item.id);
+        if (typeof item.id !== 'string' || !item.id || ids.has(item.id)) throw new ResponsesResponseError('Duplicate or invalid output item identity');
+        ids.add(item.id);
       }
       if (execution(item) && !items.get(index)?.final) throw new ResponsesResponseError('Untracked terminal execution snapshot');
       if (execution(item) && item.status != null && item.status !== 'completed') throw new ResponsesResponseError('Incomplete terminal execution item');
     }
-    unique(calls);
     for (const [index, state] of lifecycle) {
       const item: unknown = finalOutput[index];
       if (!state.done || !record(item) || item.type !== state.type || (state.id != null && item.id !== state.id)) throw new ResponsesResponseError('Contradictory terminal output lifecycle');
     }
+    return { output: finalOutput, ids };
+  }
+  async function finish(value: Record<string, unknown>): Promise<void> {
+    if (!terminalState || !record(value.response)) throw new ResponsesResponseError('Missing validated terminal snapshot');
+    const finalOutput = terminalState.output; const ids = terminalState.ids;
+    reserve(items.size * 512 + 1024);
     const replacements = new Map<number, Record<string, unknown>>();
     for (const [index, item] of items) {
       const verdict = await bounded(item.decision!, decisionDeadline - Date.now(), signal);
       if (verdict.outcome !== 'allow') {
-        let id: string;
-        do { id = `msg_amp_${generated++}`; } while (itemIds.has(id));
-        itemIds.add(id);
-        const message = blockedMessage(id, blockedText(item.call!, verdict));
-        reserve(jsonBytes(message));
-        replacements.set(index, message);
+        reserve(32_768);
+        let id: string; do { id = `msg_amp_${generated++}`; } while (ids.has(id));
+        ids.add(id);
+        replacements.set(index, blockedMessage(id, blockedText(item.call!, verdict)));
       }
     }
     if (signal.aborted) throw new ResponsesResponseError('Response cancelled');
     if (Date.now() >= decisionDeadline) throw new ResponsesResponseError('Decision deadline exceeded');
     const started = new Set<number>();
     for (const entry of queue) {
-      const event = entry.value;
-      if (!event) { output.push(entry.frame.raw); continue; }
-      if (typeof event.output_index === 'number' && replacements.has(event.output_index)) {
-        const index = event.output_index;
-        const message = replacements.get(index)!;
-        // Client dispatch/history follows done arrival, so never move completion to the added slot.
-        if (event.type === 'response.output_item.added') {
-          blockChain(index, message, 'start');
-          started.add(index);
-        } else if (event.type === 'response.output_item.done') {
+      const frame = entry.frame!; const event = entry.value;
+      if (!event) output.push(frame.raw);
+      else if (typeof event.output_index === 'number' && replacements.has(event.output_index)) {
+        const index = event.output_index; const message = replacements.get(index)!;
+        if (event.type === 'response.output_item.added') { blockChain(index, message, 'start'); started.add(index); }
+        else if (event.type === 'response.output_item.done') {
           if (!started.has(index)) { blockChain(index, message, 'start'); started.add(index); }
           blockChain(index, message, 'done');
         }
-        continue;
-      }
-      if (event === value) {
+        frame.release(); ownedRaw.delete(frame.raw);
+      } else if (event === value && replacements.size) {
+        reserve(finalOutput.length * 32 + 2048);
         const rewritten = { ...event, response: { ...value.response, output: finalOutput.map((item: unknown, index: number) => replacements.get(index) ?? item) } };
-        reserve(jsonBytes(rewritten));
-        const subset = finalOutput.filter((item: unknown) => record(item) && item.type === 'reasoning').reduce<number>((sum, item: unknown) => sum + jsonBytes(item), 0);
-        if (reasoningRetained + subset > MAX_REASONING_BYTES) throw new ResponsesResponseError('Reasoning exceeds 4 MiB');
-        reasoningRetained += subset;
-        emit(rewritten);
-      } else emit(event, entry.frame);
+        emit(rewritten, frame);
+      } else emit(event, frame);
+      entry.frame = undefined; entry.value = undefined;
     }
     queue.length = 0;
-    terminal = true;
+    releaseRetained();
     clearTimeout(decisionTimer);
     keepalive.setHeld(false);
   }
@@ -230,118 +256,108 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
     if (!frame.complete) throw new ResponsesResponseError('Incomplete SSE frame');
     if (!frame.data || frame.data === '[DONE]') {
       if (frame.data === '[DONE]' && !terminal) throw new ResponsesResponseError('Incomplete Responses turn');
-      // Comments bypass the barrier; a client terminator must follow the withheld terminal.
-      if (frame.data === '[DONE]' && held) { reserve(frame.raw.byteLength * 2 + utf8Bytes(frame.data)); queue.push({ frame }); }
+      if (frame.data === '[DONE]' && held) { reserve(128); queue.push({ frame }); }
       else output.push(frame.raw);
-      return;
+      frame.releaseSemantic(); return;
     }
-    const typeSpan = propertySpan(frame.data, 'type');
-    const rawType: unknown = typeSpan && typeSpan[1] - typeSpan[0] <= 256 ? JSON.parse(frame.data.slice(typeSpan[0], typeSpan[1])) : undefined;
-    const itemSpan = propertySpan(frame.data, 'item');
-    const itemTypeSpan = itemSpan ? propertySpan(frame.data, 'type', itemSpan[0]) : undefined;
-    const rawItemType: unknown = itemTypeSpan && itemTypeSpan[1] - itemTypeSpan[0] <= 96 ? JSON.parse(frame.data.slice(itemTypeSpan[0], itemTypeSpan[1])) : undefined;
-    const responseSpan = propertySpan(frame.data, 'response');
-    const control = (rawType === 'error' || rawType === 'ping') && !itemSpan && !responseSpan && ['output', 'output_index', 'item_id', 'content_index', 'delta', 'part', 'arguments', 'input'].every(key => !propertySpan(frame.data!, key));
-    if (terminal && !control) throw new ResponsesResponseError('Event after terminal Responses snapshot');
-    const willHold = held || ((rawType === 'response.output_item.added' || rawType === 'response.output_item.done') && ['function_call', 'custom_tool_call', 'local_shell_call'].includes(String(rawItemType)));
-    const temporary = frame.raw.byteLength + parsedBound(frame.data);
-    const bytes = frame.raw.byteLength + temporary;
-    const indexSpan = propertySpan(frame.data, 'output_index');
-    const rawIndex: unknown = indexSpan && indexSpan[1] - indexSpan[0] <= 32 ? JSON.parse(frame.data.slice(indexSpan[0], indexSpan[1])) : undefined;
-    const partSpan = propertySpan(frame.data, 'part');
-    const partTypeSpan = partSpan ? propertySpan(frame.data, 'type', partSpan[0]) : undefined;
-    const rawPartType: unknown = partTypeSpan && partTypeSpan[1] - partTypeSpan[0] <= 96 ? JSON.parse(frame.data.slice(partTypeSpan[0], partTypeSpan[1])) : undefined;
-    const fullReasoning = (typeof rawType === 'string' && rawType.includes('reasoning')) || rawItemType === 'reasoning' || rawPartType === 'reasoning_text' || (typeof rawIndex === 'number' && lifecycle.get(rawIndex)?.type === 'reasoning');
-    const subset = fullReasoning ? bytes : responseSpan ? reasoningBound(frame.data, responseSpan[0]) : 0;
-    if (retained + bytes > MAX_RESPONSE_BYTES) throw new ResponsesResponseError('Response exceeds 8 MiB');
-    if (willHold && !control) {
-      // Reserve raw, decoded and parsed data (including reasoning) BEFORE JSON.parse.
-      reserve(bytes);
-      if (reasoningRetained + subset > MAX_REASONING_BYTES) throw new ResponsesResponseError('Reasoning exceeds 4 MiB');
-      reasoningRetained += subset;
-    }
-    const value: unknown = JSON.parse(frame.data);
-    if (!record(value) || typeof value.type !== 'string') throw new ResponsesResponseError('Invalid Responses event');
-    const type = value.type;
-    if (frame.event && frame.event !== type) {
-      const sensitive = (name: string): boolean => name.startsWith('response.output_item.') || name.startsWith('response.function_call_arguments.') || name.startsWith('response.custom_tool_call_input.') || name === 'response.completed' || name === 'response.incomplete';
-      if (sensitive(frame.event) || sensitive(type)) throw new ResponsesResponseError('Conflicting execution event identity');
-    }
-    const isTerminal = type === 'response.completed' || type === 'response.incomplete';
-    if (record(value.response) && !isTerminal && Array.isArray(value.response.output) && value.response.output.some(execution)) throw new ResponsesResponseError('Untracked initial execution snapshot');
-    if (Array.isArray(value.output) && value.output.some(execution)) throw new ResponsesResponseError('Untracked execution snapshot');
-    if (isTerminal) {
-      if (!record(value.response) || !Array.isArray(value.response.output)) throw new ResponsesResponseError('Invalid terminal Responses snapshot');
-      if (value.response.status != null && value.response.status !== type.slice('response.'.length)) throw new ResponsesResponseError('Contradictory terminal response status');
-      if (!held && value.response.output.some(execution)) throw new ResponsesResponseError('Untracked terminal execution snapshot');
-    }
-    if (record(value.item) && value.item.type === 'tool_search_call' && value.item.execution !== 'server') throw new ResponsesResponseError('Unsupported client tool-search execution');
-    const isItem = type === 'response.output_item.added' || type === 'response.output_item.done';
-    if (isItem) {
-      const index = indexOf(value);
-      if (!record(value.item) || typeof value.item.type !== 'string') throw new ResponsesResponseError('Invalid output item');
-      const previous = lifecycle.get(index);
-      if (type === 'response.output_item.added') {
-        if (previous) throw new ResponsesResponseError('Repeated output item');
-        reserve(jsonBytes({ type: value.item.type, id: value.item.id }));
-        lifecycle.set(index, { type: value.item.type, id: value.item.id, done: false });
-      } else {
-        if (previous && (previous.done || previous.type !== value.item.type || (previous.id != null && previous.id !== value.item.id))) throw new ResponsesResponseError('Contradictory completed output item');
-        if (!previous) reserve(jsonBytes({ type: value.item.type, id: value.item.id }));
-        lifecycle.set(index, { type: value.item.type, id: value.item.id, done: true });
+    const scanner = new JsonRetentionScanner('responses', 'event', budget);
+    let rawReasoning: number;
+    let ambiguous: boolean;
+    try {
+      for (const segment of sseDataSegments(frame.raw)) scanner.push(segment);
+      const info = scanner.finish();
+      ambiguous = info.ambiguous || !info.complete;
+      const text = info.type === 'response.output_text.delta' || info.type === 'response.output_text.done' || info.partType === 'output_text';
+      rawReasoning = ambiguous || info.type?.includes('reasoning') || info.itemType === 'reasoning' || info.partType === 'reasoning_text'
+        || (info.itemType === undefined && info.outputIndex !== undefined && (lifecycle.get(info.outputIndex)?.type === 'reasoning' || (!lifecycle.has(info.outputIndex) && !text))) ? frame.raw.byteLength : info.reasoningBytes + info.pendingBytes;
+    } finally { scanner.finish(); }
+    if (ambiguous) throw new ResponsesResponseError('Unclassifiable Responses event');
+    const parsedBytes = parsedBound(frame.data);
+    const overhead = Math.max(0, parsedBytes - frame.data.length * 2);
+    const parsed = reserve(parsedBytes, rawReasoning ? Math.min(parsedBytes, rawReasoning * 2 + overhead) : 0);
+    let saved = false;
+    try {
+      const value: unknown = JSON.parse(frame.data);
+      if (!record(value) || typeof value.type !== 'string') throw new ResponsesResponseError('Invalid Responses event');
+      const type = value.type;
+      if (frame.event && frame.event !== type) {
+        const sensitive = (name: string): boolean => name.startsWith('response.output_item.') || name.startsWith('response.function_call_arguments.') || name.startsWith('response.custom_tool_call_input.') || name === 'response.completed' || name === 'response.incomplete';
+        if (sensitive(frame.event) || sensitive(type)) throw new ResponsesResponseError('Conflicting execution event identity');
       }
-      if (execution(value.item)) {
-        barrier();
+      frame.releaseSemantic();
+      const control = (type === 'error' || type === 'ping') && !['item', 'response', 'output', 'output_index', 'item_id', 'content_index', 'delta', 'part', 'arguments', 'input'].some(key => Object.hasOwn(value, key));
+      if (terminal && !control) throw new ResponsesResponseError('Event after terminal Responses snapshot');
+      const isTerminal = type === 'response.completed' || type === 'response.incomplete';
+      if (record(value.response) && !isTerminal && Array.isArray(value.response.output) && value.response.output.some(execution)) throw new ResponsesResponseError('Untracked initial execution snapshot');
+      if (Array.isArray(value.output) && value.output.some(execution)) throw new ResponsesResponseError('Untracked execution snapshot');
+      if (isTerminal) {
+        if (!record(value.response) || !Array.isArray(value.response.output)) throw new ResponsesResponseError('Invalid terminal Responses snapshot');
+        if (value.response.status != null && value.response.status !== type.slice('response.'.length)) throw new ResponsesResponseError('Contradictory terminal response status');
+        const validated = validateTerminal(value);
+        terminalState = held ? validated : undefined;
+      }
+      if (record(value.item) && value.item.type === 'tool_search_call' && value.item.execution !== 'server') throw new ResponsesResponseError('Unsupported client tool-search execution');
+      const isItem = type === 'response.output_item.added' || type === 'response.output_item.done';
+      if (isItem) {
+        const index = indexOf(value);
+        if (!record(value.item) || typeof value.item.type !== 'string') throw new ResponsesResponseError('Invalid output item');
+        const previous = lifecycle.get(index);
         if (type === 'response.output_item.added') {
-          const parameters = value.item.type === 'custom_tool_call' ? value.item.input : value.item.type === 'function_call' ? value.item.arguments : '';
-          if (parameters !== undefined && typeof parameters !== 'string') throw new ResponsesResponseError('Invalid initial execution parameters');
-          const initial = typeof parameters === 'string' ? parameters : '';
-          const parameterBytes = utf8Bytes(initial);
-          if (parameterBytes > MAX_TOOL_BYTES) throw new ResponsesResponseError('Execution parameters exceed 1 MiB');
-          items.set(index, { initial: value.item, parameters: initial, parameterBytes, delta: false });
-        } else complete(index, value.item);
-      } else if (items.has(index)) throw new ResponsesResponseError('Contradictory execution item type');
-    } else if (execution(value.item)) throw new ResponsesResponseError('Untracked execution item');
-    else if (type.startsWith('response.function_call_arguments.') || type.startsWith('response.custom_tool_call_input.')) {
-      const index = indexOf(value);
-      const item = items.get(index);
-      const expected = type.startsWith('response.custom_tool_call_input.') ? 'custom_tool_call' : 'function_call';
-      if (!item || item.final || item.initial?.type !== expected) throw new ResponsesResponseError('Untracked execution parameters');
-      if (value.item_id != null) {
-        if (typeof value.item_id !== 'string' || (item.initial.id != null && value.item_id !== item.initial.id) || (item.parameterId !== undefined && value.item_id !== item.parameterId)) throw new ResponsesResponseError('Contradictory parameter item identity');
-        item.parameterId = value.item_id;
+          if (previous) throw new ResponsesResponseError('Repeated output item');
+          reserve(512 + value.item.type.length * 2 + (typeof value.item.id === 'string' ? value.item.id.length * 2 : 0));
+          lifecycle.set(index, { type: value.item.type, id: value.item.id, done: false });
+        } else {
+          if (previous && (previous.done || previous.type !== value.item.type || (previous.id != null && previous.id !== value.item.id))) throw new ResponsesResponseError('Contradictory completed output item');
+          if (!previous) reserve(512 + value.item.type.length * 2 + (typeof value.item.id === 'string' ? value.item.id.length * 2 : 0));
+          lifecycle.set(index, { type: value.item.type, id: value.item.id, done: true });
+        }
+        if (execution(value.item)) {
+          barrier();
+          if (type === 'response.output_item.added') {
+            const parameters = value.item.type === 'custom_tool_call' ? value.item.input : value.item.type === 'function_call' ? value.item.arguments : '';
+            if (parameters !== undefined && typeof parameters !== 'string') throw new ResponsesResponseError('Invalid initial execution parameters');
+            const initial = typeof parameters === 'string' ? parameters : '';
+            const parameterBytes = utf8Bytes(initial);
+            if (parameterBytes > MAX_TOOL_BYTES) throw new ResponsesResponseError('Execution parameters exceed 1 MiB');
+            reserve(512);
+            items.set(index, { initial: value.item, parameters: initial, parameterBytes, delta: false });
+          } else complete(index, value.item);
+        } else if (items.has(index)) throw new ResponsesResponseError('Contradictory execution item type');
+      } else if (execution(value.item)) throw new ResponsesResponseError('Untracked execution item');
+      else if (type.startsWith('response.function_call_arguments.') || type.startsWith('response.custom_tool_call_input.')) {
+        const index = indexOf(value); const item = items.get(index);
+        const expected = type.startsWith('response.custom_tool_call_input.') ? 'custom_tool_call' : 'function_call';
+        if (!item || item.final || item.initial?.type !== expected) throw new ResponsesResponseError('Untracked execution parameters');
+        if (value.item_id != null) {
+          if (typeof value.item_id !== 'string' || (item.initial.id != null && value.item_id !== item.initial.id) || (item.parameterId !== undefined && value.item_id !== item.parameterId)) throw new ResponsesResponseError('Contradictory parameter item identity');
+          item.parameterId = value.item_id;
+        }
+        if (type.endsWith('.delta')) {
+          if (typeof value.delta !== 'string') throw new ResponsesResponseError('Invalid execution delta');
+          const deltaBytes = utf8Bytes(value.delta);
+          if (item.parameterBytes + deltaBytes > MAX_TOOL_BYTES) throw new ResponsesResponseError('Execution parameters exceed 1 MiB');
+          const next = reserve((item.parameters.length + value.delta.length) * 2 + 128);
+          item.parameters += value.delta; release(item.parameterReservation); item.parameterReservation = next;
+          item.parameterBytes += deltaBytes; item.delta = true;
+        } else if (type.endsWith('.done')) {
+          const parameters = expected === 'custom_tool_call' ? value.input : value.arguments;
+          if (typeof parameters !== 'string' || utf8Bytes(parameters) > MAX_TOOL_BYTES || (item.delta && item.parameters !== parameters) || item.parametersDone !== undefined) throw new ResponsesResponseError('Contradictory completed parameters');
+          item.parametersDone = parameters;
+        } else throw new ResponsesResponseError('Unsupported execution parameter event');
       }
-      if (type.endsWith('.delta')) {
-        if (typeof value.delta !== 'string') throw new ResponsesResponseError('Invalid execution delta');
-        const deltaBytes = utf8Bytes(value.delta);
-        if (item.parameterBytes + deltaBytes > MAX_TOOL_BYTES) throw new ResponsesResponseError('Execution parameters exceed 1 MiB');
-        reserve(deltaBytes + (item.delta ? 0 : item.parameterBytes));
-        item.parameters += value.delta;
-        item.parameterBytes += deltaBytes;
-        item.delta = true;
-      } else if (type.endsWith('.done')) {
-        const parameters = expected === 'custom_tool_call' ? value.input : value.arguments;
-        if (typeof parameters !== 'string' || utf8Bytes(parameters) > MAX_TOOL_BYTES || (item.delta && item.parameters !== parameters) || item.parametersDone !== undefined) throw new ResponsesResponseError('Contradictory completed parameters');
-        item.parametersDone = parameters;
-      } else throw new ResponsesResponseError('Unsupported execution parameter event');
-    }
-    if (type === 'response.failed') throw new ResponsesResponseError('Upstream Responses failure');
-    if (held && !control) queue.push({ frame, value });
-    else emit(value, frame, control);
-    if (isTerminal) {
-      terminal = true;
-      terminalEvent = value;
-    }
+      if (type === 'response.failed') throw new ResponsesResponseError('Upstream Responses failure');
+      if (held && !control) { reserve(128); queue.push({ frame, value }); saved = true; }
+      else emit(value, frame);
+      if (isTerminal) { terminal = true; terminalEvent = held ? value : undefined; }
+    } finally { frame.releaseSemantic(); if (!saved) release(parsed); }
   }
   const transformed = new ReadableStream<Uint8Array>({
     start(controller) {
       abortListener = () => {
         if (stopped) return;
-        stopped = true;
-        discard();
+        stopped = true; discard();
         const reason: unknown = signal.reason ?? new ResponsesResponseError('Response cancelled');
-        controller.error(reason);
-        void reader.cancel(reason).catch(() => undefined);
+        controller.error(reason); void reader.cancel(reason).catch(() => undefined);
       };
       signal.addEventListener('abort', abortListener, { once: true });
       if (signal.aborted) abortListener();
@@ -351,11 +367,9 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
         while (!stopped) {
           if (signal.aborted) throw signal.reason ?? new ResponsesResponseError('Response cancelled');
           if (outputCursor < output.length) {
-            const bytes = output[outputCursor]!;
-            delete output[outputCursor++];
+            const bytes = output[outputCursor]!; delete output[outputCursor++];
             if (outputCursor === output.length) { output.length = 0; outputCursor = 0; }
-            controller.enqueue(bytes);
-            return;
+            controller.enqueue(bytes); return;
           }
           if (finished) { stopped = true; discard(); reader.releaseLock(); controller.close(); return; }
           const item = await bounded(reader.read(), Math.min(IDLE_TIMEOUT_MS - (Date.now() - lastByte), completionDeadline - Date.now()), signal);
@@ -363,12 +377,11 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
           if (item.done) {
             if (!terminal) throw new ResponsesResponseError('Incomplete Responses turn');
             clearTimeout(completionTimer);
-            // Match the existing raw-SSE guard lifecycle: malformed trailers cannot follow released execution.
             if (held && terminalEvent) await finish(terminalEvent);
-            finished = true;
-            continue;
+            finished = true; continue;
           }
-          process(item.value);
+          currentFrame = item.value; ownedRaw.add(item.value.raw);
+          process(item.value); currentFrame = undefined;
         }
       } catch (error) {
         if (!stopped) { stopped = true; discard(); abort.abort(error); controller.error(error); await reader.cancel(error).catch(() => undefined); }
@@ -376,5 +389,5 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
     },
     async cancel(reason) { stopped = true; discard(); abort.abort(reason); await reader.cancel(reason).catch(() => undefined); },
   }, { highWaterMark: 0 });
-  return keepalive.wrap(transformed);
+  return keepalive.wrap(transformed, { delivered: releaseRaw, discarded: releaseRaw });
 }

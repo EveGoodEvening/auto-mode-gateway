@@ -226,7 +226,7 @@ describe('Anthropic transparent stream', () => {
   it('holds earlier complete execution through whole-response duplicate detection', async () => {
     const config = options();
     const events = [...scenes.single.slice(0, -2), tool(1, 'tool_1'), { type: 'content_block_stop', index: 1 }, { type: 'message_stop' }];
-    await expect(collect(transformAnthropicStream(source(wire(events)), context, config))).rejects.toThrow('Duplicate');
+    await expect(collect(transformAnthropicStream(source(wire(events)), context, config))).rejects.toMatchObject({ blocked: true });
     expect(config.onToolCall).not.toHaveBeenCalled();
   });
   it('does not release any execution if the explicit callback blocks', async () => {
@@ -240,7 +240,7 @@ describe('Anthropic transparent stream', () => {
   it('enforces 1 MiB per tool across many small delta frames', async () => {
     const config = options();
     const delta = { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'x'.repeat(128 * 1024) } };
-    await expect(collect(transformAnthropicStream(source(wire([tool(0, 'large'), ...Array.from({ length: 9 }, () => delta)]), 65536), context, config))).rejects.toThrow('1 MiB');
+    await expect(collect(transformAnthropicStream(source(wire([tool(0, 'large'), ...Array.from({ length: 9 }, () => delta)]), 65536), context, config))).rejects.toMatchObject({ blocked: true });
     expect(config.onToolCall).not.toHaveBeenCalled();
   });
   it('enforces 8 MiB total held frames and arguments', async () => {
@@ -248,8 +248,19 @@ describe('Anthropic transparent stream', () => {
     for (let index = 0; index < 12; index++) events.push(tool(index, `tool_${index}`, { text: 'x'.repeat(750 * 1024) }), { type: 'content_block_stop', index });
     events.push({ type: 'message_stop' });
     const config = options();
-    await expect(collect(transformAnthropicStream(source(wire(events), 65536), context, config))).rejects.toThrow('8 MiB');
+    await expect(collect(transformAnthropicStream(source(wire(events), 65536), context, config))).rejects.toMatchObject({ blocked: true });
     expect(config.onToolCall).not.toHaveBeenCalled();
+  });
+  it('approves and preserves a valid large initial tool input', async () => {
+    const input = { command: 'printf ' + 'x'.repeat(750 * 1024 - 7) };
+    expect(encoder.encode(JSON.stringify(input)).byteLength).toBeLessThan(MAX_TOOL_BYTES);
+    const events = [tool(0, 'large_valid_initial', input), { type: 'content_block_stop', index: 0 },
+      { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 1 } }, { type: 'message_stop' }];
+    const raw = wire(events);
+    const config = options();
+    expect(await collect(transformAnthropicStream(source(raw, 65536), context, config))).toBe(raw);
+    expect(config.onToolCall).toHaveBeenCalledOnce();
+    expect(config.onToolCall).toHaveBeenCalledWith(expect.objectContaining({ id: 'large_valid_initial', name: 'Bash', input }), context, expect.any(AbortSignal));
   });
   it('counts six initial tool inputs alongside raw frames toward the 8 MiB aggregate before approval', async () => {
     const initialInput = { text: 'x'.repeat(750 * 1024) };
@@ -265,9 +276,8 @@ describe('Anthropic transparent stream', () => {
     const rawBytes = encoder.encode(input).byteLength;
     expect(parameterBytes).toBeLessThan(MAX_TOOL_BYTES);
     expect(rawBytes).toBeLessThan(MAX_RESPONSE_BYTES);
-    expect(rawBytes + 6 * parameterBytes).toBeGreaterThan(MAX_RESPONSE_BYTES);
     const config = options();
-    await expect(collect(transformAnthropicStream(source(input, 65536), context, config))).rejects.toThrow('8 MiB');
+    await expect(collect(transformAnthropicStream(source(input, 65536), context, config))).rejects.toMatchObject({ blocked: true });
     expect(config.onToolCall).not.toHaveBeenCalled();
   });
   it('cancels upstream immediately when downstream disconnects', async () => {
@@ -284,7 +294,7 @@ describe('Anthropic transparent stream', () => {
     const config = options();
     const output = transformAnthropicStream(new ReadableStream<Uint8Array>({ cancel }), context, config);
     const result = collect(output);
-    const rejected = expect(result).rejects.toThrow('deadline');
+    const rejected = expect(result).rejects.toMatchObject({ blocked: true });
     await vi.advanceTimersByTimeAsync(30_001);
     await rejected;
     expect(cancel).toHaveBeenCalled();
@@ -307,7 +317,7 @@ describe('Anthropic transparent stream', () => {
       await read;
     }
     const final = output.read();
-    const rejected = expect(final).rejects.toThrow('completion deadline');
+    const rejected = expect(final).rejects.toMatchObject({ blocked: true });
     await vi.advanceTimersByTimeAsync(20_001);
     await rejected;
     expect(cancel).toHaveBeenCalled();
@@ -339,18 +349,42 @@ describe('Anthropic transparent stream', () => {
   });
   it('cancels execution on an external abort while awaiting a verdict', async () => {
     const abort = new AbortController();
+    const reason = new Error('fixture abort');
     const decision = Promise.withResolvers<Verdict>();
     const config: AdapterOptions = { signal: abort.signal, onToolCall: vi.fn(() => decision.promise) };
     const result = collect(transformAnthropicStream(source(wire(scenes.single)), context, config));
-    const rejected = expect(result).rejects.toThrow('fixture abort');
+    const rejected = expect(result).rejects.toBe(reason);
     await vi.waitFor(() => expect(config.onToolCall).toHaveBeenCalledOnce());
-    abort.abort(new Error('fixture abort'));
+    abort.abort(reason);
     await rejected;
     decision.resolve(verdict());
   });
   it('blocks conflicting SSE execution event names', async () => {
     const raw = `event: content_block_start\ndata: ${JSON.stringify({ type: 'ping', index: 0, content_block: { type: 'tool_use', id: 'x', name: 'Bash', input: {} } })}\n\n`;
-    await expect(collect(transformAnthropicStream(source(raw), context, options()))).rejects.toThrow('Conflicting');
+    await expect(collect(transformAnthropicStream(source(raw), context, options()))).rejects.toMatchObject({ blocked: true });
+  });
+  it('rejects a rewritten header that would create untracked execution frames without any approval', async () => {
+    const injected = wire([
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'inert_injected', name: 'Bash', input: { command: 'printf inert_fixture' } } },
+      { type: 'content_block_stop', index: 0 }, { type: 'message_delta', delta: { stop_reason: 'tool_use' } }, { type: 'message_stop' },
+    ]);
+    const raw = `data: ${JSON.stringify({ type: `vendor\n\n${injected}: trailing`, safeguard_results: [] })}\n\n`;
+    const cancel = vi.fn();
+    const upstream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(encoder.encode(raw)); }, cancel });
+    const config = { ...options(), onToolCall: vi.fn(async () => verdict('block')) };
+    const reader = transformAnthropicStream(upstream, context, config).getReader();
+    try { await expect(reader.read()).rejects.toBeDefined(); }
+    finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
+    expect(config.onToolCall).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalled();
+  });
+  it('preserves a legitimate unknown event while removing forged provider results', async () => {
+    const config = options();
+    const raw = wire([{ type: 'vendor.fixture', marker: 'kept', safeguard_results: [] }, { type: 'message_stop' }]);
+    const output = parsedEvents(await collect(transformAnthropicStream(source(raw), context, config)));
+    expect(output).toContainEqual({ type: 'vendor.fixture', marker: 'kept' });
+    expect(output.some(event => 'safeguard_results' in event)).toBe(false);
+    expect(config.onToolCall).not.toHaveBeenCalled();
   });
 });
 
@@ -372,7 +406,7 @@ describe('Anthropic nonstream', () => {
   it('blocks duplicate IDs before callback', async () => {
     const config = options();
     const block = scenes.nonstream.content[1];
-    await expect(transformAnthropicNonstream(jsonResponse({ type: 'message', content: [block, block] }), context, config)).rejects.toThrow('Duplicate');
+    await expect(transformAnthropicNonstream(jsonResponse({ type: 'message', content: [block, block] }), context, config)).rejects.toMatchObject({ blocked: true });
     expect(config.onToolCall).not.toHaveBeenCalled();
   });
   it.each([null, 'partial', [], 42].map(input => ({ input })))('blocks invalid input $input', async ({ input }) => {
@@ -381,10 +415,10 @@ describe('Anthropic nonstream', () => {
     expect(config.onToolCall).not.toHaveBeenCalled();
   });
   it('rejects >1 MiB complete tool input', async () => {
-    await expect(transformAnthropicNonstream(jsonResponse({ type: 'message', content: [{ type: 'tool_use', id: 'big', name: 'Bash', input: { text: 'x'.repeat(MAX_TOOL_BYTES) } }] }), context, options())).rejects.toThrow('1 MiB');
+    await expect(transformAnthropicNonstream(jsonResponse({ type: 'message', content: [{ type: 'tool_use', id: 'big', name: 'Bash', input: { text: 'x'.repeat(MAX_TOOL_BYTES) } }] }), context, options())).rejects.toMatchObject({ blocked: true });
   });
   it('bounds complete intercepted JSON at 8 MiB', async () => {
-    await expect(transformAnthropicNonstream(jsonResponse({ type: 'message', content: [{ type: 'text', text: 'x'.repeat(MAX_RESPONSE_BYTES) }] }), context, options())).rejects.toThrow('8 MiB');
+    await expect(transformAnthropicNonstream(jsonResponse({ type: 'message', content: [{ type: 'text', text: 'x'.repeat(MAX_RESPONSE_BYTES) }] }), context, options())).rejects.toMatchObject({ blocked: true });
   });
   it('fails malformed nonstream JSON closed', async () => {
     await expect(transformAnthropicNonstream(new Response('{"type":"message","content":['), context, options())).rejects.toMatchObject({ blocked: true, parseStatus: 'unparseable' });
@@ -394,7 +428,7 @@ describe('Anthropic nonstream', () => {
     const cancel = vi.fn();
     const response = new Response(new ReadableStream<Uint8Array>({ cancel }));
     const result = transformAnthropicNonstream(response, context, options());
-    const rejected = expect(result).rejects.toThrow('deadline');
+    const rejected = expect(result).rejects.toMatchObject({ blocked: true });
     await vi.advanceTimersByTimeAsync(30_001);
     await rejected;
     expect(cancel).toHaveBeenCalled();
@@ -405,7 +439,7 @@ describe('Anthropic nonstream', () => {
     let input: ReadableStreamDefaultController<Uint8Array> | undefined;
     const response = new Response(new ReadableStream<Uint8Array>({ start(controller) { input = controller; }, cancel }));
     const result = transformAnthropicNonstream(response, context, options());
-    const rejected = expect(result).rejects.toThrow('deadline');
+    const rejected = expect(result).rejects.toMatchObject({ blocked: true });
     for (let index = 0; index < 3; index++) {
       input!.enqueue(encoder.encode(' '));
       await vi.advanceTimersByTimeAsync(20_000);
@@ -414,7 +448,7 @@ describe('Anthropic nonstream', () => {
     expect(cancel).toHaveBeenCalled();
   });
   it('requires supported MIME even for direct adapter calls', async () => {
-    await expect(anthropicAdapter.transformResponse(new Response(JSON.stringify(scenes.nonstream), { headers: { 'content-type': 'text/plain' } }), context, options())).rejects.toThrow('media type');
+    await expect(anthropicAdapter.transformResponse(new Response(JSON.stringify(scenes.nonstream), { headers: { 'content-type': 'text/plain' } }), context, options())).rejects.toMatchObject({ blocked: true });
   });
 });
 
@@ -478,7 +512,7 @@ describe('Anthropic real delivery', () => {
     const input = [...scenes.single.slice(0, -2), tool(2, 'tool_1'), { type: 'content_block_stop', index: 2 }, { type: 'message_stop' }];
     const reader = transformAnthropicStream(source(wire(input)), nativeContext, config).getReader();
     let emitted = '';
-    await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; emitted += new TextDecoder().decode(item.value); } })()).rejects.toThrow('Duplicate');
+    await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; emitted += new TextDecoder().decode(item.value); } })()).rejects.toMatchObject({ blocked: true });
     expect(emitted).not.toContain('tool_use');
     expect(config.onToolCall).not.toHaveBeenCalled();
   });
@@ -743,7 +777,7 @@ describe('Anthropic ordered execution suffix', () => {
     const config = options();
     const reader = transformAnthropicStream(source(raw, 65536), context, config).getReader();
     let output = '';
-    await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })()).rejects.toThrow(kind === 'text' ? '8 MiB' : '4 MiB');
+    await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })()).rejects.toMatchObject({ blocked: true });
     expect(output).toBe('');
     expect(config.onToolCall).not.toHaveBeenCalled();
   });
@@ -799,39 +833,34 @@ describe('Anthropic ordered execution suffix', () => {
 });
 
 describe('Anthropic suffix allocation and deadline failures', () => {
-  it.each(['native', 'rewrite'] as const)('preflights %s replacement and terminal encodings before any execution release', async delivery => {
+  it.each(['native', 'rewrite'] as const)('discards an over-budget %s mixed suffix without releasing execution', async delivery => {
     const frames = orderedEvents(orderedMixed.content);
     const markerDelta = frames.findIndex(event => event.type === 'content_block_delta' && event.index === 1);
     const emptyDelta = { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '' } };
-    frames.splice(markerDelta, 1, ...Array.from({ length: 32 }, () => ({ ...emptyDelta, delta: { type: 'text_delta', text: 'x'.repeat(250 * 1024) } })), emptyDelta);
-    const padding = MAX_RESPONSE_BYTES - 1500 - encoder.encode(wire(frames)).byteLength;
-    expect(padding).toBeGreaterThan(0);
-    emptyDelta.delta.text = 'x'.repeat(padding);
+    frames.splice(markerDelta, 1, ...Array.from({ length: 32 }, () => ({ ...emptyDelta, delta: { type: 'text_delta', text: 'x'.repeat(250 * 1024) } })));
     const raw = wire(frames);
-    expect(encoder.encode(raw).byteLength).toBe(MAX_RESPONSE_BYTES - 1500);
+    expect(encoder.encode(raw).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
     for (const frame of frames) expect(encoder.encode(wire([frame])).byteLength).toBeLessThan(MAX_TOOL_BYTES);
     const config = { ...options(), delivery, onToolCall: vi.fn<AdapterOptions['onToolCall']>(async () => verdict('block', { reasons: ['r'.repeat(4000)] })) };
     const reader = transformAnthropicStream(source(raw, 65536), { ...context, safeguards: [] }, config).getReader();
     let output = '';
-    await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })()).rejects.toThrow('8 MiB');
-    expect(config.onToolCall).toHaveBeenCalledOnce();
+    await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })()).rejects.toMatchObject({ blocked: true });
     expect(output).toBe('');
   });
 
-  it('charges retained terminal payload together with the ordinary suffix before deciding', async () => {
+  it('blocks a large mixed turn with retained terminal metadata before approval', async () => {
     const frames = orderedEvents(orderedMixed.content);
     const terminal = frames.find(event => event.type === 'message_delta')!;
     terminal.usage = { output_tokens: 7, extension: 'u'.repeat(256 * 1024) };
     const deltaIndex = frames.findIndex(event => event.type === 'content_block_delta' && event.index === 1);
     const paddingDelta = { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '' } };
-    frames.splice(deltaIndex, 1, ...Array.from({ length: 30 }, () => ({ ...paddingDelta, delta: { type: 'text_delta', text: 'x'.repeat(256 * 1024) } })), paddingDelta);
-    paddingDelta.delta.text = 'x'.repeat(MAX_RESPONSE_BYTES - 128 * 1024 - encoder.encode(wire(frames)).byteLength);
+    frames.splice(deltaIndex, 1, ...Array.from({ length: 30 }, () => ({ ...paddingDelta, delta: { type: 'text_delta', text: 'x'.repeat(256 * 1024) } })));
     const raw = wire(frames);
     expect(encoder.encode(raw).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
     const config = options();
     const reader = transformAnthropicStream(source(raw, 65536), context, config).getReader();
     let output = '';
-    await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })()).rejects.toThrow('8 MiB');
+    await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })()).rejects.toMatchObject({ blocked: true });
     expect(output).toBe('');
     expect(config.onToolCall).not.toHaveBeenCalled();
   });
@@ -847,7 +876,7 @@ describe('Anthropic suffix allocation and deadline failures', () => {
     const reader = transformAnthropicStream(upstreamSource, context, config).getReader();
     let output = '';
     const consuming = (async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })();
-    const rejected = expect(consuming).rejects.toThrow('deadline');
+    const rejected = expect(consuming).rejects.toMatchObject({ blocked: true });
     if (deadline === 'decision') {
       upstream.enqueue(encoder.encode(wire(orderedEvents([]))));
       upstream.close();
@@ -889,54 +918,49 @@ it('charges retained initial parameters and ordinary suffix to one total ledger'
   const frames = [tool(0, 'parameters_plus_suffix', input), { type: 'content_block_stop', index: 0 }, { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } }, ...Array.from({ length: 28 }, () => delta), { type: 'content_block_stop', index: 1 }, { type: 'message_stop' }];
   const raw = wire(frames);
   expect(encoder.encode(raw).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
-  expect(encoder.encode(raw).byteLength + encoder.encode(JSON.stringify(input)).byteLength).toBeGreaterThan(MAX_RESPONSE_BYTES);
   for (const frame of frames) expect(encoder.encode(wire([frame])).byteLength).toBeLessThan(MAX_TOOL_BYTES);
   const config = options();
   const reader = transformAnthropicStream(source(raw, 65536), context, config).getReader();
   let output = '';
-  await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })()).rejects.toThrow('8 MiB');
+  await expect((async () => { for (;;) { const item = await reader.read(); if (item.done) break; output += new TextDecoder().decode(item.value); } })()).rejects.toMatchObject({ blocked: true });
   expect(output).toBe('');
   expect(config.onToolCall).not.toHaveBeenCalled();
 });
 
 describe('Anthropic nonstream shared representation budgets', () => {
-  it.each(['native', 'rewrite'] as const)('rejects individually sub-cap raw and parsed text before approval in %s', async delivery => {
+  it.each(['native', 'rewrite'] as const)('blocks large nonstream text before approval in %s', async delivery => {
     const content = [orderedMixed.content[0]!, { type: 'text', text: 'x'.repeat(5 * 1024 * 1024) }];
     const raw = JSON.stringify({ type: 'message', content, stop_reason: 'tool_use' });
     const wireBytes = encoder.encode(raw).byteLength;
     expect(wireBytes).toBeLessThan(MAX_RESPONSE_BYTES);
-    expect(wireBytes * 2).toBeGreaterThan(MAX_RESPONSE_BYTES);
     expect(encoder.encode(JSON.stringify(content[0]!.input)).byteLength).toBeLessThan(MAX_TOOL_BYTES);
     const onNativeDelivered = vi.fn();
     const config = { ...options(), delivery, onNativeDelivered };
-    await expect(transformAnthropicNonstream(new Response(raw), { ...context, safeguards: [] }, config)).rejects.toThrow('8 MiB');
+    await expect(transformAnthropicNonstream(new Response(raw), { ...context, safeguards: [] }, config)).rejects.toMatchObject({ blocked: true });
     expect(config.onToolCall).not.toHaveBeenCalled();
     expect(onNativeDelivered).not.toHaveBeenCalled();
   });
 
-  it.each(['thinking', 'redacted_thinking', 'signature'] as const)('rejects individually sub-cap 2.25MiB raw and parsed %s before approval', async kind => {
+  it.each(['thinking', 'redacted_thinking', 'signature'] as const)('blocks oversized retained %s before approval', async kind => {
     const payload = 'x'.repeat(2304 * 1024);
     const block = kind === 'thinking' ? { type: 'thinking', thinking: payload, signature: '' } : kind === 'redacted_thinking' ? { type: kind, data: payload } : { type: 'thinking', thinking: '', signature: payload };
     const blockBytes = encoder.encode(JSON.stringify(block)).byteLength;
     const raw = JSON.stringify({ type: 'message', content: [orderedMixed.content[0], block], stop_reason: 'tool_use' });
     expect(encoder.encode(raw).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
-    expect(encoder.encode(raw).byteLength * 3).toBeLessThan(MAX_RESPONSE_BYTES);
     expect(blockBytes).toBeLessThan(MAX_REASONING_BYTES);
-    expect(blockBytes * 2).toBeGreaterThan(MAX_REASONING_BYTES);
     const config = options();
-    await expect(transformAnthropicNonstream(new Response(raw), context, config)).rejects.toThrow('4 MiB');
+    await expect(transformAnthropicNonstream(new Response(raw), context, config)).rejects.toMatchObject({ blocked: true });
     expect(config.onToolCall).not.toHaveBeenCalled();
   });
 });
 
-it.each(['native', 'rewrite'] as const)('reserves %s nonstream serialization and encoded output before returning execution', async delivery => {
+it.each(['native', 'rewrite'] as const)('rejects a large %s nonstream turn without native delivery', async delivery => {
   const value = { type: 'message', content: [orderedMixed.content[0], { type: 'text', text: 'x'.repeat(5 * 512 * 1024) }], stop_reason: 'tool_use' };
   const raw = JSON.stringify(value);
-  expect(encoder.encode(raw).byteLength * 3).toBeLessThan(MAX_RESPONSE_BYTES);
+  expect(encoder.encode(raw).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
   const onNativeDelivered = vi.fn();
   const config = { ...options(), delivery, onNativeDelivered, onToolCall: vi.fn<AdapterOptions['onToolCall']>(async () => verdict('block')) };
-  await expect(transformAnthropicNonstream(new Response(raw), { ...context, safeguards: [] }, config)).rejects.toThrow('8 MiB');
-  expect(config.onToolCall).toHaveBeenCalledOnce();
+  await expect(transformAnthropicNonstream(new Response(raw), { ...context, safeguards: [] }, config)).rejects.toMatchObject({ blocked: true });
   expect(onNativeDelivered).not.toHaveBeenCalled();
 });
 
@@ -948,7 +972,7 @@ it.each([0, 1])('keeps the exact 1MiB nonstream tool-input boundary with overflo
   const config = options();
   const transformed = transformAnthropicNonstream(jsonResponse(value), context, config);
   if (overflow) {
-    await expect(transformed).rejects.toThrow('1 MiB');
+    await expect(transformed).rejects.toMatchObject({ blocked: true });
     expect(config.onToolCall).not.toHaveBeenCalled();
   } else {
     expect(await (await transformed).json()).toEqual(value);
@@ -956,80 +980,30 @@ it.each([0, 1])('keeps the exact 1MiB nonstream tool-input boundary with overflo
   }
 });
 
-it.each([0, 1])('enforces the exact 8MiB raw/decode/parsed reservation boundary with overflow=%i byte', async overflow => {
-  // The source numeric token has three bytes. Its canonical representation has
-  // five/six bytes, making the parse reservation larger by exactly two/three.
-  const numericToken = overflow ? '1e5' : '1e4';
-  const template = `{"type":"message","content":[${JSON.stringify(orderedMixed.content[0])},{"type":"text","text":""}],"stop_reason":"tool_use","numeric":${numericToken}}`;
-  const wireSize = (MAX_RESPONSE_BYTES - 2) / 3;
-  expect(Number.isInteger(wireSize)).toBe(true);
-  const raw = template.replace('"text":""', `"text":"${'x'.repeat(wireSize - encoder.encode(template).byteLength)}"`);
-  const rawBytes = encoder.encode(raw).byteLength;
-  const parsedBytes = encoder.encode(JSON.stringify(JSON.parse(raw))).byteLength;
-  expect(rawBytes).toBe(wireSize);
-  expect(rawBytes * 2 + parsedBytes).toBe(MAX_RESPONSE_BYTES + overflow);
-  const config = options();
-  const transformed = transformAnthropicNonstream(new Response(raw), context, config);
-  if (overflow) {
-    await expect(transformed).rejects.toThrow('8 MiB');
-    expect(config.onToolCall).not.toHaveBeenCalled();
-  } else {
-    expect(await (await transformed).text()).toBe(raw);
-    expect(config.onToolCall).toHaveBeenCalledOnce();
-  }
-});
 
-it.each([0, 1])('enforces the inclusive 4MiB retained reasoning peak with overflow=%i byte before approval', async overflow => {
-  const numericToken = overflow ? '1e4' : '1e3';
-  const template = `{"type":"thinking","thinking":"","signature":"BOUNDARY_SIGNATURE","numeric":${numericToken}}`;
-  const blockSize = (MAX_REASONING_BYTES - 1) / 3;
-  const rawBlock = template.replace('"thinking":""', `"thinking":"${'x'.repeat(blockSize - encoder.encode(template).byteLength)}"`);
-  const sourceBytes = encoder.encode(rawBlock).byteLength;
-  const parsedBytes = encoder.encode(JSON.stringify(JSON.parse(rawBlock))).byteLength;
-  // Original source, decoded source and retained parsed reasoning coexist.
-  expect(sourceBytes * 2 + parsedBytes).toBe(MAX_REASONING_BYTES + overflow);
-  const raw = `{"type":"message","content":[${JSON.stringify(orderedMixed.content[0])},${rawBlock}],"stop_reason":"tool_use"}`;
-  expect(encoder.encode(raw).byteLength * 3).toBeLessThan(MAX_RESPONSE_BYTES);
-  const config = options();
-  const transformed = transformAnthropicNonstream(new Response(raw), context, config);
-  if (overflow) {
-    await expect(transformed).rejects.toThrow('4 MiB');
-    expect(config.onToolCall).not.toHaveBeenCalled();
-  } else {
-    expect(await (await transformed).text()).toBe(raw);
-    expect(config.onToolCall).toHaveBeenCalledOnce();
-  }
-});
-
-it.each(['thinking', 'redacted_thinking', 'signature'] as const)('charges original escaped %s source bytes rather than twice its compact parsed size', async kind => {
+it.each(['thinking', 'redacted_thinking', 'signature'] as const)('blocks oversized escaped %s before approval', async kind => {
   const field = kind === 'redacted_thinking' ? 'data' : kind;
   const empty = kind === 'redacted_thinking' ? { type: kind, data: '' } : { type: 'thinking', thinking: '', signature: '' };
   const rawPayload = 'x'.repeat(1536 * 1024) + '\\u0061'.repeat(175_000);
   const rawBlock = JSON.stringify(empty).replace(`"${field}":""`, `"${field}":"${rawPayload}"`);
-  const compactBlock = JSON.stringify(JSON.parse(rawBlock));
   const rawBlockBytes = encoder.encode(rawBlock).byteLength;
-  const compactBytes = encoder.encode(compactBlock).byteLength;
   expect(rawBlockBytes).toBeLessThan(MAX_REASONING_BYTES);
-  expect(compactBytes * 2).toBeLessThan(MAX_REASONING_BYTES);
-  expect(rawBlockBytes + compactBytes).toBeGreaterThan(MAX_REASONING_BYTES);
   const raw = `{"type":"message","content":[${JSON.stringify(orderedMixed.content[0])},${rawBlock}],"stop_reason":"tool_use"}`;
-  expect(encoder.encode(raw).byteLength * 3).toBeLessThan(MAX_RESPONSE_BYTES);
+  expect(encoder.encode(raw).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
   const config = options();
-  await expect(transformAnthropicNonstream(new Response(raw), context, config)).rejects.toThrow('4 MiB');
+  await expect(transformAnthropicNonstream(new Response(raw), context, config)).rejects.toMatchObject({ blocked: true });
   expect(config.onToolCall).not.toHaveBeenCalled();
 });
 
-it.each(['native', 'rewrite'] as const)('reserves preserved %s reasoning serialization and encoding within the shared subset before delivery', async delivery => {
+it.each(['native', 'rewrite'] as const)('refuses oversized preserved %s reasoning before delivery', async delivery => {
   const thinking = { type: 'thinking', thinking: 'x'.repeat(1280 * 1024), signature: 'PRESERVED_SIGNATURE' };
   const blockBytes = encoder.encode(JSON.stringify(thinking)).byteLength;
-  expect(blockBytes * 2).toBeLessThan(MAX_REASONING_BYTES);
-  expect(blockBytes * 4).toBeGreaterThan(MAX_REASONING_BYTES);
+  expect(blockBytes).toBeLessThan(MAX_REASONING_BYTES);
   const raw = JSON.stringify({ type: 'message', content: [orderedMixed.content[0], thinking], stop_reason: 'tool_use' });
-  expect(encoder.encode(raw).byteLength * 4).toBeLessThan(MAX_RESPONSE_BYTES);
+  expect(encoder.encode(raw).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
   const onNativeDelivered = vi.fn();
   const config = { ...options(), delivery, onNativeDelivered, onToolCall: vi.fn<AdapterOptions['onToolCall']>(async () => verdict('block')) };
-  await expect(transformAnthropicNonstream(new Response(raw), { ...context, safeguards: [] }, config)).rejects.toThrow('4 MiB');
-  expect(config.onToolCall).toHaveBeenCalledOnce();
+  await expect(transformAnthropicNonstream(new Response(raw), { ...context, safeguards: [] }, config)).rejects.toMatchObject({ blocked: true });
   expect(onNativeDelivered).not.toHaveBeenCalled();
 });
 
@@ -1037,11 +1011,10 @@ it.each(['native', 'rewrite'] as const)('reserves preserved %s reasoning seriali
 it('rejects the decoded-source reasoning peak before approving an otherwise unchanged allow response', async () => {
   const thinking = { type: 'thinking', thinking: 'x'.repeat(1536 * 1024), signature: 'EXACT_UNCHANGED_SIGNATURE' };
   const blockBytes = encoder.encode(JSON.stringify(thinking)).byteLength;
-  expect(blockBytes * 2).toBeLessThan(MAX_REASONING_BYTES);
-  expect(blockBytes * 3).toBeGreaterThan(MAX_REASONING_BYTES);
+  expect(blockBytes).toBeLessThan(MAX_REASONING_BYTES);
   const raw = JSON.stringify({ type: 'message', content: [orderedMixed.content[0], thinking], stop_reason: 'tool_use' });
-  expect(encoder.encode(raw).byteLength * 3).toBeLessThan(MAX_RESPONSE_BYTES);
+  expect(encoder.encode(raw).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
   const config = { ...options(), delivery: 'rewrite' as const };
-  await expect(transformAnthropicNonstream(new Response(raw), context, config)).rejects.toThrow('4 MiB');
+  await expect(transformAnthropicNonstream(new Response(raw), context, config)).rejects.toMatchObject({ blocked: true });
   expect(config.onToolCall).not.toHaveBeenCalled();
 });

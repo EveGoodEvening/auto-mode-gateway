@@ -1,13 +1,14 @@
 import type { ToolCall } from '../types.js';
 export { MAX_TOOL_BYTES, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES, IDLE_TIMEOUT_MS, COMPLETION_TIMEOUT_MS, DECISION_TIMEOUT_MS, bounded, blockedText, decide, shadowStream, record, unique, encodeEvent } from '../anthropic/safety.js';
 import { record, MAX_TOOL_BYTES } from '../anthropic/safety.js';
+const EXECUTION_FIELDS = ['type', 'id', 'call_id', 'name', 'namespace', 'arguments', 'input', 'action', 'encrypted_function_args'] as const;
 
 export class ResponsesResponseError extends Error {
   readonly blocked = true;
   constructor(message: string) { super(message); this.name = 'ResponsesResponseError'; }
 }
 export function execution(item: unknown): item is Record<string, unknown> {
-  return record(item) && (['function_call', 'custom_tool_call', 'local_shell_call'].includes(String(item.type)) || (item.type === 'tool_search_call' && item.execution !== 'server'));
+  return record(item) && (item.type === 'function_call' || item.type === 'custom_tool_call' || item.type === 'local_shell_call' || (item.type === 'tool_search_call' && item.execution !== 'server'));
 }
 export function utf8Bytes(value: string, start = 0, end = value.length): number {
   let size = 0;
@@ -25,7 +26,7 @@ export function jsonBytes(value: unknown): number {
     let size = 2;
     for (let i = 0; i < value.length; i++) {
       const c = value.charCodeAt(i);
-      if (c === 34 || c === 92 || [8, 9, 10, 12, 13].includes(c)) size += 2;
+      if (c === 34 || c === 92 || c === 8 || c === 9 || c === 10 || c === 12 || c === 13) size += 2;
       else if (c < 32 || (c >= 0xd800 && c <= 0xdfff && !(c <= 0xdbff && i + 1 < value.length && value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff))) size += 6;
       else if (c < 128) size++;
       else if (c < 2048) size += 2;
@@ -37,10 +38,14 @@ export function jsonBytes(value: unknown): number {
   if (value === null) return 4;
   if (typeof value === 'number') return Number.isFinite(value) ? String(value).length : 4;
   if (typeof value === 'boolean') return value ? 4 : 5;
-  if (Array.isArray(value)) return 2 + Math.max(0, value.length - 1) + value.reduce<number>((sum, item: unknown) => sum + jsonBytes(item), 0);
+  if (Array.isArray(value)) {
+    let bytes = 2 + Math.max(0, value.length - 1);
+    for (let index = 0; index < value.length; index++) bytes += jsonBytes(value[index]);
+    return bytes;
+  }
   let size = 2;
   let count = 0;
-  if (record(value)) for (const key of Object.keys(value)) size += (count++ ? 1 : 0) + jsonBytes(key) + 1 + jsonBytes(value[key]);
+  if (record(value)) for (const key in value) if (Object.hasOwn(value, key)) size += (count++ ? 1 : 0) + jsonBytes(key) + 1 + jsonBytes(value[key]);
   return size;
 }
 export function callFor(item: Record<string, unknown>): ToolCall {
@@ -72,13 +77,20 @@ export function callFor(item: Record<string, unknown>): ToolCall {
 }
 export function same(a: unknown, b: unknown): boolean {
   if (a === b) return true;
-  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => same(v, b[i]));
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    for (let index = 0; index < a.length; index++) if (!same(a[index], b[index])) return false;
+    return true;
+  }
   if (!record(a) || !record(b)) return false;
-  const keys = Object.keys(a);
-  return keys.length === Object.keys(b).length && keys.every(key => Object.hasOwn(b, key) && same(a[key], b[key]));
+  let before = 0;
+  let after = 0;
+  for (const key in a) if (Object.hasOwn(a, key)) { before++; if (!Object.hasOwn(b, key) || !same(a[key], b[key])) return false; }
+  for (const key in b) if (Object.hasOwn(b, key)) after++;
+  return before === after;
 }
 export function sameExecution(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
-  return ['type', 'id', 'call_id', 'name', 'namespace', 'arguments', 'input', 'action', 'encrypted_function_args'].every(key => {
+  return EXECUTION_FIELDS.every(key => {
     let before = a[key];
     let after = b[key];
     if (key === 'namespace') {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Hono } from 'hono';
-import { CODEX_ALLOW_PROBE, CODEX_PROBE, codexProbeScene, isCanonicalCodexFixtureRequest, observeCodexExecutions, observeCodexReplay, type CodexCapture, type CodexExecutionEvent, type CodexRecordedRequest } from './codex-smoke.js';
+import { CODEX_ALLOW_PROBE, CODEX_PROBE, admitCodexFixtureArrival, codexProbeScene, isCanonicalCodexFixtureRequest, observeCodexExecutions, observeCodexReplay, type CodexCapture, type CodexExecutionEvent, type CodexRecordedRequest } from './codex-smoke.js';
 
 function fixture(control: 'deny' | 'mixed' = 'deny', lite = false) {
   const declaration = { type: 'function', name: 'exec_command', parameters: { type: 'object', properties: { cmd: { type: 'string' } }, required: ['cmd'], additionalProperties: false } };
@@ -16,8 +16,6 @@ function fixture(control: 'deny' | 'mixed' = 'deny', lite = false) {
   const capture: CodexCapture = { control, requestId: request.arrivalId, requestIndex: 0, probeId: 'call_probe', marker: 'AMP_AFTER_call_probe', sourceItem: item, positiveItem, captureComplete: true,
     events: [...order.map((output_index, sequence_number) => ({ type: 'response.output_item.done', output_index, sequence_number, item: output[output_index] })), { type: 'response.completed', sequence_number: order.length, response: { output } }] };
   const replayPrefix = structuredClone(prefix);
-  replayPrefix[0]!.id = 'msg_prefix_next';
-  if (lite) replayPrefix[1]!.id = 'at_prefix_next';
   const replay = [...replayPrefix, ...order.map((index) => structuredClone(output[index]!))];
   if (positiveItem) replay.push({ type: 'function_call_output', call_id: positiveItem.call_id, output: 'Chunk ID: owned\nWall time: 0.0010 seconds\nProcess exited with code 0\nOutput:\nAMP_CODEX_ALLOW_PROBE' });
   const next: CodexRecordedRequest = { ...request, arrivalId: 'arrival_next', arrivalOrder: 1, body: { ...request.body, input: replay } };
@@ -50,6 +48,96 @@ describe('installed Codex replay evidence boundaries', () => {
   it.each(['deny', 'mixed'] as const)('requires exact native typed immediate %s replay, preserving source completion order', (control) => {
     const { requests, capture } = fixture(control);
     expect(observeCodexReplay(requests, capture).passed).toBe(true);
+  });
+  it.each(['msg', 'at'] as const)('rejects changed stable %s developer prefix identity', (prefix) => {
+    const { requests, capture, replay } = fixture('deny', true);
+    replay[prefix === 'msg' ? 0 : 1]!.id = `${prefix}_different`;
+    expect(observeCodexReplay(requests, capture)).toEqual({ passed: false, reason: 'original_prefix_changed' });
+  });
+  it.each(['deny', 'mixed'] as const)('accounts for the entire %s immediate replay tail', (control) => {
+    for (const tail of ['duplicate-denial', 'duplicate-marker', 'message', 'reasoning', 'developer', 'user']) {
+      const { requests, capture, replay, offset } = fixture(control);
+      replay.push(tail === 'duplicate-denial' ? structuredClone(replay[offset]!)
+        : tail === 'duplicate-marker' ? structuredClone(replay[offset + (control === 'mixed' ? 2 : 1)]!)
+        : tail === 'reasoning' ? { type: 'reasoning', summary: [] }
+        : { type: 'message', role: tail === 'developer' ? 'developer' : tail === 'user' ? 'user' : 'assistant', content: [{ type: 'input_text', text: 'unexplained' }] });
+      expect(observeCodexReplay(requests, capture).passed, tail).toBe(false);
+    }
+  });
+  it('accepts only the explicitly expected next normal-turn user item after denial', () => {
+    const { requests, capture, replay } = fixture();
+    capture.expectedNextTurnPrompt = 'AMP_NORMAL_2: reply with a short text only. Do not execute tools.';
+    const user = { type: 'message', role: 'user', content: [{ type: 'input_text', text: capture.expectedNextTurnPrompt }] };
+    replay.push(user);
+    expect(observeCodexReplay(requests, capture).passed).toBe(true);
+    user.content[0]!.text = 'different prompt';
+    expect(observeCodexReplay(requests, capture).passed).toBe(false);
+    user.content[0]!.text = capture.expectedNextTurnPrompt;
+    replay.push(structuredClone(user));
+    expect(observeCodexReplay(requests, capture).passed).toBe(false);
+  });
+  it('does not accept a next-turn user tail for a positive-result continuation', () => {
+    const { requests, capture, replay } = fixture('mixed');
+    capture.expectedNextTurnPrompt = 'normal';
+    replay.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'normal' }] });
+    expect(observeCodexReplay(requests, capture).passed).toBe(false);
+  });
+  it.each([
+    ['/codex/v1/%72esponses', 'POST', 'Bearer private-fixture'],
+    ['/codex/v1/respon%73es', 'POST', 'Bearer private-fixture'],
+    ['/codex/v1/responses/', 'POST', 'Bearer private-fixture'],
+    ['/codex/v1/responses', 'GET', 'Bearer private-fixture'],
+    ['/codex/v1/responses', 'POST', 'Bearer wrong-fixture'],
+    ['/codex/v1/responses', 'POST', ''],
+  ])('production admission rejects %s %s before recording arrivals', async (path, method, authorization) => {
+    const requests: CodexRecordedRequest[] = [];
+    const bodies: string[] = [];
+    let bodyReads = 0;
+    const app = new Hono();
+    app.use('*', async (context, next) => {
+      const record = admitCodexFixtureArrival(context.req.raw, 'private-fixture', requests, bodies, false);
+      if (typeof record === 'number') return context.json({ error: 'rejected' }, record);
+      await next();
+    });
+    app.all('*', async (context) => { bodyReads++; await context.req.raw.text(); return context.json({ admitted: true }); });
+    for (let index = 0; index < 33; index++) {
+      const response = await app.fetch(new Request(`http://fixture${path}`, { method, headers: { authorization } }));
+      expect(response.status).toBe(401);
+    }
+    expect(requests).toEqual([]);
+    expect(bodies).toEqual([]);
+    expect(bodyReads).toBe(0);
+    const accepted = await app.fetch(new Request('http://fixture/codex/v1/responses', { method: 'POST', headers: { authorization: 'Bearer private-fixture' } }));
+    expect(accepted.status).toBe(200);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ arrivalOrder: 0, overlap: false, url: 'http://fixture/codex/v1/responses' });
+    expect(bodies).toEqual(['']);
+    expect(bodyReads).toBe(1);
+  });
+  it('production admission preserves authenticated overlap before body completion', async () => {
+    const requests: CodexRecordedRequest[] = [];
+    const bodies: string[] = [];
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let active = false;
+    const app = new Hono();
+    app.use('*', async (context, next) => {
+      const record = admitCodexFixtureArrival(context.req.raw, 'private-fixture', requests, bodies, active);
+      if (typeof record === 'number') return context.json({ error: 'rejected' }, record);
+      if (record.overlap) return context.json({ error: 'overlap' }, 401);
+      active = true; entered.resolve();
+      try { await next(); } finally { active = false; }
+    });
+    app.all('*', async (context) => { await release.promise; await context.req.raw.text(); requests[0]!.bodyComplete = true; return context.json({ admitted: true }); });
+    const request = () => new Request('http://fixture/codex/v1/responses', { method: 'POST', headers: { authorization: 'Bearer private-fixture' } });
+    const first = app.fetch(request());
+    await entered.promise;
+    const second = await app.fetch(request());
+    expect(second.status).toBe(401);
+    expect(requests.map((record) => [record.arrivalOrder, record.overlap, record.bodyComplete])).toEqual([[0, false, false], [1, true, false]]);
+    expect(bodies).toEqual(['', '']);
+    release.resolve();
+    expect((await first).status).toBe(200);
   });
   it.each(['missing', 'incomplete', 'wrong-id', 'unsafe-command', 'unseen-argument', 'encrypted-argument', 'wrong-source', 'terminal-mismatch'] as const)('rejects %s evidence', (failure) => {
     const { requests, capture } = fixture();

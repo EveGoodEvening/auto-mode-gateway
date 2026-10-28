@@ -304,6 +304,64 @@ describe('Responses execution approval boundary', () => {
 });
 
 describe('Responses immediate text and raw shadow', () => {
+  it('rejects renumbering that would create an untracked executable frame without approval', async () => {
+    const injected = `data:${JSON.stringify({ type: 'response.output_item.done', item: { type: 'function_call', name: 'f', arguments: '{}', call_id: 'c' } })}\n\n`;
+    const raw = `data: ${JSON.stringify({ type: 'ping', sequence_number: 100 })}\n\n`
+      + `data: ${JSON.stringify({ type: `v\n\n${injected}`, sequence_number: 0 })}\n\n`;
+    const cancel = vi.fn();
+    const upstream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(encoder.encode(raw)); }, cancel });
+    const config = { ...options(), onToolCall: vi.fn(async () => verdict('block')) };
+    const reader = transformResponsesStream(upstream, context, config).getReader();
+    try {
+      expect(parsed(new TextDecoder().decode((await reader.read()).value)).map(event => event.type)).toEqual(['ping']);
+      await expect(reader.read()).rejects.toBeDefined();
+    } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
+    expect(config.onToolCall).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalled();
+  });
+  it('preserves a legitimate unknown event through required sequence renumbering', async () => {
+    const config = options();
+    const output = parsed(await collect([
+      { type: 'ping', sequence_number: 100 }, { type: 'vendor.fixture', sequence_number: 0, marker: 'kept' },
+      { type: 'response.completed', sequence_number: 101, response: { status: 'completed', output: [] } },
+    ], config));
+    expect(output.find(event => event.type === 'vendor.fixture')).toMatchObject({ marker: 'kept' });
+    expect(output[0]).toEqual({ type: 'ping', sequence_number: 100 });
+    let previous = -1;
+    for (const event of output) {
+      const sequence = event.sequence_number;
+      if (typeof sequence !== 'number') throw new Error('Missing outgoing sequence number');
+      expect(Number.isSafeInteger(sequence)).toBe(true);
+      expect(sequence).toBeGreaterThan(previous);
+      previous = sequence;
+    }
+    expect(config.onToolCall).not.toHaveBeenCalled();
+  });
+  it('does not impose a reasoning-sized cap on a large single transport chunk of pure text', async () => {
+    const input: Event[] = Array.from({ length: 128 }, () => ({ type: 'response.output_text.delta', output_index: 0, item_id: 'msg_large_plain', content_index: 0, delta: 'x'.repeat(40_000) }));
+    input.push({ type: 'response.completed', response: { status: 'completed', output: [] } });
+    const raw = wire(input);
+    const length = encoder.encode(raw).byteLength;
+    expect(length).toBeGreaterThan(MAX_REASONING_BYTES);
+    expect(length).toBeLessThan(MAX_RESPONSE_BYTES);
+    const config = options();
+    expect(await new Response(transformResponsesStream(source(raw, length), context, config)).text()).toBe(raw);
+    expect(config.onToolCall).not.toHaveBeenCalled();
+  });
+  it.each(['custom_tool_call', 'local_shell_call'])('preserves fully escaped %s types, split Unicode and multiline data without losing approval tracking', async type => {
+    const item = type === 'custom_tool_call' ? { ...scenes.patch, name: 'fixture_utf8', input: 'inert🌍' }
+      : { ...scenes.local, action: { ...scenes.local.action, command: ['printf', 'inert🌍'] } };
+    const escaped = [...type].map(character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
+    const raw = eventsFor([item]).map((event, sequence_number) => {
+      const json = JSON.stringify({ sequence_number, ...event }).replaceAll(`"${type}"`, `"${escaped}"`);
+      const split = json.indexOf(',');
+      return `event: ${String(event.type)}\r\nid: utf8_${sequence_number}\r\ndata: ${json.slice(0, split + 1)}\r\ndata: ${json.slice(split + 1)}\r\n\r\n`;
+    }).join('');
+    const config = options();
+    expect(await new Response(transformResponsesStream(source(raw, 1), context, config)).text()).toBe(raw);
+    expect(config.onToolCall).toHaveBeenCalledOnce();
+    expect(config.onToolCall).toHaveBeenCalledWith(expect.objectContaining({ raw: item }), context, expect.any(AbortSignal));
+  });
   it('delivers pure/early text immediately without waiting for turn completion', async () => {
     let feed!: ReadableStreamDefaultController<Uint8Array>;
     const input = new ReadableStream<Uint8Array>({ start(controller) { feed = controller; } });
@@ -384,6 +442,15 @@ describe('Responses immediate text and raw shadow', () => {
   it('preserves comments, CRLF, id/retry, multiline data and unknown events byte-for-byte when unchanged', async () => {
     const raw = ': fixture-comment\r\nid: fixture\r\nretry: 4\r\nevent: vendor.fixture\r\ndata: {"type":"vendor.fixture",\r\ndata: "fixture":true}\r\n\r\n' + wire(eventsFor([scenes.text]));
     expect(await new Response(transformResponsesStream(source(raw, 1), context, options())).text()).toBe(raw);
+  });
+  it('preserves an unchanged all-allowed terminal frame including comments, metadata and multiline CRLF data', async () => {
+    const events = eventsFor([scenes.exec]);
+    const terminal = { sequence_number: events.length - 1, ...events.at(-1)! };
+    const json = JSON.stringify(terminal);
+    const split = json.indexOf(',"response"');
+    const tail = `: terminal-metadata\r\nid: original-terminal\r\nretry: 17\r\nevent: response.completed\r\ndata: ${json.slice(0, split + 1)}\r\ndata: ${json.slice(split + 1)}\r\n\r\n`;
+    const raw = wire(events.slice(0, -1)) + tail;
+    expect(await new Response(transformResponsesStream(source(raw, 113), context, options())).text()).toBe(raw);
   });
   it('keeps shadow byte-identical and nonblocking while a hypothetical block is pending', async () => {
     const pending = Promise.withResolvers<Verdict>();
@@ -482,6 +549,40 @@ describe('Responses failure, cancellation and resource boundaries', () => {
     const result = await captureFailure(input);
     expect(result.error).toBeDefined();
     expect(result.text).not.toContain('function_call');
+  });
+  it('counts reasoning-associated frames when output_index uses valid Unicode-escaped JSON spelling', async () => {
+    const input = eventsFor([scenes.exec, scenes.reasoning]);
+    input.splice(input.length - 1, 0, ...Array.from({ length: 3 }, () => ({ type: 'vendor.stateful', output_index: 1, payload: 'x'.repeat(500_000) })));
+    const escapedKey = [...'output_index'].map(character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
+    const raw = wire(input).replaceAll('"output_index"', `"${escapedKey}"`);
+    expect(encoder.encode(raw).byteLength).toBeLessThan(MAX_RESPONSE_BYTES);
+    const reader = transformResponsesStream(source(raw, 65_536), context, options()).getReader();
+    let delivered = '';
+    let failure: unknown;
+    try { for (;;) { const next = await reader.read(); if (next.done) break; delivered += new TextDecoder().decode(next.value); } }
+    catch (error) { failure = error; }
+    expect(failure).toBeDefined();
+    expect(delivered).not.toContain('function_call');
+  });
+  it.each([
+    { escapedLast: true, reasoningLast: true }, { escapedLast: false, reasoningLast: true },
+    { escapedLast: true, reasoningLast: false }, { escapedLast: false, reasoningLast: false },
+  ])('uses LAST duplicate index semantics across escaped spelling and chunk splits ($escapedLast/$reasoningLast)', async ({ escapedLast, reasoningLast }) => {
+    const input = eventsFor([scenes.exec, scenes.reasoning]);
+    input.splice(input.length - 1, 0, ...Array.from({ length: 3 }, () => ({ type: 'vendor.stateful', output_index: 1, payload: 'x'.repeat(500_000) })));
+    const escapedKey = [...'output_index'].map(character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
+    let raw = input.map((event, sequence_number) => {
+      const first = escapedLast ? 'output_index' : escapedKey;
+      const last = escapedLast ? escapedKey : 'output_index';
+      const json = JSON.stringify({ sequence_number, ...event });
+      return `event: ${String(event.type)}\ndata: ${event.type === 'vendor.stateful' ? json.replace('"output_index":1', `"${first}":${reasoningLast ? 0 : 1},"${last}":${reasoningLast ? 1 : 0}`) : json}\n\n`;
+    }).join('');
+    let padding = (4092 - raw.indexOf(escapedKey) % 4093 + 4093) % 4093;
+    if (padding < 3) padding += 4093;
+    raw = `:${'p'.repeat(padding - 3)}\n\n` + raw;
+    const result = new Response(transformResponsesStream(source(raw, 4093), context, options())).text();
+    if (reasoningLast) await expect(result).rejects.toBeDefined();
+    else expect(await result).toBe(raw);
   });
   it('counts terminal reasoning and rewrite temporaries even when each raw reasoning snapshot is below the subset cap', async () => {
     const reasoning = { ...scenes.reasoning, encrypted_content: 'x'.repeat(450_000) };

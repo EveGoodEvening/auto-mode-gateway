@@ -40,6 +40,20 @@ export interface CodexRecordedRequest extends RecordedRequest {
   overlap: boolean;
 }
 
+/** Production ingress admission: invalid requests never enter capture chronology. */
+export function admitCodexFixtureArrival(request: Request, token: string, requests: CodexRecordedRequest[], originalBodies: string[], overlap: boolean): CodexRecordedRequest | 401 | 429 {
+  if (!isCanonicalCodexFixtureRequest(request, 'ingress') || request.headers.get('authorization') !== `Bearer ${token}`) return 401;
+  if (requests.length >= 32) return 429;
+  const record: CodexRecordedRequest = { arrivalId: randomUUID(), arrivalOrder: requests.length, url: request.url, bodyComplete: false, overlap, method: request.method, path: new URL(request.url).pathname, headers: new Headers(request.headers), body: {} };
+  Object.defineProperties(record, { arrivalId: { writable: false, configurable: false }, arrivalOrder: { writable: false, configurable: false }, url: { writable: false, configurable: false } });
+  requests.push(record); originalBodies.push('');
+  return record;
+}
+
+function normalTurnPrompt(turn: number): string {
+  return `AMP_NORMAL_${turn}: reply with a short text only. Do not execute tools.`;
+}
+
 export interface CodexCapture {
   control: 'deny' | 'allow' | 'mixed';
   requestIndex: number;
@@ -50,10 +64,11 @@ export interface CodexCapture {
   positiveItem?: Record<string, unknown>;
   events: Record<string, unknown>[];
   captureComplete: boolean;
+  expectedNextTurnPrompt?: string;
 }
 // Pinned client.rs request preparation for a custom provider. Observation only:
 // never mutate the captured request/history, message boundaries, or content types.
-function sameNativeReplayItem(expectedValue: unknown, actualValue: unknown, generatedPrefix = false): boolean {
+function sameNativeReplayItem(expectedValue: unknown, actualValue: unknown): boolean {
   const expected = object(expectedValue);
   const actual = object(actualValue);
   if (!expected || !actual) return false;
@@ -64,15 +79,6 @@ function sameNativeReplayItem(expectedValue: unknown, actualValue: unknown, gene
   if (typeof projected.id === 'string') {
     const separator = projected.id.indexOf('_');
     if (separator < 1 || separator === projected.id.length - 1) delete projected.id;
-  }
-  if (generatedPrefix && expected.role === 'developer') {
-    const prefix = expected.type === 'message' ? 'msg_' : expected.type === 'additional_tools' ? 'at_' : undefined;
-    if (prefix && typeof expected.id === 'string' && expected.id.startsWith(prefix)
-      && typeof actual.id === 'string' && actual.id.startsWith(prefix)) {
-      delete projected.id;
-      const compared = { ...actual }; delete compared.id;
-      return canonical(projected) === canonical(compared);
-    }
   }
   return canonical(projected) === canonical(actual);
 }
@@ -142,11 +148,8 @@ export function observeCodexReplay(requests: readonly CodexRecordedRequest[], ca
   const input = next.body.input;
   const previous = original.body.input;
   if (!Array.isArray(previous)) return { passed: false, reason: 'missing_original_input' };
-  let generatedPrefix = true;
   for (let index = 0; index < previous.length; index++) {
-    const entry = object(previous[index]);
-    generatedPrefix &&= entry?.role === 'developer' && (entry.type === 'message' || entry.type === 'additional_tools');
-    if (!sameNativeReplayItem(previous[index], input[index], generatedPrefix)) return { passed: false, reason: 'original_prefix_changed' };
+    if (!sameNativeReplayItem(previous[index], input[index])) return { passed: false, reason: 'original_prefix_changed' };
   }
   for (let index = 0; index < done.length; index++) {
     if (!sameNativeReplayItem(done[index]?.item, input[previous.length + index])) return { passed: false, reason: 'immediate_replay_order_or_reason_mismatch' };
@@ -158,6 +161,13 @@ export function observeCodexReplay(requests: readonly CodexRecordedRequest[], ca
       || !/^(?:Chunk ID: [^\r\n]+\n)?Wall time: \d+\.\d{4} seconds\nProcess exited with code 0\n(?:Original token count: \d+\n)?Output:\nAMP_CODEX_ALLOW_PROBE$/.test(result.output)) {
       return { passed: false, reason: 'allowed_correlated_native_result_missing' };
     }
+  }
+  const accounted = resultIndex + (positive ? 1 : 0);
+  if (input.length !== accounted) {
+    const expectedPrompt = capture.expectedNextTurnPrompt;
+    const expectedUser = { type: 'message', role: 'user', content: [{ type: 'input_text', text: expectedPrompt }] };
+    if (input.length !== accounted + 1 || capture.control !== 'deny' || typeof expectedPrompt !== 'string'
+      || canonical(input[accounted]) !== canonical(expectedUser)) return { passed: false, reason: 'unaccounted_replay_tail' };
   }
   for (let index = 0; index < input.length; index++) {
     const entry = object(input[index]);
@@ -263,7 +273,6 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
   const admissions = new WeakMap<Request, Admission>();
   const transactions = new Map<string, Admission>();
   let active: Admission | undefined;
-  let arrivals = 0;
   let armedControl: 'deny' | 'mixed' | undefined;
   let expectedPrompt = '';
   let unsupportedRequests = 0;
@@ -284,6 +293,7 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
     const marker = `AMP_AFTER_${probeId}`;
     const { scene, item, positiveItem } = codexProbeScene(request, probeId, marker, control);
     const capture: CodexCapture = { control, requestId: admission.record.arrivalId, requestIndex: admission.record.arrivalOrder, probeId, marker, sourceItem: item, positiveItem, events: [], captureComplete: false };
+    if (control === 'deny') capture.expectedNextTurnPrompt = normalTurnPrompt(admission.turn + 1);
     admission.capture = capture;
     captures.push(capture);
     return scene;
@@ -324,13 +334,10 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
     const ingress = new Hono<{ Bindings: HttpBindings }>();
     ingress.onError(() => { unsupportedRequests++; return Response.json({ error: 'manual generation request failed' }, { status: 400 }); });
     ingress.use('*', async (context, next) => {
-      // Commit identity/order before bodyLimit, body reading, or any await.
-      const arrivalOrder = arrivals++;
-      if (arrivalOrder >= 32) { unsupportedRequests++; return context.json({ error: 'manual arrival bound' }, 429); }
-      const record: CodexRecordedRequest = { arrivalId: randomUUID(), arrivalOrder, url: context.req.raw.url, bodyComplete: false, overlap: active !== undefined, method: context.req.method, path: new URL(context.req.raw.url).pathname, headers: new Headers(context.req.raw.headers), body: {} };
-      Object.defineProperties(record, { arrivalId: { writable: false, configurable: false }, arrivalOrder: { writable: false, configurable: false }, url: { writable: false, configurable: false } });
-      requests.push(record); originalBodies.push('');
-      if (record.overlap || context.req.header('authorization') !== `Bearer ${clientToken}` || !isCanonicalCodexFixtureRequest(context.req.raw, 'ingress')) { unsupportedRequests++; return context.json({ error: 'ambiguous or unauthorized fixture arrival' }, 401); }
+      // Authenticate/canonicalize before recording identity/order, before any await.
+      const record = admitCodexFixtureArrival(context.req.raw, clientToken, requests, originalBodies, active !== undefined);
+      if (typeof record === 'number') { unsupportedRequests++; return context.json({ error: 'unauthorized or bounded fixture arrival' }, record); }
+      if (record.overlap) { unsupportedRequests++; return context.json({ error: 'ambiguous fixture arrival' }, 401); }
       const outgoing = context.env?.outgoing;
       if (!outgoing) { unsupportedRequests++; return context.json({ error: 'missing owned response lifecycle' }, 500); }
       const completed = Promise.withResolvers<void>();
@@ -404,7 +411,7 @@ async function runMode(mode: '--yolo' | '--approve-for-me', root: string, execut
       let failed = false;
       const prompt = kind === 'deny' ? `AMP_DENIAL_PROBE turn ${turn}: request only the harmless fixed command printf AMP_DENIAL_PROBE. No other command.`
         : kind === 'mixed' ? `AMP_MIXED_${turn}: request only these fixed harmless commands: printf AMP_DENIAL_PROBE and printf AMP_CODEX_ALLOW_PROBE. No other command.`
-        : `AMP_NORMAL_${turn}: reply with a short text only. Do not execute tools.`;
+        : normalTurnPrompt(turn);
       expectedPrompt = prompt;
       const args = threadId ? ['exec', mode, 'resume', '--json', '--skip-git-repo-check', '--ignore-rules', threadId, prompt]
         : ['exec', mode, '--json', '--skip-git-repo-check', '--ignore-rules', prompt];

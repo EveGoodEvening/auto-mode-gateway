@@ -1,11 +1,13 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import type { HttpBindings } from '@hono/node-server';
+import { Hono } from 'hono';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { configSchema } from '../../src/config/schema.js';
 import { createApp } from '../../src/server/app.js';
 import { createMockDecision, type DecisionMode } from './mock-decision.js';
-import { createMockRelay, responsesSceneResponse, startLoopback, type RelayScene } from './mock-relay.js';
+import { createMockRelay, encodeMockEvent, responsesSceneResponse, startLoopback, type RelayScene } from './mock-relay.js';
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -46,20 +48,29 @@ function assertLifecycle(frames: Item[], output: Item[], completedIndices = outp
     for (const frame of chain.slice(1, -1)) expect(frame.item_id).toBe(item.id);
   }
 }
-async function setup(options: { scene?: string | RelayScene; mode?: 'enforce' | 'shadow'; auth?: 'vault' | 'passthrough'; decision?: DecisionMode; failover?: boolean; allFail?: boolean } = {}) {
+async function setup(options: { scene?: string | RelayScene; mode?: 'enforce' | 'shadow'; auth?: 'vault' | 'passthrough'; decision?: DecisionMode; failover?: boolean; allFail?: boolean; upstreamHandler?: (request: Request) => Response; decisionBarrier?: { entered: PromiseWithResolvers<void>; release: Promise<void>; aborted: PromiseWithResolvers<void> }; providerTimeoutMs?: number; transportReadTimeoutMs?: number; onWritePressure?: (outgoing: HttpBindings['outgoing']) => void } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'amp-responses-integration-'));
   cleanups.push(() => rm(dir, { recursive: true, force: true }));
   const relay = createMockRelay({ protocol: 'openai-responses', scene: options.scene ?? 'bad' });
   const decision = createMockDecision({ mode: options.decision ?? 'keywords', delayMs: options.decision === 'timeout' ? 200 : undefined });
   const second = createMockDecision({ mode: options.allFail ? '5xx' : 'allow' });
-  const upstream = await startLoopback(relay.app); cleanups.push(upstream.close);
-  const trusted = await startLoopback(decision.app); cleanups.push(trusted.close);
+  const relayApp = options.upstreamHandler ? new Hono().post('*', context => options.upstreamHandler!(context.req.raw)) : relay.app;
+  const decisionApp = options.decisionBarrier ? new Hono().post('*', async context => {
+    const barrier = options.decisionBarrier!;
+    context.req.raw.signal.addEventListener('abort', () => barrier.aborted.resolve(), { once: true });
+    barrier.entered.resolve();
+    await barrier.release;
+    return decision.app.fetch(context.req.raw);
+  }) : decision.app;
+  const upstream = await startLoopback(relayApp); cleanups.push(upstream.close);
+  const trusted = await startLoopback(decisionApp); cleanups.push(trusted.close);
   const backup = await startLoopback(second.app); cleanups.push(backup.close);
   const config = configSchema.parse({
     auth: { mode: options.auth ?? 'vault', client_tokens: ['fake-client'] },
     routes: [{ prefix: '/codex', protocol: 'openai-responses', upstream: 'relay', project_dirs: ['/project'] }],
     upstreams: { relay: { base_url: upstream.url, api_key: 'fake-relay' } },
-    gate: { mode: options.mode ?? 'enforce', provider_timeout_ms: 50, hold_keepalive_ms: 10 },
+    gate: { mode: options.mode ?? 'enforce', provider_timeout_ms: options.providerTimeoutMs ?? 50, hold_keepalive_ms: 10 },
+    ...(options.transportReadTimeoutMs === undefined ? {} : { limits: { upstream_read_timeout_ms: options.transportReadTimeoutMs } }),
     decision: { chain: options.failover || options.allFail ? ['decision', 'backup'] : ['decision'], providers: {
       decision: { kind: 'systemone', base_url: trusted.url, model: 'mock', api_key: 'fake-decision' },
       backup: { kind: 'systemone', base_url: backup.url, model: 'mock', api_key: 'fake-backup' },
@@ -68,7 +79,18 @@ async function setup(options: { scene?: string | RelayScene; mode?: 'enforce' | 
   });
   const app = createApp(config);
   cleanups.push(app.flushAudit);
-  const gateway = await startLoopback(app); cleanups.push(gateway.close);
+  const gatewayApp = options.onWritePressure ? new Hono<{ Bindings: HttpBindings }>().use('*', async (context, next) => {
+    const outgoing = context.env.outgoing;
+    const original = outgoing.write;
+    const spy = vi.spyOn(outgoing, 'write').mockImplementation((...args) => {
+      const writable = Reflect.apply(original, outgoing, args) as boolean;
+      if (!writable) options.onWritePressure!(outgoing);
+      return writable;
+    });
+    cleanups.push(async () => { spy.mockRestore(); });
+    await next();
+  }).route('/', app) : app;
+  const gateway = await startLoopback(gatewayApp); cleanups.push(gateway.close);
   const responses: Response[] = [];
   cleanups.push(async () => {
     for (const response of responses) if (response.body && !response.bodyUsed && !response.body.locked) await response.body.cancel();
@@ -82,6 +104,90 @@ async function setup(options: { scene?: string | RelayScene; mode?: 'enforce' | 
     return response;
   }
   return { request, relay, decision, second };
+}
+
+function controlledUpstream() {
+  const ready = Promise.withResolvers<void>();
+  const cancelled = Promise.withResolvers<void>();
+  let feed!: ReadableStreamDefaultController<Uint8Array>;
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) { feed = controller; controller.enqueue(encoder.encode(': connected\n\n')); },
+    cancel() { cancelled.resolve(); },
+  });
+  return {
+    ready: ready.promise, cancelled: cancelled.promise,
+    handler(request: Request) {
+      request.signal.addEventListener('abort', () => cancelled.resolve(), { once: true });
+      ready.resolve();
+      return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
+    },
+    send(raw: string) { feed.enqueue(encoder.encode(raw)); },
+    close() { feed.close(); },
+  };
+}
+async function sourceEvents(output: Item[]): Promise<Item[]> {
+  return events(await responsesSceneResponse({ output }, { method: 'POST', path: '/v1/responses', headers: new Headers(), body: { model: 'mock-codex', stream: true } }).text());
+}
+function wire(frames: Item[]): string {
+  return frames.map(frame => encodeMockEvent(String(frame.type), frame)).join('');
+}
+async function readThrough(reader: ReadableStreamDefaultReader<Uint8Array>, marker: string, initial = ''): Promise<string> {
+  let raw = initial;
+  const decoder = new TextDecoder();
+  while (!raw.includes(marker)) {
+    const next = await reader.read();
+    if (next.done) throw new Error('HTTP stream ended before expected marker');
+    raw += decoder.decode(next.value, { stream: true });
+  }
+  return raw;
+}
+async function failedBody(reader: ReadableStreamDefaultReader<Uint8Array>, initial = ''): Promise<string> {
+  let raw = initial;
+  let failed = false;
+  try {
+    const decoder = new TextDecoder();
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      raw += decoder.decode(next.value, { stream: true });
+    }
+  } catch { failed = true; }
+  finally { reader.releaseLock(); }
+  expect(failed).toBe(true);
+  expect(raw).not.toContain('"type":"function_call"');
+  expect(raw).not.toContain('"type":"local_shell_call"');
+  expect(raw).not.toContain('"type":"custom_tool_call"');
+  return raw;
+}
+function deadlineTrigger(kind: 'idle' | 'completion' | 'decision') {
+  const ready = Promise.withResolvers<() => void>();
+  const originalSet = globalThis.setTimeout;
+  const originalClear = globalThis.clearTimeout;
+  const live = new Map<unknown, { delay: number | undefined; ordinal: number; fire(): void }>();
+  let longTimers = 0;
+  const matches = (timer: { delay: number | undefined; ordinal: number }) => (kind === 'idle' && typeof timer.delay === 'number' && timer.delay > 29_000 && timer.delay <= 30_000)
+    || (kind === 'completion' && timer.delay === 60_000 && timer.ordinal === 1)
+    || (kind === 'decision' && timer.delay === 60_000 && timer.ordinal === 2);
+  const setSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, delay, ...args) => {
+    const invoke = () => { live.delete(timer); Reflect.apply(callback, timer, args); };
+    const timer = originalSet(invoke, delay);
+    if (delay === 60_000) longTimers++;
+    const entry = { delay, ordinal: longTimers, fire() { originalClear(timer); invoke(); } };
+    live.set(timer, entry);
+    if (matches(entry)) ready.resolve(() => {
+      const current = [...live.values()].reverse().find(matches);
+      expect(current, 'Only an uncleared, live adapter deadline may fire').toBeDefined();
+      current!.fire();
+    });
+    return timer;
+  });
+  const clearSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(timer => {
+    live.delete(timer);
+    originalClear(timer);
+  });
+  cleanups.push(async () => { setSpy.mockRestore(); clearSpy.mockRestore(); });
+  return ready.promise;
 }
 
 describe('Responses actual HTTP enforcement integration', () => {
@@ -255,5 +361,206 @@ describe('Responses actual HTTP enforcement integration', () => {
     expect(response.headers.get('retry-after')).toBe('0');
     expect(await response.json()).toEqual({ error: { type: 'overloaded_error', message: 'inert mock outage' } });
     expect(decision.requests).toHaveLength(0);
+  });
+});
+
+describe('Responses controlled actual HTTP safety boundaries', () => {
+  it('delivers early text and controls while withholding reasoning, unknown state and execution behind a slow verdict', async () => {
+    const upstream = controlledUpstream();
+    const release = Promise.withResolvers<void>();
+    const barrier = { entered: Promise.withResolvers<void>(), release: release.promise, aborted: Promise.withResolvers<void>() };
+    const early = message('EARLY_HTTP_MARKER', 'msg_early');
+    const reasoning = { type: 'reasoning', id: 'rs_http', encrypted_content: 'ENCRYPTED_HTTP_MARKER', summary: [] };
+    const source = await sourceEvents([early, command('npm run AMP_REVIEW_DENY'), reasoning, message('LATE_HTTP_MARKER')]);
+    const firstTool = source.findIndex(frame => frame.type === 'response.output_item.added' && frame.output_index === 1);
+    const { request } = await setup({ upstreamHandler: upstream.handler, decisionBarrier: barrier, providerTimeoutMs: 120_000 });
+    cleanups.push(async () => { release.resolve(); });
+    const response = await request({ stream: true });
+    const reader = response.body!.getReader();
+    upstream.send(wire(source.slice(0, firstTool)));
+    let raw = await readThrough(reader, 'EARLY_HTTP_MARKER');
+    expect(raw).not.toContain('response.completed');
+    upstream.send(wire(source.slice(firstTool, -1)) + encodeMockEvent('vendor.stateful', { type: 'vendor.stateful', payload: 'UNKNOWN_HTTP_MARKER' }) + ': CONTROL_HTTP_COMMENT\n\n' + encodeMockEvent('ping', { type: 'ping', sequence_number: 10_000, probe: 'CONTROL_HTTP_PING' }));
+    await barrier.entered.promise;
+    raw = await readThrough(reader, 'CONTROL_HTTP_PING', raw);
+    expect(raw).toContain('CONTROL_HTTP_COMMENT');
+    expect(raw).not.toContain('ENCRYPTED_HTTP_MARKER');
+    expect(raw).not.toContain('UNKNOWN_HTTP_MARKER');
+    expect(raw).not.toContain('LATE_HTTP_MARKER');
+    expect(raw).not.toContain('"type":"function_call"');
+    upstream.send(wire(source.slice(-1)));
+    upstream.close();
+    release.resolve();
+    raw = await readThrough(reader, 'response.completed', raw);
+    await reader.cancel();
+    const outgoing = events(raw);
+    expect(terminal(outgoing).output.map(item => item.type)).toEqual(['message', 'message', 'reasoning', 'message']);
+    expect(outgoing.find(frame => frame.type === 'response.output_item.done' && frame.output_index === 2)?.item).toEqual(reasoning);
+    expect(raw.indexOf('ENCRYPTED_HTTP_MARKER')).toBeLessThan(raw.indexOf('LATE_HTTP_MARKER'));
+    expect(raw.indexOf('LATE_HTTP_MARKER')).toBeLessThan(raw.indexOf('UNKNOWN_HTTP_MARKER'));
+    const sequence = outgoing.filter(frame => typeof frame.sequence_number === 'number').map(frame => frame.sequence_number as number);
+    for (let index = 1; index < sequence.length; index++) expect(sequence[index]).toBeGreaterThan(sequence[index - 1]!);
+  });
+  it('rewrites a complete response.incomplete snapshot consistently without changing usage', async () => {
+    const source = await sourceEvents([command('npm run AMP_REVIEW_DENY')]);
+    const final = source.at(-1)!.response as Item;
+    source[source.length - 1] = { ...source.at(-1), type: 'response.incomplete', response: { ...final, status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } } };
+    const { request } = await setup({ upstreamHandler: () => new Response(wire(source), { headers: { 'content-type': 'text/event-stream' } }) });
+    const outgoing = events(await (await request({ stream: true })).text());
+    expect(outgoing.at(-1)?.type).toBe('response.incomplete');
+    const snapshot = outgoing.at(-1)!.response as Snapshot & { incomplete_details: unknown };
+    expect(snapshot.output[0]?.type).toBe('message');
+    expect(snapshot.usage).toEqual(usage);
+    expect(snapshot.incomplete_details).toEqual({ reason: 'max_output_tokens' });
+    assertLifecycle(outgoing, snapshot.output);
+  });
+  it('cancels contradictory incomplete terminal execution without releasing an individually allowed item', async () => {
+    const upstream = controlledUpstream();
+    const source = await sourceEvents([command('pwd')]);
+    source[source.length - 1] = { type: 'response.incomplete', response: { status: 'incomplete', output: [command('npm run DIFFERENT_EXECUTION')], usage } };
+    const { request } = await setup({ upstreamHandler: upstream.handler });
+    const reader = (await request({ stream: true })).body!.getReader();
+    upstream.send(wire(source));
+    const raw = await failedBody(reader);
+    expect(raw).not.toContain('DIFFERENT_EXECUTION');
+    await upstream.cancelled;
+  });
+  it.each(['aggregate', 'reasoning'] as const)('cancels %s retained-representation overflow even below the raw response cap', async kind => {
+    const upstream = controlledUpstream();
+    const source = await sourceEvents([command('pwd')]);
+    const suffix = kind === 'aggregate'
+      ? Array.from({ length: 12 }, () => ({ type: 'vendor.stateful', payload: 'x'.repeat(260_000) }))
+      : (await sourceEvents(Array.from({ length: 3 }, (_, index) => ({ type: 'reasoning', id: `rs_${index}`, encrypted_content: 'x'.repeat(250_000), summary: [] })))).filter(frame => frame.type === 'response.output_item.added' || frame.type === 'response.output_item.done').map(frame => ({ ...frame, output_index: Number(frame.output_index) + 1 }));
+    const rawSource = wire([...source.slice(0, -1), ...suffix]);
+    expect(new TextEncoder().encode(rawSource).byteLength).toBeLessThan(8 * 1024 * 1024);
+    const { request } = await setup({ upstreamHandler: upstream.handler });
+    const reader = (await request({ stream: true })).body!.getReader();
+    upstream.send(rawSource);
+    await failedBody(reader);
+    await upstream.cancelled;
+  });
+  it.each(['turn', 'frame'] as const)('fails closed on incomplete %s EOF after a complete allowed execution item', async kind => {
+    const upstream = controlledUpstream();
+    const source = await sourceEvents([command('pwd')]);
+    const { request } = await setup({ upstreamHandler: upstream.handler });
+    const reader = (await request({ stream: true })).body!.getReader();
+    upstream.send(wire(source.slice(0, -1)) + (kind === 'frame' ? 'event: response.completed\ndata: {"type":"response.completed"' : ''));
+    upstream.close();
+    await failedBody(reader);
+  });
+  it.each(['idle', 'completion', 'decision'] as const)('cancels HTTP ingress and withholds execution at the independent %s deadline', async kind => {
+    const fire = deadlineTrigger(kind);
+    const upstream = controlledUpstream();
+    const release = Promise.withResolvers<void>();
+    const barrier = { entered: Promise.withResolvers<void>(), release: release.promise, aborted: Promise.withResolvers<void>() };
+    const source = await sourceEvents([command('npm install')]);
+    const { request } = await setup({ upstreamHandler: upstream.handler, decisionBarrier: barrier, providerTimeoutMs: 120_000, transportReadTimeoutMs: 90_000 });
+    cleanups.push(async () => { release.resolve(); });
+    const reader = (await request({ stream: true })).body!.getReader();
+    const failure = failedBody(reader);
+    upstream.send(wire(kind === 'idle' ? source.slice(0, 1) : kind === 'completion' ? source.slice(0, 3) : source));
+    if (kind === 'decision') {
+      await barrier.entered.promise;
+      upstream.close();
+    }
+    (await fire)();
+    await failure;
+    if (kind === 'decision') await barrier.aborted.promise;
+    else await upstream.cancelled;
+  });
+  it('aborts pending approval and the actual upstream when the HTTP consumer cancels', async () => {
+    const upstream = controlledUpstream();
+    const release = Promise.withResolvers<void>();
+    const barrier = { entered: Promise.withResolvers<void>(), release: release.promise, aborted: Promise.withResolvers<void>() };
+    const source = await sourceEvents([command('npm install')]);
+    const { request } = await setup({ upstreamHandler: upstream.handler, decisionBarrier: barrier, providerTimeoutMs: 120_000 });
+    cleanups.push(async () => { release.resolve(); });
+    const reader = (await request({ stream: true })).body!.getReader();
+    upstream.send(wire(source.slice(0, -1)) + ': CANCEL_HTTP_BOUNDARY\n\n');
+    const raw = await readThrough(reader, 'CANCEL_HTTP_BOUNDARY');
+    await barrier.entered.promise;
+    expect(raw).not.toContain('"type":"function_call"');
+    await reader.cancel();
+    await upstream.cancelled;
+    await barrier.aborted.promise;
+  });
+  it('keeps completion cancellation active while the downstream stops reading under backpressure', async () => {
+    const fire = deadlineTrigger('completion');
+    const upstream = controlledUpstream();
+    const source = await sourceEvents([command('pwd')]);
+    const observed = Promise.withResolvers<void>();
+    let armed = false;
+    let consumerResumed = false;
+    const { request } = await setup({ upstreamHandler: upstream.handler, transportReadTimeoutMs: 90_000, onWritePressure(outgoing) {
+      if (!armed) return;
+      armed = false;
+      expect(consumerResumed).toBe(false);
+      expect(outgoing.writableNeedDrain).toBe(true);
+      // Real write() just returned false; drain has not run. Fire from this observed blocked-write slot.
+      fireDeadline!();
+      observed.resolve();
+    } });
+    const reader = (await request({ stream: true })).body!.getReader();
+    upstream.send(wire(source.slice(0, 3)) + ': BACKPRESSURE_HTTP_BOUNDARY\n\n');
+    const raw = await readThrough(reader, 'BACKPRESSURE_HTTP_BOUNDARY');
+    const fireDeadline = await fire;
+    armed = true;
+    upstream.send(Array.from({ length: 128 }, () => `: ${'b'.repeat(65_000)}\n\n`).join(''));
+    await observed.promise;
+    await upstream.cancelled;
+    expect(consumerResumed).toBe(false);
+    consumerResumed = true;
+    await failedBody(reader, raw);
+  });
+});
+
+describe('Responses actual HTTP nonstream and shadow safety', () => {
+  it.each(['aggregate', 'reasoning'] as const)('rejects nonstream %s retained representations before approval', async kind => {
+    const output = [command('npm install'), kind === 'reasoning'
+      ? { type: 'reasoning', id: 'rs_nonstream', encrypted_content: 'x'.repeat(1_500_000), summary: [] }
+      : message('x'.repeat(3_000_000))];
+    const snapshot = { id: 'resp_budget', object: 'response', status: 'completed', output, usage };
+    expect(new TextEncoder().encode(JSON.stringify(snapshot)).byteLength).toBeLessThan(8 * 1024 * 1024);
+    const { request, decision } = await setup({ upstreamHandler: () => Response.json(snapshot) });
+    const response = await request();
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(await response.text()).not.toContain('"type":"function_call"');
+    expect(decision.requests).toHaveLength(0);
+  });
+  it('finishes byte-identical shadow HTTP delivery before a hypothetical decision resolves', async () => {
+    const release = Promise.withResolvers<void>();
+    const barrier = { entered: Promise.withResolvers<void>(), release: release.promise, aborted: Promise.withResolvers<void>() };
+    const source = wire(await sourceEvents([command('npm install')]));
+    const { request } = await setup({ mode: 'shadow', upstreamHandler: () => new Response(source, { headers: { 'content-type': 'text/event-stream' } }), decisionBarrier: barrier, providerTimeoutMs: 120_000 });
+    cleanups.push(async () => { release.resolve(); });
+    expect(await (await request({ stream: true })).text()).toBe(source);
+    await barrier.entered.promise;
+    release.resolve();
+  });
+});
+
+describe('Responses actual HTTP terminal-copy retention boundaries', () => {
+  it.each(['aggregate', 'reasoning'] as const)('accepts the complete %s prefix then cancels when only its matching terminal crosses the ledger', async kind => {
+    const upstream = controlledUpstream();
+    // Source-derived bounded fixtures: four full text snapshots, or two full reasoning snapshots.
+    // Their prefix fits; the parser/decoded/parsed terminal copy alone crosses the selected ledger.
+    const payload = 'x'.repeat(kind === 'aggregate' ? 430_000 : 335_000);
+    const suffix = kind === 'aggregate' ? message(payload) : { type: 'reasoning', id: 'rs_terminal_copy', encrypted_content: payload, summary: [] };
+    const source = await sourceEvents([command('pwd'), suffix]);
+    const prefix = wire(source.slice(0, -1));
+    const final = wire(source.slice(-1));
+    expect(new TextEncoder().encode(prefix + final).byteLength).toBeLessThan(8 * 1024 * 1024);
+    const { request } = await setup({ upstreamHandler: upstream.handler });
+    const reader = (await request({ stream: true })).body!.getReader();
+    upstream.send(prefix);
+    upstream.send(encodeMockEvent('ping', { type: 'ping', probe: 'PRETERMINAL_RETENTION_FITS' }));
+    const raw = await readThrough(reader, 'PRETERMINAL_RETENTION_FITS');
+    // This downstream marker is only reachable after all prefix frames were parsed and retained.
+    expect(raw).not.toContain('"type":"function_call"');
+    expect(raw).not.toContain('response.completed');
+    expect(raw).not.toContain(payload);
+    upstream.send(final);
+    await failedBody(reader, raw);
+    await upstream.cancelled;
   });
 });
