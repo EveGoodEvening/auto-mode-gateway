@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import scenes from '../fixtures/anthropic/scenes.json' with { type: 'json' };
 import { anthropicAdapter, extractAnthropicRequest } from '../../src/protocols/anthropic/adapter.js';
+import { extractRequestContext } from '../../src/protocols/request-context.js';
 import { transformAnthropicStream } from '../../src/protocols/anthropic/stream.js';
 import { transformAnthropicNonstream } from '../../src/protocols/anthropic/nonstream.js';
 import { AnthropicResponseError, MAX_TOOL_BYTES, MAX_RESPONSE_BYTES } from '../../src/protocols/anthropic/safety.js';
@@ -42,7 +43,7 @@ function tool(index: number, id: string, input: unknown = {}): unknown {
 afterEach(() => vi.useRealTimers());
 
 describe('Anthropic request metadata', () => {
-  it('extracts safeguards context and last genuine user text, never tool results or assistant text', () => {
+  it('extracts safeguards metadata while preserving the latest tool-result-only user as empty', () => {
     const request = {
       model: 'fixture-model', stream: true, system: [{ type: 'text', text: 'system', cache_control: { type: 'ephemeral' } }],
       tools: [{ name: 'Bash' }], safeguards: [{ type: 'dangerous_tool_use', classifier_context: { live_cwd: '/fixture', trusted_directories: ['/fixture'] } }],
@@ -54,7 +55,8 @@ describe('Anthropic request metadata', () => {
     };
     const bytes = encoder.encode(JSON.stringify(request));
     const original = bytes.slice();
-    expect(extractAnthropicRequest(bytes)).toEqual({ ...request, classifier_context: request.safeguards[0]!.classifier_context, lastUserText: 'Genuine user request' });
+    expect(extractAnthropicRequest(bytes)).toEqual({ ...request, classifier_context: request.safeguards[0]!.classifier_context, lastUserText: '' });
+    expect(anthropicAdapter.extractRequest(bytes)).toEqual(extractRequestContext('anthropic-messages', bytes));
     expect(bytes).toEqual(original);
   });
   it('uses later direct user text and excludes nested tool-result text', () => {
@@ -62,6 +64,29 @@ describe('Anthropic request metadata', () => {
       { role: 'user', content: 'Earlier' },
       { role: 'user', content: [{ type: 'tool_result', content: 'Not user' }, { type: 'text', text: 'Latest' }] },
     ] })))?.lastUserText).toBe('Latest');
+  });
+  it.each([
+    { label: 'empty string', content: '' },
+    { label: 'empty blocks', content: [] },
+    { label: 'empty text', content: [{ type: 'text', text: '' }] },
+    { label: 'tool result', content: [{ type: 'tool_result', content: [{ type: 'text', text: 'TOOL_RESULT' }] }] },
+  ])('preserves the latest $label user content', ({ content }) => {
+      const bytes = encoder.encode(JSON.stringify({ messages: [
+        { role: 'user', content: 'EARLIER_REQUEST' },
+        { role: 'user', content },
+      ] }));
+      expect(extractAnthropicRequest(bytes)?.lastUserText).toBe('');
+    },
+  );
+  it('joins only direct text blocks and does not recurse into result or image objects', () => {
+    const bytes = encoder.encode(JSON.stringify({ messages: [{ role: 'user', content: [
+      { type: 'text', text: 'first' },
+      { type: 'tool_result', content: [{ type: 'text', text: 'TOOL_RESULT' }] },
+      { type: 'image', source: { text: 'IMAGE_DATA' } },
+      { type: 'input_text', text: 'WRONG_PROTOCOL_TEXT' },
+      { type: 'text', text: 'second' },
+    ] }] }));
+    expect(extractAnthropicRequest(bytes)?.lastUserText).toBe('first\nsecond');
   });
   it.each(['null', '[]', '{', '"text"'])('does not invent metadata for %s', value => {
     expect(extractAnthropicRequest(encoder.encode(value))).toBeUndefined();

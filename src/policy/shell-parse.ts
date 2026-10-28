@@ -1,6 +1,6 @@
 import { parse } from 'shell-quote';
 
-import { SHELL_INTERPRETERS, SHELL_UNSAFE_PROGRAMS } from './constants.js';
+import { DEFAULT_POLICY, type EffectivePolicy } from './effective.js';
 
 export interface ShellSegment {
   argv: string[];
@@ -16,7 +16,7 @@ export interface ParsedShell {
 }
 
 /** Lex only: never expand the environment, invoke a shell, or execute a token. */
-export function parseShell(text: string): ParsedShell {
+export function parseShell(text: string, policy: EffectivePolicy = DEFAULT_POLICY): ParsedShell {
   const reasons = new Set<string>();
   let quote: 'single' | 'double' | undefined;
   let escaped = false;
@@ -96,8 +96,8 @@ export function parseShell(text: string): ParsedShell {
   if (segments.length === 0) valid = false;
   for (const segment of segments) {
     const program = shellProgram(segment.argv[0] ?? '');
-    if (SHELL_UNSAFE_PROGRAMS.includes(program)) reasons.add('execution-wrapper');
-    if (SHELL_INTERPRETERS.includes(program)) reasons.add('interpreter');
+    if (policy.shell_unsafe_programs.includes(program)) reasons.add('execution-wrapper');
+    if (policy.shell_interpreters.includes(program)) reasons.add('interpreter');
     if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(segment.argv[0] ?? '')) reasons.add('assignment');
     if (program === 'base64' && segment.argv.some((arg) => arg === '--decode' || /^-[^-]*[dD]/u.test(arg))) {
       reasons.add('base64-decode');
@@ -109,4 +109,54 @@ export function parseShell(text: string): ParsedShell {
 
 export function shellProgram(token: string): string {
   return token.replaceAll('\\', '/').split('/').at(-1) ?? '';
+}
+
+const WRAPPER_VALUE_OPTIONS: Readonly<Record<string, readonly string[]>> = {
+  env: ['-u', '--unset', '-C', '--chdir', '--argv0'],
+  sudo: ['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from', '-T', '--command-timeout', '-R', '--chroot', '-D', '--chdir', '-r', '--role', '-t', '--type'],
+  doas: ['-u', '-C'], exec: ['-a'], nice: ['-n', '--adjustment'],
+  time: ['-f', '--format', '-o', '--output'],
+  chroot: ['--userspec', '--groups'],
+};
+const WRAPPER_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  env: ['-i', '--ignore-environment', '-0', '--null'],
+  sudo: ['-n', '--non-interactive', '-E', '--preserve-env', '-H', '--set-home', '-S', '--stdin', '-k', '--reset-timestamp', '-b', '--background'],
+  doas: ['-n', '-L'], command: ['-p'], exec: ['-c', '-l'], builtin: [],
+  nohup: [], nice: [], time: ['-p', '-a', '--append'],
+  chroot: ['--skip-chdir'], setsid: ['-c', '--ctty', '-f', '--fork', '-w', '--wait'],
+};
+
+/** Locate the executable through supported prefix wrappers, never through arbitrary operands. */
+export function shellCommand(argv: readonly string[]): readonly string[] {
+  let index = 0;
+  const assignment = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+  while (index < argv.length) {
+    while (assignment.test(argv[index] ?? '')) index += 1;
+    const wrapper = shellProgram(argv[index] ?? '');
+    if (!Object.hasOwn(WRAPPER_FLAGS, wrapper)) {
+      return argv.slice(index);
+    }
+    index += 1;
+    while (index < argv.length) {
+      const option = argv[index]!;
+      if (option === '--') {
+        index += 1;
+        break;
+      }
+      if (!option.startsWith('-') || option === '-') break;
+      const name = option.split('=', 1)[0]!;
+      const takesValue = WRAPPER_VALUE_OPTIONS[wrapper] ?? [];
+      if (takesValue.includes(name)) {
+        index += option.includes('=') ? 1 : 2;
+      } else if (takesValue.some((flag) => flag.length === 2 && option.startsWith(flag) && option.length > 2)) {
+        index += 1;
+      } else {
+        if (!(WRAPPER_FLAGS[wrapper] ?? []).includes(name)) return [];
+        index += 1;
+      }
+    }
+    // chroot's first operand is a new root directory, not an executable.
+    if (wrapper === 'chroot') index += 1;
+  }
+  return [];
 }

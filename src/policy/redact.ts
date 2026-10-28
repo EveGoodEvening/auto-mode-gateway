@@ -1,14 +1,14 @@
-import { REDACTION_PATTERNS, REDACTION_SENSITIVE_KEYS } from './constants.js';
+import { DEFAULT_POLICY, type EffectivePolicy } from './effective.js';
 
 /** Configured credentials are literal strings, never regular expressions. */
-export function redactText(text: string, credentials: readonly string[] = []): string {
+export function redactText(text: string, credentials: readonly string[] = [], policy: EffectivePolicy = DEFAULT_POLICY): string {
   let result = text;
   // Longest first prevents a shorter credential from exposing the remainder.
   const literals = [...new Set(credentials.filter((value) => value.length > 0))].sort((a, b) => b.length - a.length);
   for (const credential of literals) result = result.split(credential).join('[REDACTED:credential]');
-  for (const entry of REDACTION_PATTERNS) {
+  for (const entry of policy.redaction_patterns) {
     const { pattern, type } = entry;
-    const replacement = 'replacement' in entry ? entry.replacement : `[REDACTED:${type}]`;
+    const replacement = entry.replacement ?? `[REDACTED:${type}]`;
     // Cloning avoids shared global/sticky lastIndex state between requests.
     result = result.replace(new RegExp(pattern.source, pattern.flags), replacement);
   }
@@ -19,10 +19,11 @@ export function redactText(text: string, credentials: readonly string[] = []): s
  * mutating input or invoking accessors. Cycles are preserved, not recursed forever.
  * Intended for JSON-shaped policy state and audit payloads, not class instances.
  */
-export function redact<T>(value: T, credentials: readonly string[] = []): T {
+export function redact<T>(value: T, credentials: readonly string[] = [], policy: EffectivePolicy = DEFAULT_POLICY): T {
   const seen = new WeakMap<object, object>();
+  const sensitiveKeys = new RegExp(policy.redaction_sensitive_keys.source, policy.redaction_sensitive_keys.flags);
   function visit(input: unknown): unknown {
-    if (typeof input === 'string') return redactText(input, credentials);
+    if (typeof input === 'string') return redactText(input, credentials, policy);
     if (input === null || typeof input !== 'object') return input;
     const existing = seen.get(input);
     if (existing) return existing;
@@ -31,7 +32,8 @@ export function redact<T>(value: T, credentials: readonly string[] = []): T {
     for (const key of Object.keys(input)) {
       const descriptor = Object.getOwnPropertyDescriptor(input, key);
       if (!descriptor || !('value' in descriptor)) continue;
-      const sensitiveKey = new RegExp(REDACTION_SENSITIVE_KEYS.source, REDACTION_SENSITIVE_KEYS.flags).test(key);
+      sensitiveKeys.lastIndex = 0;
+      const sensitiveKey = sensitiveKeys.test(key);
       const next = sensitiveKey && descriptor.value !== null && descriptor.value !== undefined
         ? '[REDACTED:credential]'
         : visit(descriptor.value);

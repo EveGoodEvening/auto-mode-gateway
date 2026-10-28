@@ -1,10 +1,11 @@
+import { DEFAULT_POLICY, type EffectivePolicy } from '../../policy/effective.js';
 import type { ToolCall } from '../../protocols/types.js';
 import type { Action, ActionContext } from '../types.js';
 import { normalizeApplyPatch } from './apply-patch.js';
 import { base, command, inputObject, normalizePath, object, string } from './shared.js';
 import { normalizeWorkBuddy } from './workbuddy.js';
 
-export function normalizeCodex(call: ToolCall, context: ActionContext): Action {
+export function normalizeCodex(call: ToolCall, context: ActionContext, policy: EffectivePolicy = DEFAULT_POLICY): Action {
   const action = base(call, context);
   const input = inputObject(call);
   switch (call.name) {
@@ -26,8 +27,8 @@ export function normalizeCodex(call: ToolCall, context: ActionContext): Action {
     case 'apply_patch': {
       let patch: unknown = input.patch ?? input.input;
       if (patch === undefined && typeof call.input === 'string') patch = call.input;
-      return normalizeApplyPatch(action, patch, context);
+      return normalizeApplyPatch(action, patch, context, policy);
     }
-    default: return normalizeWorkBuddy(call, context);
+    default: return normalizeWorkBuddy(call, context, undefined, policy);
   }
 }

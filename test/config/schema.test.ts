@@ -174,4 +174,46 @@ describe('numeric, URL and strict object boundaries', () => {
     expectIssue({ ...validInput(), routes: [] }, ['routes']);
     expectIssue({ ...validInput(), upstreams: {} }, ['upstreams']);
   });
+
+  it.each([
+    { source: '[' }, { source: 'valid', flags: 'gg' },
+    { source: 'valid', flags: 'z' }, { source: 'valid', flags: 'uv' },
+    { source: 'valid', unknown: true },
+  ])('rejects malformed RegexSpec %j in every regex replacement category', (pattern) => {
+    for (const policy of [
+      { hard_deny_patterns: [{ id: 'custom', pattern }] },
+      { hard_deny_target_patterns: { root: pattern } },
+      { redaction_patterns: [{ type: 'custom', pattern }] },
+      { redaction_sensitive_keys: pattern },
+    ]) expect(configSchema.safeParse({ ...validInput(), policy }).success).toBe(false);
+  });
+
+  it.each([
+    { version: ' ' }, { questions: { unknown: {} } },
+    { questions: { destructive: { type: 'noul' } } },
+    { questions: { destructive: { criteria: { true: '' } } } },
+    { questions: { destructive: { instructions: ' ' } } },
+    { hard_deny_patterns: [{ id: '', pattern: { source: 'x' } }] },
+    { redaction_patterns: [{ type: '', pattern: { source: 'x' } }] },
+    { readonly_positional_limits: { uniq: -1 } },
+    { readonly_positional_limits: { uniq: 1.5 } },
+    { user_request_max_chars: 1001 }, { user_request_max_chars: 0 },
+    { write_content_max_bytes: 2049 }, { write_content_max_bytes: 0 },
+  ])('rejects invalid full-policy override %j', (policy) => {
+    expect(configSchema.safeParse({ ...validInput(), policy }).success).toBe(false);
+  });
+
+  it('accepts full policy categories with strict partial question and regex shapes', () => {
+    const policy = {
+      version: 'reviewed-local', questions: { destructive: { criteria: { true: 'Locally destructive.' } } },
+      readonly_programs: [], readonly_git_subcommands: [], shell_unsafe_programs: [], shell_interpreters: [],
+      find_unsafe_arguments: [], git_unsafe_arguments: [], readonly_unsafe_arguments: { local: [] },
+      readonly_positional_limits: { local: 0 }, download_programs: [], file_write_programs: [],
+      inplace_write_programs: [], hard_deny_commands: [], hard_deny_patterns: [],
+      hard_deny_target_patterns: { root: { source: '^/$', flags: 'i' } }, sensitive_path_globs: [],
+      redaction_patterns: [], redaction_sensitive_keys: { source: '^custom$' },
+      user_request_max_chars: 1, write_content_max_bytes: 1,
+    };
+    expect(configSchema.parse({ ...validInput(), policy }).policy).toMatchObject(policy);
+  });
 });

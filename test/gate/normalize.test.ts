@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { normalizeToolCall } from '../../src/gate/normalize/index.js';
+import { resolvePolicy } from '../../src/policy/effective.js';
 import type { ActionContext, NormalizationRoute, Protocol } from '../../src/gate/types.js';
 
 const ctx: ActionContext = { platform: 'linux', project_dir: '/project', workdir: '/project', home_dir: '/home/user' };
@@ -74,6 +75,51 @@ describe('Codex normalization', () => {
   it.each(['', '*** Begin Patch\n*** End Patch', '*** Begin Patch\n*** Add File: a.txt\n+x', '*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\ntrailing'])('rejects unusable patch %#', (patch) => {
     expect(normalize('apply_patch', patch, 'openai-responses').execution_unavailable).toBe(true);
   });
+  it.each([
+    ['Add body without plus prefix', '*** Add File: a.txt\ninert'],
+    ['Add body with deletion line', '*** Add File: a.txt\n-inert'],
+    ['Add body with context line', '*** Add File: a.txt\n inert'],
+    ['Delete body with added line', '*** Delete File: a.txt\n+inert'],
+    ['Delete body with removed line', '*** Delete File: a.txt\n-inert'],
+    ['Delete body with plain text', '*** Delete File: a.txt\ninert'],
+    ['Update body without hunk header', '*** Update File: a.txt\n-old\n+new'],
+    ['Update hunk with unprefixed body', '*** Update File: a.txt\n@@\nold\n+new'],
+    ['Update with empty hunk', '*** Update File: a.txt\n@@'],
+    ['Update without body', '*** Update File: a.txt'],
+    ['orphan Move header', '*** Move to: b.txt'],
+    ['Move following Add', '*** Add File: a.txt\n+inert\n*** Move to: b.txt'],
+    ['Move following Delete', '*** Delete File: a.txt\n*** Move to: b.txt'],
+    ['Move after Update body', '*** Update File: a.txt\n@@\n-old\n+new\n*** Move to: b.txt'],
+    ['repeated Move headers', '*** Update File: a.txt\n*** Move to: b.txt\n*** Move to: c.txt\n@@\n-old\n+new'],
+    ['Update with empty intermediate hunk', '*** Update File: a.txt\n@@\n@@ located\n-old\n+new'],
+    ['Update with malformed hunk marker', '*** Update File: a.txt\n@@invalid\n-old\n+new'],
+    ['Update with empty located hunk marker', '*** Update File: a.txt\n@@ \n-old\n+new'],
+    ['Update body after end marker', '*** Update File: a.txt\n@@\n-old\n+new\n*** End of File\n+later'],
+    ['Update hunk after end marker', '*** Update File: a.txt\n@@\n-old\n+new\n*** End of File\n@@\n-more\n+later'],
+    ['Add with empty path', '*** Add File:   \n+inert'],
+    ['Delete current directory', '*** Delete File: .'],
+  ])('rejects invalid apply_patch operation grammar: %s', (_label, body) => {
+    const patch = `*** Begin Patch\n${body}\n*** End Patch`;
+    expect(normalize('apply_patch', patch, 'openai-responses')).toMatchObject({ kind: 'file_write', execution_unavailable: true });
+  });
+  it.each([
+    ['Add', '*** Add File: a.txt\n+inert\n+', ['a.txt'], false],
+    ['Delete', '*** Delete File: obsolete.txt', ['obsolete.txt'], true],
+    ['Update', '*** Update File: a.txt\n@@\n context\n-old\n+new', ['a.txt'], false],
+    ['Update with located hunk and end marker', '*** Update File: a.txt\n@@ function inert()\n-old\n+new\n*** End of File', ['a.txt'], false],
+    ['Move with Update', '*** Update File: a.txt\n*** Move to: b.txt\n@@\n-old\n+new', ['a.txt', 'b.txt'], false],
+    ['empty Add', '*** Add File: empty.txt', ['empty.txt'], false],
+    ['multiple Update hunks', '*** Update File: a.txt\n@@ first\n old\n-new\n+inert\n@@ second\n-before\n+after', ['a.txt'], false],
+    ['multiple operations', '*** Add File: a.txt\n+inert\n*** Delete File: obsolete.txt\n*** Update File: b.txt\n*** Move to: c.txt\n@@\n-old\n+new', ['a.txt', 'obsolete.txt', 'b.txt', 'c.txt'], true],
+  ] as const)('accepts valid apply_patch operation grammar: %s', (_label, body, paths, destructive) => {
+    const patch = `*** Begin Patch\n${body}\n*** End Patch`;
+    const action = normalize('apply_patch', patch, 'openai-responses');
+    expect(action.kind).toBe('file_write');
+    expect(action.paths).toEqual(paths);
+    expect(action.execution_unavailable).toBeUndefined();
+    expect(action.destructive === true).toBe(destructive);
+    expect(action.content_excerpt).toBe(patch);
+  });
 });
 
 describe('WorkBuddy mapping and visible capability boundaries', () => {
@@ -99,6 +145,42 @@ describe('WorkBuddy mapping and visible capability boundaries', () => {
   });
   it.each([{ command: 'printf inert' }, { command: { unparseable: true } }, { path: '.env' }, { path: 'x.txt', content: 'inert' }])('cannot erase visible capability using explicit other %#', (input) => {
     expect(normalize('generic', input, chat, { tool_map: { generic: 'other' } }).kind).not.toBe('other');
+  });
+  describe.each([
+    ['without explicit mapping', undefined],
+    ['with explicit other mapping', { tool_map: { generic: 'other' as const } }],
+  ] as const)('malformed recognizable paths %s', (_label, route) => {
+    const malformedPaths = [
+      ...['file_path', 'notebook_path', 'path', 'file', 'filename', 'directory', 'target_path'].flatMap((key) => [
+        { [key]: null },
+        { [key]: { value: 'inert.txt' } },
+        { [key]: 42 },
+        { [key]: ['inert.txt'] },
+        { [key]: '' },
+        { [key]: '   ' },
+      ]),
+      { paths: null },
+      { paths: 'inert.txt' },
+      { paths: { value: 'inert.txt' } },
+      { paths: [] },
+      { paths: [null] },
+      { paths: [42] },
+      { paths: [{ value: 'inert.txt' }] },
+      { paths: ['inert.txt', null] },
+      { paths: ['inert.txt', ''] },
+      { paths: ['inert.txt', {}] },
+      { path: 'inert.txt', file_path: null },
+    ];
+    it.each(malformedPaths)('blocks malformed recognizable path without content %#', (input) => {
+      const action = normalize('generic', input, chat, route);
+      expect(action.kind).not.toBe('other');
+      expect(action.execution_unavailable).toBe(true);
+    });
+    it.each(malformedPaths)('blocks malformed recognizable path with content %#', (input) => {
+      const action = normalize('generic', { ...input, content: 'inert' }, chat, route);
+      expect(action.kind).not.toBe('other');
+      expect(action.execution_unavailable).toBe(true);
+    });
   });
   it.each(['url', 'mcp'] as const)('respects explicit %s mapping', (kind) => {
     expect(normalize('custom', { target: 'https://example.invalid' }, chat, { tool_map: { custom: { kind, arg: 'target' } } }).kind).toBe(kind);
@@ -135,5 +217,25 @@ describe('write content identity and UTF-8 evidence bounds', () => {
     expect(hazardous.content_truncated).toBe(true);
     expect(hazardous.content_excerpt).toBe(safe.content_excerpt);
     expect(hazardous.content_digest).not.toBe(safe.content_digest);
+  });
+  it.each([
+    ['anthropic-messages', 'Write', { file_path: 'inert.txt', content: 'ab💠suffix' }, 'ab💠suffix'],
+    ['openai-chat', 'custom', { path: 'inert.txt', content: 'ab💠suffix' }, 'ab💠suffix'],
+    ['openai-responses', 'apply_patch', '*** Begin Patch\n*** Add File: inert.txt\n+inert\n*** End Patch', '*** Begin Patch\n*** Add File: inert.txt\n+inert\n*** End Patch'],
+  ] as const)('uses resolved fifth-argument visibility cap for %s', (protocol, name, input, fullContent) => {
+    const policy = resolvePolicy({ write_content_max_bytes: 4 });
+    const action = normalizeToolCall(protocol, { id: 'inert-cap', name, input, raw: input }, ctx, undefined, policy);
+    expect(action.content_truncated).toBe(true);
+    expect(action.content_excerpt).toBe(protocol === 'openai-responses' ? '*** ' : 'ab');
+    expect(action.content_digest).toBe(createHash('sha256').update(fullContent).digest('hex'));
+    expect(action.execution_unavailable).toBeUndefined();
+  });
+  it('retains a full content code point exactly at a configured byte cap', () => {
+    const policy = resolvePolicy({ write_content_max_bytes: 6 });
+    const action = normalizeToolCall('anthropic-messages', {
+      id: 'inert-boundary', name: 'Write', input: { file_path: 'inert.txt', content: 'ab💠' }, raw: {},
+    }, ctx, undefined, policy);
+    expect(action.content_excerpt).toBe('ab💠');
+    expect(action.content_truncated).toBe(false);
   });
 });

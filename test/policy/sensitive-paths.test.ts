@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Action, ActionContext } from '../../src/gate/types.js';
+import { resolvePolicy } from '../../src/policy/effective.js';
 import { normalizePolicyPath, sensitivePaths } from '../../src/policy/sensitive-paths.js';
 
 const context: ActionContext = { platform: 'linux', project_dir: '/work/project', workdir: '/work/project', home_dir: '/home/user' };
@@ -39,6 +40,47 @@ describe('sensitivePaths lexical policy', () => {
     expect(sensitivePaths({ kind: 'command', tool: 'Bash', text, paths: [], content_truncated: false, raw: {} }, context).review).toBe(true);
   });
 
+  it.each([
+    'grep -r token ~/.ssh',
+    'grep -R token /home/user/.ssh/',
+    'rg token ~/.ssh',
+    'find ~/.ssh -type f',
+  ])('reviews inert recursive SSH directory scope %s', (text) => {
+    expect(sensitivePaths({ kind: 'command', tool: 'Bash', text, paths: [], content_truncated: false, raw: {} }, context).review).toBe(true);
+  });
+
+  it('reviews direct argv recursive SSH directory scope', () => {
+    expect(sensitivePaths({ kind: 'command', tool: 'exec_command', argv: ['grep', '-r', 'token', '~/.ssh'], paths: [], content_truncated: false, raw: {} }, context).review).toBe(true);
+  });
+
+  it.each(['~/.ssh', '/home/user/.ssh/'])('reviews native searches of SSH directory scope %s', (path) => {
+    for (const [tool, recognized_exemption] of [['Grep', 'grep'], ['Glob', 'glob']] as const) {
+      expect(sensitivePaths({ ...read(path), tool, recognized_exemption }, context).review).toBe(true);
+    }
+  });
+
+  it.each(['.', 'src', '/home/user', '.claude', 'nested/config'])('reviews possible native sensitive descendants under %s', (path) => {
+    for (const recognized_exemption of ['grep', 'glob'] as const) {
+      expect(sensitivePaths({ ...read(path), recognized_exemption }, context).reasons).toContain('sensitive_path_scope');
+    }
+  });
+
+  it.each([
+    'grep -ri token src', 'grep --rec token .', 'grep --dereference-recursive token .claude',
+    'grep --directories=recurse token src', 'grep --dir recurse token src', 'grep -d recurse token src',
+    'grep -drecurse token src', 'rg token src', 'find src -type f',
+  ])('reviews general recursive sensitive descendant scope in %s', (text) => {
+    expect(sensitivePaths({ kind: 'command', tool: 'Bash', text, paths: [], content_truncated: false, raw: {} }, context).reasons).toContain('sensitive_path_scope');
+  });
+
+  it('preserves nonrecursive explicit safe-file reads', () => {
+    expect(sensitivePaths({ kind: 'command', tool: 'Bash', text: 'grep token README.md', paths: [], content_truncated: false, raw: {} }, context).review).toBe(false);
+  });
+
+  it('does not treat options after the grep terminator as recursive flags', () => {
+    expect(sensitivePaths({ kind: 'command', tool: 'Bash', argv: ['grep', '--', '-r', 'README.md'], paths: [], content_truncated: false, raw: {} }, context).review).toBe(false);
+  });
+
   it('checks direct argv without shell reparsing', () => {
     expect(sensitivePaths({ kind: 'command', tool: 'exec_command', argv: ['cat', '.env'], paths: [], content_truncated: false, raw: {} }, context).review).toBe(true);
   });
@@ -61,7 +103,30 @@ describe('sensitivePaths lexical policy', () => {
   });
 
   it('appends configured sensitive globs', () => {
-    expect(sensitivePaths(read('secrets/vault.txt'), context, ['**/secrets/**']).review).toBe(true);
+    const policy = resolvePolicy({ sensitive_paths_extra: ['**/secrets/**'] });
+    expect(sensitivePaths(read('secrets/vault.txt'), context, policy).review).toBe(true);
+    expect(sensitivePaths(read('.env'), context, policy).review).toBe(true);
+  });
+
+  it('uses replacement globs without retaining the default sensitive list', () => {
+    const policy = resolvePolicy({ sensitive_path_globs: ['**/vault/**'], sensitive_paths_extra: ['**/secrets/**'] });
+    expect(sensitivePaths(read('vault/private.txt'), context, policy).review).toBe(true);
+    expect(sensitivePaths(read('secrets/private.txt'), context, policy).review).toBe(true);
+    expect(sensitivePaths(read('.env'), context, policy).review).toBe(false);
+  });
+
+  it('applies the same effective shell policy while extracting paths', () => {
+    const policy = resolvePolicy({ shell_unsafe_programs: ['cat'] });
+    const action: Action = { kind: 'command', tool: 'Bash', text: 'cat README.md', paths: [], content_truncated: false, raw: {} };
+    expect(sensitivePaths(action, context, policy).reasons).toContain('unresolved_shell_paths');
+  });
+
+  it('keeps structural unresolved and containment checks with an empty sensitive list', () => {
+    const policy = resolvePolicy({ sensitive_path_globs: [] });
+    expect(sensitivePaths({ ...read('src'), recognized_exemption: 'grep' }, context, policy).review).toBe(false);
+    expect(sensitivePaths(read('$UNKNOWN/file'), context, policy).reasons).toContain('unresolved_path');
+    expect(sensitivePaths({ ...read('/outside/file'), kind: 'file_write' }, context, policy).reasons).toContain('outside_project_write');
+    expect(sensitivePaths(read('C:\\repo\\safe.txt.'), { platform: 'win32' }, policy).reasons).toContain('unresolved_path');
   });
 
   it.each([
@@ -72,6 +137,27 @@ describe('sensitivePaths lexical policy', () => {
     expect(sensitivePaths({ ...read(path), kind: 'file_write' }, { platform: 'win32', project_dir: 'C:\\repo', userprofile: 'C:\\Users\\Alice' }).review).toBe(expected);
   });
 
+  it.each([
+    'C:\\repo\\private.pem.',
+    'C:\\repo\\private.pem ',
+    'C:\\repo\\private.key. ',
+    'C:\\repo\\private.pem:backup',
+    'C:\\repo\\private.pem::$DATA',
+    'C:\\repo\\.claude.\\settings.json',
+    'C:\\repo\\.claude \\settings.json',
+    'C:\\repo\\.codex.\\config.toml',
+    'C:\\repo\\.ssh.\\id_rsa',
+    'C:\\repo\\.ssh \\id_rsa',
+  ].flatMap((path) => (['read', 'write'] as const).map((operation) => [operation, path] as const)))('reviews native Windows %s alias %s', (operation, path) => {
+    const windowsContext: ActionContext = { platform: 'win32', project_dir: 'C:\\repo', workdir: 'C:\\repo' };
+    const action: Action = operation === 'read'
+      ? read(path)
+      : { ...read(path), kind: 'file_write', tool: 'Write', recognized_exemption: undefined };
+    expect(sensitivePaths(action, windowsContext).review).toBe(true);
+    expect(sensitivePaths(action, windowsContext).reasons).toContain('unresolved_path');
+    expect(normalizePolicyPath(path, windowsContext)).toBeUndefined();
+  });
+
   it('never expands USERPROFILE from the gateway host environment', () => {
     expect(normalizePolicyPath('%USERPROFILE%\\file', { platform: 'win32', project_dir: 'C:\\repo' })).toBeUndefined();
   });
@@ -79,6 +165,10 @@ describe('sensitivePaths lexical policy', () => {
   it('rejects drive-relative and root-relative Windows ambiguity', () => {
     expect(normalizePolicyPath('C:file', { platform: 'win32' })).toBeUndefined();
     expect(normalizePolicyPath('\\Windows\\file', { platform: 'win32' })).toBeUndefined();
+  });
+
+  it.each(['C:\\repo\\safe.txt.', 'C:\\repo\\safe.txt ', 'C:\\repo\\folder.\\..\\safe.txt', 'C:\\repo\\file:stream', '\\\\server\\share.\\file'])('rejects Windows aliases independent of sensitivity in %s', (path) => {
+    expect(normalizePolicyPath(path, { platform: 'win32' })).toBeUndefined();
   });
 
   it('preserves UNC share boundaries lexically', () => {

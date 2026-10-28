@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { redact, redactText } from '../../src/policy/redact.js';
+import { resolvePolicy } from '../../src/policy/effective.js';
+
+const embeddedAssignments = ['refresh_token', 'refresh-token', 'client_secret', 'client-secret'].flatMap((key) => [
+  `${key}=opaque-private-value`,
+  `${key}="opaque-private-value"`,
+  `${key}='opaque-private-value'`,
+]);
 
 describe('redactText', () => {
   it.each([
@@ -43,6 +50,14 @@ describe('redactText', () => {
     expect(output).toContain('[REDACTED:');
   });
 
+  it.each(embeddedAssignments)('redacts embedded credential assignment %s', (assignment) => {
+    const output = redactText(`before ${assignment} after`);
+    expect(output).not.toContain('opaque-private-value');
+    expect(output).toContain('[REDACTED:');
+    expect(output).toContain('before ');
+    expect(output).toContain(' after');
+  });
+
   it('replaces configured literals including regex punctuation', () => {
     expect(redactText('literal a.b+[c] stays secret', ['a.b+[c]'])).toBe('literal [REDACTED:credential] stays secret');
   });
@@ -63,11 +78,35 @@ describe('redactText', () => {
   it('does not carry regular expression lastIndex between calls', () => {
     expect(redactText('Bearer abc.def')).toBe(redactText('Bearer abc.def'));
   });
+
+  it('uses resolved replacement patterns, captures and literal credentials together', () => {
+    const policy = resolvePolicy({ redaction_patterns: [{ type: 'custom', pattern: { source: '(ticket:)[A-Z]+', flags: 'g' }, replacement: '$1[hidden]' }] });
+    expect(redactText('ticket:ABC ticket:DEF a.b+', ['a.b+'], policy)).toBe('ticket:[hidden] ticket:[hidden] [REDACTED:credential]');
+    expect(redactText('ticket:ABC', [], policy)).toBe('ticket:[hidden]');
+    expect(redactText('ticket:ABC', [], policy)).toBe('ticket:[hidden]');
+    expect(redactText('ordinary prose', [], policy)).toBe('ordinary prose');
+  });
 });
 
 describe('redact recursive data', () => {
   it.each(['apiKey', 'API_KEY', 'access_token', 'refresh-token', 'token', 'password', 'passwd', 'secret', 'client_secret', 'authorization', 'connection_string'])('redacts structured %s', (key) => {
     expect(redact({ [key]: 'opaque-private-value' })[key]).toBe('[REDACTED:credential]');
+  });
+
+  it.each(embeddedAssignments)('redacts credential assignment inside state-like strings %s', (assignment) => {
+    const input = {
+      command: `curl --data ${assignment}`,
+      user_request: `Use ${assignment} for this request`,
+      content: [{ text: `Configuration: ${assignment}` }],
+    };
+    const output = redact(input);
+    for (const text of [output.command, output.user_request, output.content[0]!.text]) {
+      expect(text).not.toContain('opaque-private-value');
+      expect(text).toContain('[REDACTED:');
+    }
+    expect(input.command).toContain('opaque-private-value');
+    expect(input.user_request).toContain('opaque-private-value');
+    expect(input.content[0]!.text).toContain('opaque-private-value');
   });
 
   it('traverses arrays and nested objects without mutating source', () => {
@@ -104,5 +143,17 @@ describe('redact recursive data', () => {
     const output = redact(input);
     expect(output.self).toBe(output);
     expect(output.password).toBe('[REDACTED:credential]');
+  });
+
+  it('propagates one effective policy recursively and resets global key regexes', () => {
+    const policy = resolvePolicy({
+      redaction_patterns: [{ type: 'custom', pattern: { source: 'private-[a-z]+', flags: 'g' } }],
+      redaction_sensitive_keys: { source: '^custom_key$', flags: 'g' },
+    });
+    const input = [{ custom_key: 'opaque', message: 'private-alpha' }, { custom_key: 'opaque', nested: ['private-beta'] }];
+    const output = redact(input, [], policy);
+    expect(output).toEqual([{ custom_key: '[REDACTED:credential]', message: '[REDACTED:custom]' }, { custom_key: '[REDACTED:credential]', nested: ['[REDACTED:custom]'] }]);
+    expect(redact(input, [], policy)).toEqual(output);
+    expect(input[0]?.custom_key).toBe('opaque');
   });
 });

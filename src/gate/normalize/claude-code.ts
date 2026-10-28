@@ -1,15 +1,16 @@
+import { DEFAULT_POLICY, type EffectivePolicy } from '../../policy/effective.js';
 import type { ToolCall } from '../../protocols/types.js';
 import type { Action, ActionContext } from '../types.js';
 import { base, command, fileWrite, inputObject, normalizePath, paths, string } from './shared.js';
 import { normalizeWorkBuddy } from './workbuddy.js';
 
-export function normalizeClaudeCode(call: ToolCall, context: ActionContext): Action {
+export function normalizeClaudeCode(call: ToolCall, context: ActionContext, policy: EffectivePolicy = DEFAULT_POLICY): Action {
   const action = base(call, context);
   const input = inputObject(call);
   switch (call.name) {
     case 'Bash': return command(action, input.command);
     case 'Write': case 'Edit': case 'MultiEdit': case 'NotebookEdit':
-      return fileWrite(action, input, context);
+      return fileWrite(action, input, context, policy);
     case 'WebFetch': case 'WebSearch': {
       action.kind = 'url';
       const value = string(input.url) ?? string(input.query);
@@ -28,6 +29,6 @@ export function normalizeClaudeCode(call: ToolCall, context: ActionContext): Act
     case 'Task': action.recognized_exemption = 'task'; return action;
     default:
       if (call.name.startsWith('mcp__')) { action.kind = 'mcp'; action.paths = paths(input, context); return action; }
-      return normalizeWorkBuddy(call, context);
+      return normalizeWorkBuddy(call, context, undefined, policy);
   }
 }

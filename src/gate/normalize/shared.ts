@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { posix, win32 } from 'node:path';
-import { WRITE_CONTENT_MAX_BYTES } from '../../policy/constants.js';
+import { DEFAULT_POLICY, type EffectivePolicy } from '../../policy/effective.js';
 import type { ToolCall } from '../../protocols/types.js';
 import type { Action, ActionContext } from '../types.js';
 
@@ -40,16 +40,32 @@ export function base(call: ToolCall, context: ActionContext): Action {
     ...(cwd !== undefined ? { workdir: normalizePath(cwd, context) } : {}), raw: call.raw };
 }
 
-export function paths(input: Record<string, unknown>, context: ActionContext): string[] {
+/** Recognizable path presence remains execution evidence even when its value is unusable. */
+export function pathInput(input: Record<string, unknown>, context: ActionContext): { paths: string[]; present: boolean; unavailable: boolean } {
   const result: string[] = [];
+  let present = false;
+  let unavailable = false;
+  const append = (value: unknown) => {
+    if (typeof value !== 'string' || !value.trim()) { unavailable = true; return; }
+    const path = normalizePath(value, context);
+    if (path === '.') unavailable = true;
+    result.push(path);
+  };
   for (const key of ['file_path', 'notebook_path', 'path', 'file', 'filename', 'directory', 'target_path']) {
-    const value = string(input[key]);
-    if (value !== undefined) result.push(normalizePath(value, context));
+    if (!Object.hasOwn(input, key)) continue;
+    present = true;
+    append(input[key]);
   }
-  if (Array.isArray(input.paths)) {
-    for (const value of input.paths) if (typeof value === 'string') result.push(normalizePath(value, context));
+  if (Object.hasOwn(input, 'paths')) {
+    present = true;
+    if (!Array.isArray(input.paths) || !input.paths.length) unavailable = true;
+    else for (const value of input.paths) append(value);
   }
-  return [...new Set(result)];
+  return { paths: [...new Set(result)], present, unavailable };
+}
+
+export function paths(input: Record<string, unknown>, context: ActionContext): string[] {
+  return pathInput(input, context).paths;
 }
 
 export function command(action: Action, value: unknown): Action {
@@ -63,20 +79,22 @@ export function command(action: Action, value: unknown): Action {
   return action;
 }
 
-export function content(action: Action, value: string): Action {
+export function content(action: Action, value: string, policy: EffectivePolicy = DEFAULT_POLICY): Action {
   const bytes = Buffer.from(value, 'utf8');
   action.content_digest = createHash('sha256').update(bytes).digest('hex');
-  action.content_truncated = bytes.length > WRITE_CONTENT_MAX_BYTES;
-  let end = Math.min(bytes.length, WRITE_CONTENT_MAX_BYTES);
+  action.content_truncated = bytes.length > policy.write_content_max_bytes;
+  let end = Math.min(bytes.length, policy.write_content_max_bytes);
   // Never expose an incomplete UTF-8 code point at the excerpt boundary.
   while (end < bytes.length && end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
   action.content_excerpt = bytes.subarray(0, end).toString('utf8');
   return action;
 }
 
-export function fileWrite(action: Action, input: Record<string, unknown>, context: ActionContext): Action {
+export function fileWrite(action: Action, input: Record<string, unknown>, context: ActionContext, policy: EffectivePolicy = DEFAULT_POLICY): Action {
   action.kind = 'file_write';
-  action.paths = paths(input, context);
+  const evidence = pathInput(input, context);
+  action.paths = evidence.paths;
+  if (evidence.unavailable) action.execution_unavailable = true;
   const values: string[] = [];
   for (const key of ['content', 'new_string', 'old_string', 'new_source', 'source']) {
     const value = string(input[key]);
@@ -91,7 +109,7 @@ export function fileWrite(action: Action, input: Record<string, unknown>, contex
       }
     }
   }
-  if (values.length) content(action, values.length === 1 ? values[0]! : JSON.stringify(values));
+  if (values.length) content(action, values.length === 1 ? values[0]! : JSON.stringify(values), policy);
   else action.execution_unavailable = true;
   if (!action.paths.length || action.paths.some((path) => !path.trim() || path === '.')) action.execution_unavailable = true;
   return action;

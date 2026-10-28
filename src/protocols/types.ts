@@ -6,6 +6,8 @@ export interface ToolCall {
   raw: unknown;
 }
 
+export type RequestProtocol = 'anthropic-messages' | 'openai-responses' | 'openai-chat';
+
 /** Extracted metadata only. Forward the original request bytes, never this parsed view. */
 export interface RequestContext {
   model?: string;
@@ -15,6 +17,7 @@ export interface RequestContext {
   safeguards?: unknown;
   stream: boolean;
   classifier_context?: unknown;
+  /** Latest user message text, including explicit empty text; excludes nested tool results. */
   lastUserText?: string;
 }
 

@@ -125,9 +125,9 @@ export const REDACTION_PATTERNS = [
   { type: 'private_key', pattern: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)/g },
   { type: 'bearer', pattern: /(\bBearer\s+)[A-Za-z0-9._~+/-]+=*/gi, replacement: '$1[REDACTED:bearer]' },
   { type: 'api_key', pattern: /\b(?:sk-(?:proj-|ant-)?[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|AKIA[A-Z0-9]{16})\b/g },
-  { type: 'credential', pattern: /(["']?\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|password|passwd|pwd)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/gi, replacement: '$1[REDACTED:credential]' },
+  { type: 'credential', pattern: /(["']?\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|pwd|authorization|connection[_-]?string)["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/gi, replacement: '$1[REDACTED:credential]' },
   { type: 'password', pattern: /((?:--?(?:password|passwd|token|api-key)|-p)\s+)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/gi, replacement: '$1[REDACTED:password]' },
-  { type: 'credential', pattern: /((?:["']?\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password|passwd|pwd)["']?\s*[:=]\s*)["']?)[^\s"'&,;}]+/gi, replacement: '$1[REDACTED:credential]' },
+  { type: 'credential', pattern: /((?:["']?\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|pwd|authorization|connection[_-]?string)["']?\s*[:=]\s*)["']?)[^\s"'&,;}]+/gi, replacement: '$1[REDACTED:credential]' },
   { type: 'password', pattern: /((?:--?(?:password|passwd|token|api-key)|-p)\s+)[^\s]+/gi, replacement: '$1[REDACTED:password]' },
   { type: 'connection_string', pattern: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss|amqp|amqps|https?):\/\/[^\s/@]+:[^\s/@]+@[^\s"'<>]+/gi },
 ] as const;

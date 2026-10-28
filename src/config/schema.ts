@@ -1,6 +1,7 @@
 import { isIP } from 'node:net';
 import { z } from 'zod';
 import { DEFAULT_AUDIT_PATH } from './defaults.js';
+import * as policyDefaults from '../policy/constants.js';
 
 const nonempty = z.string().refine((value) => value.trim().length > 0, 'Must not be empty');
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/)
@@ -79,11 +80,65 @@ const secondStageSchema = z.strictObject({
   pricing: pricing.optional(),
 });
 const thresholds = z.strictObject({
-  risk_block: probability.default(0.70),
-  risk_allow: probability.default(0.30),
-  intent_mismatch: probability.default(0.30),
-  intent_risk: probability.default(0.50),
-  outside_scope_allow: probability.default(0.50),
+  risk_block: probability.default(policyDefaults.THRESHOLDS.risk_block),
+  risk_allow: probability.default(policyDefaults.THRESHOLDS.risk_allow),
+  intent_mismatch: probability.default(policyDefaults.THRESHOLDS.intent_mismatch),
+  intent_risk: probability.default(policyDefaults.THRESHOLDS.intent_risk),
+  outside_scope_allow: probability.default(policyDefaults.THRESHOLDS.outside_scope_allow),
+}).prefault({});
+
+/** JSON/YAML-safe regexes are validated before any runtime policy is resolved. */
+export const regexSpecSchema = z.strictObject({
+  source: z.string(),
+  flags: z.string().optional(),
+}).refine(({ source, flags }) => {
+  try { new RegExp(source, flags); return true; } catch { return false; }
+}, 'Must be a valid regular expression with supported, unique flags');
+const questionOverride = z.strictObject({
+  instructions: nonempty.optional(),
+  criteria: z.strictObject({ true: nonempty.optional(), false: nonempty.optional() }).optional(),
+});
+const stringList = z.array(nonempty);
+const policySchema = z.strictObject({
+  version: nonempty.optional(),
+  questions: z.strictObject({
+    destructive: questionOverride.optional(),
+    exfiltration: questionOverride.optional(),
+    remote_code_exec: questionOverride.optional(),
+    security_weakening: questionOverride.optional(),
+    outside_scope: questionOverride.optional(),
+    matches_user_request: questionOverride.optional(),
+  }).optional(),
+  thresholds,
+  user_request_max_chars: positiveInteger.max(policyDefaults.USER_REQUEST_MAX_CHARS).optional(),
+  write_content_max_bytes: positiveInteger.max(policyDefaults.WRITE_CONTENT_MAX_BYTES).optional(),
+  readonly_programs: stringList.optional(),
+  readonly_git_subcommands: stringList.optional(),
+  shell_unsafe_programs: stringList.optional(),
+  shell_interpreters: stringList.optional(),
+  find_unsafe_arguments: stringList.optional(),
+  git_unsafe_arguments: stringList.optional(),
+  readonly_unsafe_arguments: z.record(nonempty, stringList).optional(),
+  readonly_positional_limits: z.record(nonempty, z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)).optional(),
+  download_programs: stringList.optional(),
+  file_write_programs: stringList.optional(),
+  inplace_write_programs: stringList.optional(),
+  hard_deny_commands: stringList.optional(),
+  hard_deny_target_patterns: z.strictObject({
+    root: regexSpecSchema.optional(), home: regexSpecSchema.optional(),
+    authorized_keys: regexSpecSchema.optional(), device: regexSpecSchema.optional(),
+  }).optional(),
+  hard_deny_patterns: z.array(z.strictObject({ id: nonempty, pattern: regexSpecSchema })).optional(),
+  sensitive_path_globs: stringList.optional(),
+  redaction_patterns: z.array(z.strictObject({
+    type: nonempty, pattern: regexSpecSchema, replacement: z.string().optional(),
+  })).optional(),
+  redaction_sensitive_keys: regexSpecSchema.optional(),
+  readonly_allow_extra: stringList.default([]),
+  hard_deny_extra: z.array(nonempty.refine((value) => {
+    try { new RegExp(value, 'iu'); return true; } catch { return false; }
+  }, 'Must be a valid regular expression')).default([]),
+  sensitive_paths_extra: stringList.default([]),
 }).prefault({});
 
 // DNS names (including localhost) are not trusted as loopback security identities.
@@ -128,14 +183,7 @@ export const configSchema = z.strictObject({
     path: nonempty.default(DEFAULT_AUDIT_PATH),
     redact: z.literal(true).default(true),
   }).prefault({}),
-  policy: z.strictObject({
-    thresholds,
-    readonly_allow_extra: z.array(nonempty).default([]),
-    hard_deny_extra: z.array(nonempty.refine((value) => {
-      try { new RegExp(value); return true; } catch { return false; }
-    }, 'Must be a valid regular expression')).default([]),
-    sensitive_paths_extra: z.array(nonempty).default([]),
-  }).prefault({}),
+  policy: policySchema,
   log_level: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   // Forwarded addresses are logging metadata only, never management authorization.
   trust_proxy: z.boolean().default(false),

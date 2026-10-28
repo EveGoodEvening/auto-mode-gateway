@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { Action, ActionContext } from '../../src/gate/types.js';
 import { QUESTIONS, THRESHOLDS } from '../../src/policy/constants.js';
 import { buildState } from '../../src/policy/state-builder.js';
+import { resolvePolicy } from '../../src/policy/effective.js';
+import { extractRequestContext } from '../../src/protocols/request-context.js';
+import type { RequestProtocol } from '../../src/protocols/types.js';
+import { anthropicAdapter } from '../../src/protocols/anthropic/adapter.js';
 
 const action: Action = {
   kind: 'command', tool: 'Bash', text: 'git status', paths: [],
@@ -20,17 +24,129 @@ const context: ActionContext = {
       user_request: 'Check the repository',
     });
   });
-  it.each([
-    ['Anthropic', [{ role: 'user', content: [{ type: 'text', text: 'Real request' }, { type: 'tool_result', content: 'TOOL_RESULT' }] }]],
-    ['Responses', [{ role: 'user', content: [{ type: 'input_text', text: 'Real request' }] }]],
-    ['Chat', [{ role: 'user', content: 'Real request' }]],
-  ])('extracts only user text from %s neutral messages', (_protocol, messages) => {
-    const state = buildState(action, { ...context, request: { stream: false, messages: [
-      ...messages, { role: 'assistant', content: 'MODEL_APPROVAL' },
-      { role: 'tool', content: 'TOOL_RESULT' },
-    ] } });
+  const protocolRequests: { protocol: RequestProtocol; body: (text: string) => unknown }[] = [
+    { protocol: 'anthropic-messages', body: text => ({
+      system: 'SYSTEM_APPROVAL', messages: [
+        { role: 'user', content: [{ type: 'text', text }, { type: 'tool_result', content: 'TOOL_RESULT' }] },
+        { role: 'assistant', content: 'MODEL_APPROVAL' },
+      ],
+    }) },
+    { protocol: 'openai-responses', body: text => ({
+      instructions: 'SYSTEM_APPROVAL', input: text,
+    }) },
+    { protocol: 'openai-responses', body: text => ({
+      instructions: 'SYSTEM_APPROVAL', input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text }, { type: 'input_image', image_url: 'IMAGE_DATA' }] },
+        { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'MODEL_APPROVAL' }] },
+        { type: 'function_call_output', call_id: 'call-1', output: 'TOOL_RESULT' },
+      ],
+    }) },
+    { protocol: 'openai-chat', body: text => ({ messages: [
+      { role: 'system', content: 'SYSTEM_APPROVAL' },
+      { role: 'user', content: text },
+      { role: 'assistant', content: 'MODEL_APPROVAL' },
+      { role: 'tool', tool_call_id: 'call-1', content: 'TOOL_RESULT' },
+    ] }) },
+    { protocol: 'openai-chat', body: text => ({ messages: [
+      { role: 'system', content: 'SYSTEM_APPROVAL' },
+      { role: 'user', content: [{ type: 'text', text }, { type: 'image_url', image_url: { url: 'IMAGE_DATA' } }] },
+      { role: 'assistant', content: 'MODEL_APPROVAL', tool_calls: [{ function: { arguments: 'JUSTIFICATION' } }] },
+      { role: 'tool', tool_call_id: 'call-1', content: 'TOOL_RESULT' },
+    ] }) },
+  ];
+  it.each(protocolRequests)('projects genuine encoded $protocol user input only', ({ protocol, body }) => {
+    const bytes = new TextEncoder().encode(JSON.stringify(body('Real request')));
+    const original = bytes.slice();
+    const request = extractRequestContext(protocol, bytes);
+    expect(request).toBeDefined();
+    const state = buildState(action, { ...context, request });
     expect(state.user_request).toBe('Real request');
-    expect(JSON.stringify(state)).not.toMatch(/MODEL_APPROVAL|TOOL_RESULT|justification/);
+    expect(JSON.stringify(state)).not.toMatch(/SYSTEM_APPROVAL|MODEL_APPROVAL|TOOL_RESULT|JUSTIFICATION|IMAGE_DATA|justification/);
+    expect(bytes).toEqual(original);
+  });
+  it.each(protocolRequests)('redacts and caps encoded $protocol user input at the semantic boundary', ({ protocol, body }) => {
+    const request = extractRequestContext(protocol, new TextEncoder().encode(JSON.stringify(body(
+      'client_secret=opaque-private-value ' + 'u'.repeat(1000) + 'UNSEEN_SUFFIX',
+    ))));
+    expect(request).toBeDefined();
+    const state = buildState(action, { ...context, request });
+    expect(state.user_request).toHaveLength(1000);
+    expect(state.user_request).toContain('[REDACTED:');
+    expect(JSON.stringify(state)).not.toMatch(/opaque-private-value|UNSEEN_SUFFIX|MODEL_APPROVAL|TOOL_RESULT/);
+  });
+  it.each(['anthropic-messages', 'openai-responses', 'openai-chat'] as const)(
+    'does not resurrect earlier %s requests after empty or result-only users', protocol => {
+      const textType = protocol === 'openai-responses' ? 'input_text' : 'text';
+      for (const content of ['', [], [{ type: textType, text: '' }], [{ type: 'tool_result', content: 'TOOL_RESULT' }]]) {
+        const messages = [
+          { role: 'user', content: 'EARLIER_REQUEST' },
+          { role: 'user', content },
+          { role: 'assistant', content: 'MODEL_APPROVAL' },
+        ];
+        const body = protocol === 'openai-responses' ? { input: messages } : { messages };
+        const request = extractRequestContext(protocol, new TextEncoder().encode(JSON.stringify(body)));
+        expect(request?.lastUserText).toBe('');
+        const state = buildState(action, { ...context, lastUserText: 'STALE_FALLBACK', request });
+        expect(state.user_request).toBe('');
+        expect(JSON.stringify(state)).not.toMatch(/EARLIER_REQUEST|STALE_FALLBACK|TOOL_RESULT|MODEL_APPROVAL/);
+      }
+    },
+  );
+  it('preserves an encoded empty Responses string rather than a context fallback', () => {
+    const request = extractRequestContext('openai-responses', new TextEncoder().encode('{"input":""}'));
+    expect(request?.lastUserText).toBe('');
+    expect(buildState(action, { request, lastUserText: 'STALE_FALLBACK' }).user_request).toBe('');
+  });
+  it.each(['anthropic-messages', 'openai-responses', 'openai-chat'] as const)(
+    'rejects malformed encoded %s requests without inventing user text', protocol => {
+      for (const raw of ['null', '[]', '{', '"text"']) {
+        expect(extractRequestContext(protocol, new TextEncoder().encode(raw))).toBeUndefined();
+      }
+      expect(extractRequestContext(protocol, new Uint8Array([0xff]))).toBeUndefined();
+    },
+  );
+  it('uses one effective policy for redaction across the complete state', () => {
+    const policy = resolvePolicy({ redaction_patterns: [
+      { type: 'fixture', pattern: { source: 'CONFIDENTIAL', flags: 'g' }, replacement: 'MASK' },
+    ] });
+    const request = extractRequestContext('openai-chat', new TextEncoder().encode(JSON.stringify({
+      messages: [{ role: 'user', content: 'CONFIDENTIAL' }],
+    })));
+    const state = buildState({ ...action, kind: 'file_write', paths: ['/CONFIDENTIAL'], content_excerpt: 'CONFIDENTIAL' }, {
+      ...context, project_dir: '/CONFIDENTIAL', git_branch: 'CONFIDENTIAL', request,
+    }, policy);
+    expect(state.user_request).toBe('MASK');
+    expect(state.action.content_excerpt).toBe('MASK');
+    expect(state.action.path).toEqual(['/MASK']);
+    expect(state.environment.project_dir).toBe('/MASK');
+    expect(state.environment.git_branch).toBe('MASK');
+    expect(JSON.stringify(state)).not.toContain('CONFIDENTIAL');
+  });
+  it.each(protocolRequests)('applies configured smaller projection caps to encoded $protocol state', ({ protocol, body }) => {
+    const policy = resolvePolicy({ user_request_max_chars: 12, write_content_max_bytes: 7 });
+    const request = extractRequestContext(protocol, new TextEncoder().encode(JSON.stringify(body('u'.repeat(30)))));
+    const state = buildState({ ...action, kind: 'file_write', content_excerpt: 'abcd中尾' }, { ...context, request }, policy);
+    expect(state.user_request).toBe('u'.repeat(12));
+    expect(state.action.content_excerpt).toBe('abcd中');
+    expect(Buffer.byteLength(state.action.content_excerpt ?? '')).toBe(7);
+    expect(state.action.content_truncated).toBe(true);
+  });
+  it('enforces final UTF-8 and user caps even when configured redaction expands text', () => {
+    const policy = resolvePolicy({
+      user_request_max_chars: 6, write_content_max_bytes: 7,
+      redaction_patterns: [{ type: 'fixture', pattern: { source: 'X', flags: 'g' }, replacement: '中'.repeat(10) }],
+    });
+    const state = buildState({ ...action, kind: 'file_write', content_excerpt: 'X' }, { lastUserText: 'X' }, policy);
+    expect(state.user_request).toBe('中'.repeat(6));
+    expect(state.action.content_excerpt).toBe('中中');
+    expect(state.action.content_truncated).toBe(true);
+  });
+  it('redacts full write credentials before a visibility cap could split the secret', () => {
+    const policy = resolvePolicy({ write_content_max_bytes: 35 });
+    const state = buildState({ ...action, kind: 'file_write', content_excerpt: 'x'.repeat(15) + ' client_secret=opaque-private-value' }, context, policy);
+    expect(state.action.content_excerpt).not.toContain('opaque');
+    expect(Buffer.byteLength(state.action.content_excerpt ?? '')).toBeLessThanOrEqual(35);
+    expect(state.action.content_truncated).toBe(true);
   });
   it('prefers adapter-extracted actual user text over retained request metadata', () => {
     expect(buildState(action, { ...context, lastUserText: 'fallback', request: {
@@ -47,6 +163,26 @@ const context: ActionContext = {
       { role: 'user', content: 'prior text' },
       { role: 'user', content: [{ type: 'image', source: 'image' }, { type: 'tool_result', content: 'untrusted' }] },
     ] } }).user_request).toBe('');
+  });
+  it.each([
+    ['empty string', ''],
+    ['empty block array', []],
+    ['empty text block', [{ type: 'text', text: '' }]],
+    ['tool-result-only message', [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'TOOL_RESULT' }]],
+  ])('does not resurrect earlier requests after an encoded Anthropic %s', (_label, content) => {
+    const request = anthropicAdapter.extractRequest(new TextEncoder().encode(JSON.stringify({
+      model: 'claude-test', stream: false, max_tokens: 128,
+      messages: [
+        { role: 'user', content: 'EARLIER_REQUEST' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'git status' } }] },
+        { role: 'user', content },
+      ],
+    })));
+    expect(request).toBeDefined();
+    expect(request?.lastUserText).toBe('');
+    const state = buildState(action, { ...context, request });
+    expect(state.user_request).toBe('');
+    expect(JSON.stringify(state)).not.toMatch(/EARLIER_REQUEST|TOOL_RESULT|MODEL_APPROVAL/);
   });
   it('joins text blocks without serializing tool-result or image objects', () => {
     expect(buildState(action, { request: { stream: false, messages: [
@@ -103,6 +239,27 @@ const context: ActionContext = {
       ...context, lastUserText: 'password=supersecret', project_dir: '/project/token=hiddenvalue',
     });
     expect(JSON.stringify(state)).not.toMatch(/abcdefghijklmnop|supersecret|hiddenvalue/);
+  });
+  it.each(['refresh_token', 'client_secret'])('redacts embedded unquoted %s assignments throughout state', (name) => {
+    const secret = `opaque-private-${name}-value`;
+    const assignment = `${name}=${secret}`;
+    const request = anthropicAdapter.extractRequest(new TextEncoder().encode(JSON.stringify({
+      model: 'claude-test', max_tokens: 128,
+      messages: [{ role: 'user', content: `Inspect this inert assignment: ${assignment}` }],
+    })));
+    expect(request).toBeDefined();
+    const stateContext = { ...context, request, git_branch: `fixture/${assignment}` };
+    const commandState = buildState({ ...action, text: `echo ${assignment}` }, stateContext);
+    const writeState = buildState({
+      ...action, kind: 'file_write', paths: ['/project/fixture.txt'],
+      content_excerpt: `inert fixture ${assignment}`,
+    }, stateContext);
+    for (const value of [commandState.action.command, commandState.user_request,
+      commandState.environment.git_branch, writeState.action.content_excerpt, writeState.user_request]) {
+      expect(value).toContain('[REDACTED:');
+      expect(value).not.toContain(secret);
+    }
+    expect(JSON.stringify([commandState, writeState])).not.toContain(secret);
   });
   it('does not mutate normalized input or trusted context arrays', () => {
     const paths = ['/project/a'];

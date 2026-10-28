@@ -96,12 +96,48 @@ audit:
   path: "${AMP_AUDIT_PATH}"
   redact: true
 policy:
+  # Every omitted replacement inherits src/policy/constants.ts. Resolve once;
+  # pass the resulting EffectivePolicy to all pure policy helpers.
+  # version: reviewed-local-pack
+  # questions:
+  #   destructive:
+  #     instructions: Does this action irreversibly damage existing data?
+  #     criteria:
+  #       true: Existing valuable data is irreversibly destroyed.
+  #       false: Only ordinary recoverable project changes are made.
+  # Optional replacements (arrays replace; record entries merge with defaults):
+  # readonly_programs: [pwd, cat]
+  # readonly_git_subcommands: [status]
+  # shell_unsafe_programs: [sudo, env, eval]
+  # shell_interpreters: [sh, bash, python3]
+  # find_unsafe_arguments: [-delete, -exec]
+  # git_unsafe_arguments: [--ext-diff, --textconv]
+  # readonly_unsafe_arguments: { sort: [-o, --output] }
+  # readonly_positional_limits: { uniq: 1 }
+  # download_programs: [curl, wget]
+  # file_write_programs: [tee, cp, mv]
+  # inplace_write_programs: [sed, perl, ruby]
+  # hard_deny_commands: [rm, chmod, dd]
+  # hard_deny_target_patterns: { device: { source: '^/dev/' } }
+  # hard_deny_patterns:
+  #   - id: local-deny
+  #     pattern: { source: forbidden-operation, flags: iu }
+  # sensitive_path_globs: ['**/.env*', '**/*.pem']
+  # redaction_patterns:
+  #   - type: local-credential
+  #     pattern: { source: 'local-credential-[A-Za-z0-9]+', flags: g }
+  # redaction_sensitive_keys: { source: '^local_secret$', flags: i }
+  # Never copy abbreviated replacement lists above blindly: they remove defaults.
+  # These positive limits may be lowered but cannot exceed 1000 / 2048.
+  # user_request_max_chars: 1000
+  # write_content_max_bytes: 2048
   thresholds:
     risk_block: 0.70
     risk_allow: 0.30
     intent_mismatch: 0.30
     intent_risk: 0.50
     outside_scope_allow: 0.50
+  # Extras append AFTER replacements and do not bypass structural safeguards.
   readonly_allow_extra: []
   hard_deny_extra: []
   sensitive_paths_extra: []

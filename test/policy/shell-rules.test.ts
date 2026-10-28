@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Action } from '../../src/gate/types.js';
+import { resolvePolicy } from '../../src/policy/effective.js';
 import { hardDeny } from '../../src/policy/hard-deny.js';
 import { isReadonlyCommand } from '../../src/policy/readonly-allowlist.js';
 import { parseShell } from '../../src/policy/shell-parse.js';
@@ -78,7 +79,9 @@ describe('readonly-allowlist: every segment must be side-effect free', () => {
     ['head -n 20 file.txt', true], ['tail -n 5 file.txt', true], ['wc -l file.txt', true],
     ['grep -n pattern file.txt', true], ['rg --files src', true], ['stat file.txt', true],
     ['find src -type f -name "*.ts"', true], ['git status --short', true],
-    ['git diff --stat', true], ['git log -5 --oneline', true], ['git show HEAD:README.txt', true],
+    ['git --no-pager diff --no-ext-diff --no-textconv --stat', true],
+    ['git --no-pager log --no-ext-diff --no-textconv -5 --oneline', true],
+    ['git --no-pager show --no-ext-diff --no-textconv HEAD:README.txt', true],
     ['git --no-pager status', true], ['ls | head && pwd; wc file.txt', true],
     ['sort file.txt', true], ['uniq file.txt', true], ['file document.txt', true],
     ['ls | rm -rf x', false], ['ls; touch x', false], ['ls && npm install', false],
@@ -101,16 +104,59 @@ describe('readonly-allowlist: every segment must be side-effect free', () => {
     expect(isReadonlyCommand(text)).toBe(expected);
   });
   it('does not grant extras the power to override unsafe syntax', () => {
-    expect(isReadonlyCommand('inspect src', { readonly_allow_extra: ['inspect'] })).toBe(true);
-    expect(isReadonlyCommand('inspect > result', { readonly_allow_extra: ['inspect'] })).toBe(false);
+    const policy = resolvePolicy({ readonly_allow_extra: ['inspect'] });
+    expect(isReadonlyCommand('inspect src', policy)).toBe(true);
+    expect(isReadonlyCommand('inspect > result', policy)).toBe(false);
   });
   it('sensitive reads are not exempt even when their program is readonly', () => {
     for (const text of ['cat .env', 'cat ~/.ssh/id_rsa', 'head server.pem', 'grep token secrets.key']) {
-      expect(isReadonlyCommand(command(text), {}, { project_dir: '/project', workdir: '/project', home_dir: '/home/user' })).toBe(false);
+      expect(isReadonlyCommand(command(text), undefined, { project_dir: '/project', workdir: '/project', home_dir: '/home/user' })).toBe(false);
     }
   });
   it('missing command path context is not proof of a safe read', () => {
     expect(isReadonlyCommand(command('cat README.txt'))).toBe(false);
+  });
+});
+
+describe('git helper execution requires explicit disable guarantees', () => {
+  it.each([
+    'git diff -- src/example.bin',
+    'git log -5 --oneline',
+    'git show HEAD',
+    'git diff --no-ext-diff --no-textconv -- src/example.bin',
+    'git log --no-ext-diff --no-textconv -p -- src/example.bin',
+    'git show --no-ext-diff --no-textconv HEAD -- src/example.bin',
+    'git --no-pager diff -- src/example.bin',
+    'git --no-pager log -p -- src/example.bin',
+    'git --no-pager show HEAD -- src/example.bin',
+    'git --no-pager diff --no-ext-diff -- src/example.bin',
+    'git --no-pager diff --no-textconv -- src/example.bin',
+    'git --no-pager log --no-ext-diff -p -- src/example.bin',
+    'git --no-pager log --no-textconv -p -- src/example.bin',
+    'git --no-pager show --no-ext-diff HEAD -- src/example.bin',
+    'git --no-pager show --no-textconv HEAD -- src/example.bin',
+    'git --no-pager diff -- --no-ext-diff --no-textconv',
+    'git --no-pager log -p -- --no-ext-diff --no-textconv',
+    'git --no-pager show HEAD -- --no-ext-diff --no-textconv',
+    'git --paginate diff --no-ext-diff --no-textconv',
+    'git --no-pager diff --no-ext-diff --no-textconv --textconv',
+    'git --no-pager diff --no-ext-diff --no-textconv --ext-diff',
+  ])('does not exempt helper-capable %j', (text) => {
+    expect(isReadonlyCommand(text)).toBe(false);
+    expect(isReadonlyCommand(command(text), undefined, { project_dir: '/project', workdir: '/project' })).toBe(false);
+  });
+
+  it.each([
+    'git --no-pager diff --no-ext-diff --no-textconv -- src/example.bin',
+    'git --no-pager log --no-ext-diff --no-textconv -p -- src/example.bin',
+    'git --no-pager show --no-ext-diff --no-textconv HEAD -- src/example.bin',
+  ])('preserves explicitly helper-disabled %j', (text) => {
+    expect(isReadonlyCommand(text)).toBe(true);
+    expect(isReadonlyCommand(command(text), undefined, { project_dir: '/project', workdir: '/project' })).toBe(true);
+  });
+
+  it.each(['git status --short', 'git --no-pager status --short'])('preserves safe status %j with known context', (text) => {
+    expect(isReadonlyCommand(command(text), undefined, { project_dir: '/project', workdir: '/project' })).toBe(true);
   });
 });
 
@@ -136,7 +182,7 @@ describe('hard-deny: unconditional destructive and unseen-content barriers', () 
     ['git status', false], ['find src -type f', false],
   ];
   it.each(cases)('%j blocked=%s', (text, expected) => {
-    expect(hardDeny(command(text), {}, { home_dir: '/users/test' }) !== undefined).toBe(expected);
+    expect(hardDeny(command(text), undefined, { home_dir: '/users/test' }) !== undefined).toBe(expected);
   });
   it('rejects a native authorized_keys write without depending on shell syntax', () => {
     expect(hardDeny({ ...command(''), kind: 'file_write', paths: ['/home/a/.ssh/authorized_keys'], content_excerpt: 'key' })).toBe('authorized-keys-write');
@@ -150,9 +196,9 @@ describe('hard-deny: unconditional destructive and unseen-content barriers', () 
   it('blocks unusable execution context before any policy/provider can allow it', () => {
     expect(hardDeny({ ...command(''), execution_unavailable: true })).toBe('execution-unavailable');
   });
-  it('appends configured deny rules and fails closed on malformed patterns', () => {
-    expect(hardDeny(command('deploy production'), { hard_deny_extra: ['^deploy\\s'] })).toBe('configured-hard-deny');
-    expect(hardDeny(command('ls'), { hard_deny_extra: ['['] })).toBe('invalid-hard-deny-pattern');
+  it('appends resolved deny rules and rejects malformed patterns before classification', () => {
+    expect(hardDeny(command('deploy production'), resolvePolicy({ hard_deny_extra: ['^deploy\\s'] }))).toBe('configured-hard-deny');
+    expect(() => resolvePolicy({ hard_deny_extra: ['['] })).toThrow();
   });
 });
 
@@ -169,6 +215,36 @@ describe('wrapped execution remains inert but cannot bypass classification', () 
   });
   it.each(['git grep -Osh pattern', 'git diff --out=result', 'sort --out=result file'])('rejects side effects in %j', (text) => {
     expect(isReadonlyCommand(text)).toBe(false);
+  });
+  it.each([
+    'env TARGET=/tmp/sh rm -rf /',
+    'env TARGET=/tmp/cp rm -rf /',
+    'env TARGET="/tmp/sh" rm -rf /',
+    'env TARGET="/tmp/cp" rm -rf /',
+    'env -i TARGET=/tmp/sh rm -rf /',
+    'env -- TARGET=/tmp/cp rm -rf /',
+    'sudo env TARGET=/tmp/sh rm -rf /',
+    'sudo -u root env TARGET=/tmp/cp rm -rf /',
+    'TARGET=/tmp/sh rm -rf /',
+    'env -u /tmp/sh TARGET=/tmp/cp rm -rf /',
+    'env --unset=/tmp/sh TARGET=/tmp/cp rm -rf /',
+    'sudo --user=/tmp/sh rm -rf /',
+    'sudo -u /tmp/cp rm -rf /',
+    'sudo -uroot env TARGET=/tmp/sh rm -rf /',
+    'nice -n 5 env TARGET=/tmp/sh rm -rf /',
+    'command -- env TARGET=/tmp/sh rm -rf /',
+  ])('does not let wrapper assignment values hide actual rm in %j', (text) => {
+    expect(hardDeny(command(text))).toBe('root-home-delete');
+  });
+  it.each([
+    'env TARGET=/tmp/sh rm -rf build',
+    'env TARGET=/tmp/cp rm -rf build',
+    'cat /tmp/sh -c "rm -rf /"',
+    'cat /tmp/cp rm -rf /',
+    'env TARGET=/tmp/sh cat /tmp/cp rm -rf /',
+    'curl https://example.invalid/data | cat /tmp/sh',
+  ])('does not hard-deny a non-root target solely for assignment basenames in %j', (text) => {
+    expect(hardDeny(command(text))).toBeUndefined();
   });
   it('preserves array arguments without flattening them into new operators', () => {
     const action = { ...command(''), text: undefined, argv: ['rm', '-rf', '/'] };
@@ -188,5 +264,52 @@ describe('root contents and authorized key mutation boundaries', () => {
   });
   it('does not confuse an in-place-capable read with a write', () => {
     expect(hardDeny(command('sed -n 1p ~/.ssh/authorized_keys'))).toBeUndefined();
+  });
+});
+
+describe('resolved policy reaches shell classification boundaries', () => {
+  it('replaces wrapper and interpreter data', () => {
+    const policy = resolvePolicy({ shell_unsafe_programs: ['inspect'], shell_interpreters: ['runtime'] });
+    expect(parseShell('inspect src', policy).reasons).toContain('execution-wrapper');
+    expect(parseShell('runtime script', policy).reasons).toContain('interpreter');
+    expect(parseShell('sh script', policy).unsafe).toBe(false);
+  });
+  it('replaces readonly programs and arguments without relaxing syntax barriers', () => {
+    const policy = resolvePolicy({
+      readonly_programs: ['inspect', 'uniq', 'find'],
+      readonly_unsafe_arguments: { inspect: ['--write'] },
+      readonly_positional_limits: { uniq: 2 }, find_unsafe_arguments: ['-custom-write'],
+    });
+    expect(isReadonlyCommand('pwd', policy)).toBe(false);
+    expect(isReadonlyCommand('inspect src', policy)).toBe(true);
+    expect(isReadonlyCommand('inspect --write src', policy)).toBe(false);
+    expect(isReadonlyCommand('inspect src > out', policy)).toBe(false);
+    expect(isReadonlyCommand('uniq input output', policy)).toBe(true);
+    expect(isReadonlyCommand('find src -custom-write', policy)).toBe(false);
+  });
+  it('replaces Git command/option data without relaxing helper guarantees', () => {
+    const policy = resolvePolicy({ readonly_git_subcommands: ['status', 'diff'], git_unsafe_arguments: ['--short'] });
+    expect(isReadonlyCommand('git status --short', policy)).toBe(false);
+    expect(isReadonlyCommand('git --no-pager rev-parse HEAD', policy)).toBe(false);
+    expect(isReadonlyCommand('git diff', policy)).toBe(false);
+    expect(isReadonlyCommand('git --no-pager diff --no-ext-diff --no-textconv', policy)).toBe(true);
+  });
+  it('uses resolved deny selectors, targets and patterns repeatedly', () => {
+    const policy = resolvePolicy({
+      hard_deny_commands: ['rm'],
+      hard_deny_target_patterns: { root: { source: '^/protected$', flags: 'g' } },
+      hard_deny_patterns: [{ id: 'custom', pattern: { source: '^destroy$', flags: 'g' } }],
+    });
+    for (let call = 0; call < 2; call += 1) {
+      expect(hardDeny(command('rm -rf /protected'), policy)).toBe('root-home-delete');
+      expect(hardDeny(command('destroy'), policy)).toBe('custom');
+      expect(hardDeny(command('chmod -R 777 /protected'), policy)).toBeUndefined();
+    }
+  });
+  it('passes resolved download/interpreter/write rules through wrappers', () => {
+    const policy = resolvePolicy({ download_programs: ['fetch'], shell_interpreters: ['runtime'], file_write_programs: ['publish'], inplace_write_programs: ['edit'] });
+    expect(hardDeny(command('fetch url | env TARGET=/tmp/sh runtime'), policy)).toBe('download-execution');
+    expect(hardDeny(command('publish ~/.ssh/authorized_keys'), policy)).toBe('authorized-keys-write');
+    expect(hardDeny(command('edit -i ~/.ssh/authorized_keys'), policy)).toBe('authorized-keys-write');
   });
 });

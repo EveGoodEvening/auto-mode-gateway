@@ -1,7 +1,7 @@
 import { posix } from 'node:path';
 import type { Action, ActionContext } from '../gate/types.js';
-import { SENSITIVE_PATH_GLOBS } from './constants.js';
-import { parseShell } from './shell-parse.js';
+import { DEFAULT_POLICY, type EffectivePolicy } from './effective.js';
+import { parseShell, shellProgram } from './shell-parse.js';
 
 export interface SensitivePathResult {
   review: boolean;
@@ -41,6 +41,11 @@ export function normalizePolicyPath(path: string, context: ActionContext, workdi
     if (!normalizedBase) return undefined;
     value = `${normalizedBase}/${value}`;
   }
+  // Win32 aliases and NTFS streams are not ordinary lexical spellings. Reject
+  // them before dot-segment normalization can erase an ambiguous component.
+  if (win && value.split('/').some((part, index) =>
+    (part !== '.' && part !== '..' && /[. ]$/.test(part))
+    || (part.includes(':') && !(index === 0 && /^[a-z]:$/i.test(part))))) return undefined;
   // Preserve the UNC share root; node:path.posix would collapse its double slash.
   const unc = value.startsWith('//');
   value = posix.normalize(value);
@@ -70,17 +75,35 @@ function matchesSensitive(path: string, globs: readonly string[], win: boolean):
   return globs.some((glob) => globPattern((win ? glob.toLowerCase() : glob).replaceAll('\\', '/').replace(/^\//, '')).test(path));
 }
 
+function recursiveSearch(argv: readonly string[]): boolean {
+  const program = shellProgram(argv[0] ?? '');
+  if (program === 'rg' || program === 'find') return true;
+  if (program !== 'grep') return false;
+  for (let index = 1; index < argv.length; index++) {
+    const arg = argv[index]!;
+    if (arg === '--') break;
+    if (/^-[^-]*[rR]/.test(arg)) return true;
+    const [option = '', value] = arg.split('=', 2);
+    if (option.length > 2 && ['--recursive', '--dereference-recursive'].some((flag) => flag.startsWith(option))) return true;
+    if (option.length > 2 && '--directories'.startsWith(option) && (value ?? argv[index + 1]) === 'recurse') return true;
+    if (/^-[^-]*d/.test(arg) && (arg.slice(arg.indexOf('d') + 1) || argv[index + 1]) === 'recurse') return true;
+  }
+  return false;
+}
+
 /** Run before native/shell readonly exemptions. `review:false` is only a lexical
  * non-match, never an authorization or a claim that symlinks were resolved.
  */
-export function sensitivePaths(action: Action, context: ActionContext, extra: readonly string[] = []): SensitivePathResult {
+export function sensitivePaths(action: Action, context: ActionContext, policy: EffectivePolicy = DEFAULT_POLICY): SensitivePathResult {
   const reasons = new Set<string>();
   const candidates = new Set(action.paths);
+  let directoryScope = action.recognized_exemption === 'grep' || action.recognized_exemption === 'glob';
   if (action.kind === 'command') {
-    const parsed = !action.argv && action.text ? parseShell(action.text) : undefined;
+    const parsed = !action.argv && action.text ? parseShell(action.text, policy) : undefined;
     const segments = action.argv ? [{ argv: action.argv }] : parsed?.segments ?? [];
     if (!action.argv && (!parsed?.valid || parsed.unsafe)) reasons.add('unresolved_shell_paths');
     for (const { argv } of segments) {
+      directoryScope ||= recursiveSearch(argv);
       for (const arg of argv.slice(1)) {
         if (arg && !arg.startsWith('-')) candidates.add(arg);
         else if (arg.includes('=')) candidates.add(arg.slice(arg.indexOf('=') + 1));
@@ -91,6 +114,10 @@ export function sensitivePaths(action: Action, context: ActionContext, extra: re
   if (candidates.size === 0 && (action.kind === 'file_write' || ['read', 'glob', 'grep', 'ls'].includes(action.recognized_exemption ?? ''))) {
     reasons.add('missing_path_context');
   }
+  // Recursive/native searches may encounter sensitive descendants even when
+  // their literal scope does not match a glob. No filesystem or exclusion
+  // evidence is available here, so a possible directory scope needs review.
+  if (directoryScope && policy.sensitive_path_globs.length > 0) reasons.add('sensitive_path_scope');
   const project = context.project_dir ? normalizePolicyPath(context.project_dir, context) : undefined;
   const paths: string[] = [];
   for (const candidate of candidates) {
@@ -101,7 +128,7 @@ export function sensitivePaths(action: Action, context: ActionContext, extra: re
     }
     paths.push(path);
     if (/[*?[\]{}]/.test(path)) reasons.add('unresolved_path_pattern');
-    if (matchesSensitive(path, [...SENSITIVE_PATH_GLOBS, ...extra], windows(context, candidate))) reasons.add('sensitive_path');
+    if (matchesSensitive(path, policy.sensitive_path_globs, windows(context, candidate))) reasons.add('sensitive_path');
     if (action.kind === 'file_write' && (!project || (path !== project && !path.startsWith(project.endsWith('/') ? project : `${project}/`)))) {
       reasons.add(project ? 'outside_project_write' : 'missing_project_context');
     }

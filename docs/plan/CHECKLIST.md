@@ -74,24 +74,27 @@
   - 定义 `Action{kind:"command"|"file_write"|"url"|"mcp"|"other", tool, argv?, text?, paths[], content_excerpt?, content_truncated:boolean, recognized_exemption?, workdir?, raw}`。Claude Code：Bash→command；Write/Edit/MultiEdit/NotebookEdit→file_write，提取 file_path/notebook_path，UTF-8 完整内容 ≤2 KiB 才可送审，超出保留 excerpt + truncated 标记并直接 block；WebFetch/WebSearch→url；mcp__*→mcp；Read/Glob/Grep/LS→other 但必须保留路径，敏感或上下文不足不能认作非敏感豁免；TodoWrite/Task 保留豁免，Task 委派执行为显式残余风险、所有后续可见调用仍过闸门。Codex：exec_command/shell/shell_command→command（字符串/数组 cmd）；local_shell_call→action.command[]；write_stdin→chars（无法关联会话则 review/block）；sandbox_permissions/justification 仅审计；apply_patch→file_write，解析 Add/Update/Delete File 路径、Delete 为 destructive 候选。WorkBuddy tool_map 优先，其次名称/描述 shell|bash|command|terminal|exec|run + command|cmd|script 字符串判 command，path+content 判 file_write；可见 command/path 或不可解析执行输入归一为相应待审动作，不能因未知工具名或 other 映射被抹掉，缺失可用执行上下文则 block。其余泛化 other 及显式 tool_map other 保留原直接 allow；隐藏能力或映射错误可能逃过识别是已记录残余风险，不改成一律 review。
   - 位置：`src/gate/types.ts`、`src/gate/normalize/{index,claude-code,codex,workbuddy,apply-patch}.ts`。
   - 完成标准：表驱动单测覆盖每种工具与边界（数组 cmd、空输入、patch 多文件）、泛化 other/显式 tool_map other 直接 allow、可见 command/path 与不可解析执行输入不误落 other、敏感读不因 other 豁免。
+  - Review corrections implemented and parent-verified: malformed recognizable paths unavailable, supported patch grammar validated. Full1097test gates and inert API smoke passed; independent correction review underway.
 
 - [x] P2-2 策略常量模块
   - 单一文件集中：`POLICY_VERSION`、六个 noul 问题的 `instructions` 与 `criteria.true/false` 初稿（`destructive`、`exfiltration`、`remote_code_exec`、`security_weakening`、`outside_scope`、`matches_user_request`，正向措辞、一题一条件、false 侧写具体情形）、阈值常量（0.70 / 0.30 / 0.50）、只读程序集合、硬拒绝正则、敏感路径 glob、脱敏正则。所有值可被 `config.policy.*` 追加或覆盖。
   - 位置：`src/policy/constants.ts`。
   - 完成标准：模块无逻辑只含数据；`docs/tuning.md` 引用该文件作为唯一调参入口。
+  - Full constants-backed effective-policy overrides and current consumers implemented; strict RegexSpec/questions/caps schema, shared DEFAULT_POLICY/resolvePolicy, replacement-plus-extra semantics tested through actual consumers. Parent full1097test gates and override smoke passed; independent correction review underway.
 
 - [x] P2-3 Shell 解析与确定性规则
   - `shell-parse.ts`：用 `shell-quote` 分词，按 `|`、`;`、`&&`、`||` 切段，检测重定向、`$()`/反引号、`eval`、`sudo`、`xargs`、`sh -c`/`bash -c`、`env`/`nohup` 前缀、base64 解码后执行。`readonly-allowlist.ts`：仅当所有段的程序在只读集合且无上述构造且 `find` 无 `-delete/-exec`、`git` 子命令在只读子集时返回 allow。`hard-deny.ts`：`rm -rf /`、`rm -rf ~`、`mkfs`、`dd of=/dev/*`、fork bomb、`chmod -R 777 /`、写 `~/.ssh/authorized_keys`、`curl|sh`、`wget|bash` 等。`sensitive-paths.ts`：项目目录外写入、`.claude/settings*`、`.claude/hooks`、`.codex/`、`.git/hooks/*`、`.github/workflows/*`、`package.json`、`.env*`、`*.pem`、`*.key` 命中返回 review。`redact.ts`：API key、Bearer token、密码参数、PEM 块、连接串替换为 `[REDACTED:<type>]`。
   - 敏感检查必须在任何 shell/原生只读豁免之前；敏感读取包括 `.env*`、`~/.ssh/id_*`、`*.pem`、`*.key`。新增 shell/native Read/Grep/Glob 对应回归，路径或解析上下文不足不可认作已确认非敏感。
   - 位置：`src/policy/{shell-parse,readonly-allowlist,hard-deny,sensitive-paths,redact}.ts`。
   - 完成标准：每个模块表驱动测试 ≥ 30 条用例；`ls | rm -rf x` 不被白名单放行；`cat ~/.ssh/id_rsa` 进入 review。
+  - All recorded review defect families reproduced before fixes then parent-verified: Git helpers/wrapper assignments, Windows aliases/recursive scopes, embedded refresh/client credentials. Full1097test gates and direct inert API smoke passed; independent correction review underway.
 
-- [ ] P2-4 决策 state 构造
+- [x] P2-4 决策 state 构造
   - `buildState(action, ctx)` 返回对象 `{action:{tool, command|path+content_excerpt|url, workdir}, environment:{platform, project_dir, trusted_directories, git_branch?}, user_request}`。`user_request` 取最后一条用户文本（Anthropic：最后一个 role=user 的 text 块；Responses：最后一个 user message 的 `input_text`；Chat：最后一条 user content），截断 1000 字符。绝不包含助手文本、tool_result、Codex `justification`。
   - 写 state 增加 `content_truncated`；截断写 fail-closed，不允许完整内容摘要替代模型未见内容；危险后缀位于字节 2048 之后的 fixture 必须 block（即使 provider 返回安全或配置 fail-open）。
   - 位置：`src/policy/state-builder.ts`。
   - 完成标准：单测断言三种协议的提取与截断，以及排除项不出现。
-  - C06 parent full gates passed659tests; direct inert-input API smoke confirmed safe readonly, dangerous pipeline deny, sensitive key read review, oversized write deny and state redaction. Initial abbreviated output-option bugs reproduced by2failing tests then fixed. Independent review underway, including actual three-protocol user-text extraction and config-override accounting before P2-4 completion.
+  - Actual encoded Anthropic/Responses string+array/Chat extraction through buildState implemented and tested, latest empty/result-only user preserved, redaction/exclusions/caps verified. Parent pre-fix targeted suites218failures (`artifact://111`) then corrected full1097tests passed; direct raw3protocol smoke passed. Independent correction review underway.
 
 - [ ] P2-5 System One 决策适配器
   - 实现 `DecisionProvider` 接口 `decide(state, questions) → Answers{[id]: probability}`。请求 `{model, state, questions}`；鉴权 `Authorization: Bearer`；支持 `headers` 追加（Cloudflare `cf-aig-gateway-id`）；`envelope:"cloudflare"` 时解包 `{result, success, errors}`；超时取 `gate.provider_timeout_ms`；429/529 重试一次（遵守 `retry-after`）；记录 `usage.input_tokens` 与成本估算（按 provider 配置单价，默认 Jev $0.042/M）。
