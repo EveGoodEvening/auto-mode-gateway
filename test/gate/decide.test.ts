@@ -1,0 +1,193 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { configSchema } from '../../src/config/schema.js';
+import type { Answers, DecisionProvider, DecisionResult } from '../../src/decision/types.js';
+import { createGate, thresholdOutcome } from '../../src/gate/decide.js';
+import type { Action, GateContext } from '../../src/gate/types.js';
+import { resolvePolicy } from '../../src/policy/effective.js';
+
+function config() {
+  return configSchema.parse({
+    routes: [{ prefix: '/', protocol: 'anthropic-messages', upstream: 'mock' }],
+    upstreams: { mock: { base_url: 'http://127.0.0.1:1234', api_key: 'literal-upstream-credential' } },
+    decision: { chain: ['one'], providers: { one: { kind: 'systemone', base_url: 'http://127.0.0.1:1235', model: 'inert', api_key: 'literal-provider-credential' } } },
+  });
+}
+const safe: Answers = { destructive: 0.1, exfiltration: 0.1, remote_code_exec: 0.1, security_weakening: 0.1, outside_scope: 0.1, matches_user_request: 0.9 };
+const action: Action = { kind: 'command', tool: 'Bash', text: 'npm install inert', paths: [], content_truncated: false, raw: { justification: 'ASSISTANT_APPROVAL', result: 'TOOL_RESULT' } };
+const ctx: GateContext = { platform: 'linux', project_dir: '/project', workdir: '/project', trusted_directories: ['/project'], home_dir: '/home/client', lastUserText: 'Install inert' };
+function provider(answers = safe, id = 'one') {
+  const decide = vi.fn(async (): Promise<DecisionResult> => ({ answers: { ...answers }, provider: id, model: 'inert', latency_ms: 0, usage: { input_tokens: 10 }, cost_usd: 0.01 }));
+  return { id, decide };
+}
+const audit = vi.fn();
+afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
+
+describe('threshold precedence and exact boundaries', () => {
+  const policy = resolvePolicy();
+  it.each([
+    [{ destructive: 0.7 }, 'block'], [{ destructive: 0.699999 }, 'uncertain'],
+    [{ destructive: 0.5, matches_user_request: 0.3 }, 'block'],
+    [{ destructive: 0.499999, matches_user_request: 0.3 }, 'uncertain'],
+    [{ destructive: 0.5, matches_user_request: 0.300001 }, 'uncertain'],
+    [{ destructive: 0.3, outside_scope: 0.5 }, 'allow'],
+    [{ destructive: 0.300001 }, 'uncertain'], [{ outside_scope: 0.500001 }, 'uncertain'],
+  ] as const)('classifies %j as %s', (scores, outcome) => {
+    expect(thresholdOutcome({ ...safe, ...scores }, policy)).toBe(outcome);
+  });
+  it.each(['destructive', 'exfiltration', 'remote_code_exec', 'security_weakening'] as const)('blocks each risk dimension: %s', (risk) => {
+    expect(thresholdOutcome({ ...safe, [risk]: 0.7 }, policy)).toBe('block');
+  });
+  it('honors resolved threshold overrides and block-before-allow precedence', () => {
+    expect(thresholdOutcome(safe, resolvePolicy({ thresholds: { risk_block: 0.1, risk_allow: 1, intent_mismatch: 0.3, intent_risk: 0.5, outside_scope_allow: 1 } }))).toBe('block');
+  });
+});
+
+describe('gate branches and audit', () => {
+  it.each([
+    [{ ...action, text: 'rm -rf /' }, 'root-home-delete'],
+    [{ ...action, kind: 'other' as const, execution_unavailable: true }, 'execution-unavailable'],
+    [{ ...action, kind: 'file_write' as const, paths: ['/project/note'], content_truncated: true }, 'content-truncated'],
+    [{ ...action, kind: 'file_write' as const, paths: ['/project/note'], content_excerpt: 'a'.repeat(2048) + 'rm -rf /' }, 'content-truncated'],
+  ])('blocks structural/hard barrier before fail-open %s', async (input, rule) => {
+    const cfg = config(); cfg.gate.on_provider_failure = 'allow';
+    const p = provider();
+    const gate = createGate(cfg, { providers: [p], audit });
+    expect(await gate.decide(input, ctx)).toMatchObject({ outcome: 'block', rule });
+    expect(p.decide).not.toHaveBeenCalled(); expect(audit).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    { ...action, kind: 'other' as const, text: undefined, paths: [] },
+    { ...action, kind: 'other' as const, text: undefined, recognized_exemption: 'todo' as const },
+    { ...action, kind: 'other' as const, text: undefined, recognized_exemption: 'task' as const },
+    { ...action, kind: 'other' as const, text: undefined, paths: ['/project/note.txt'], recognized_exemption: 'read' as const },
+    { ...action, text: 'pwd' },
+  ])('allows non-sensitive genuine other and recognized exemptions', async (input) => {
+    const p = provider(); const gate = createGate(config(), { providers: [p], audit });
+    expect((await gate.decide(input, ctx)).outcome).toBe('allow');
+    expect(p.decide).not.toHaveBeenCalled();
+  });
+  it.each([
+    { ...action, text: 'cat ~/.ssh/id_rsa' },
+    { ...action, kind: 'other' as const, paths: ['/project/.env'], recognized_exemption: 'read' as const },
+    { ...action, kind: 'other' as const, paths: ['/project/.env'] },
+  ])('reviews sensitive paths before any exemption', async (input) => {
+    const p = provider({ ...safe, exfiltration: 0.9 });
+    expect(await createGate(config(), { providers: [p], audit }).decide(input, ctx)).toMatchObject({ outcome: 'block', provider: 'one' });
+    expect(p.decide).toHaveBeenCalledTimes(1);
+  });
+  it('retains raw gray and blocks it even with configured fail-open', async () => {
+    const cfg = config(); cfg.gate.on_provider_failure = 'allow';
+    const gate = createGate(cfg, { providers: [provider({ ...safe, destructive: 0.4 })], audit });
+    expect(await gate.decide(action, ctx)).toMatchObject({ outcome: 'block', raw_outcome: 'uncertain', rule: 'gray-block' });
+    expect(gate.stats()).toMatchObject({ decisions: 1, block: 1, uncertain: 1 });
+  });
+  it('redacts configured literals before truncation and excludes raw assistant/results', async () => {
+    const p = provider(); const gate = createGate(config(), { providers: [p], audit });
+    await gate.decide({ ...action, text: 'echo literal-upstream-credential literal-provider-credential' }, { ...ctx, lastUserText: 'x'.repeat(990) + 'literal-provider-credential' });
+    const state = p.decide.mock.calls[0];
+    const serialized = JSON.stringify(state);
+    expect(serialized).not.toContain('literal-provider');
+    expect(serialized).not.toContain('literal-upstream');
+    expect(serialized).not.toContain('ASSISTANT_APPROVAL');
+    expect(serialized).not.toContain('TOOL_RESULT');
+  });
+  it('permits exactly 2048 UTF-8 bytes to reach review without approving an unseen suffix', async () => {
+    const p = provider();
+    const write: Action = { ...action, kind: 'file_write', paths: ['/project/note'], content_excerpt: 'a'.repeat(2048) };
+    expect(await createGate(config(), { providers: [p], audit }).decide(write, ctx)).toMatchObject({ outcome: 'allow', provider: 'one' });
+    expect(p.decide).toHaveBeenCalledTimes(1);
+  });
+  it('audits every cached/rule/model verdict exactly once and isolates sink failure', async () => {
+    const sink = vi.fn(() => { throw new Error('disk failure'); });
+    const gate = createGate(config(), { providers: [provider()], audit: sink });
+    await gate.decide(action, ctx); await gate.decide(action, ctx); await gate.decide({ ...action, text: 'pwd' }, ctx);
+    expect(sink).toHaveBeenCalledTimes(3); expect(gate.stats()).toMatchObject({ decisions: 3, allow: 3, cache_hits: 1 });
+    await gate.flushAudit();
+  });
+});
+
+describe('failure, cancellation and cache boundaries', () => {
+  it('hard-denies without constructing an unsupported configured adapter', async () => {
+    const cfg = config(); cfg.decision.providers.one!.kind = 'openai-decisions';
+    const gate = createGate(cfg, { audit });
+    expect(await gate.decide({ ...action, text: 'rm -rf /' }, ctx)).toMatchObject({ outcome: 'block', rule: 'root-home-delete' });
+    expect(gate.stats().provider_failures).toBe(0);
+  });
+  it.each([['one', 'future'], ['future', 'one']])('reaches real SystemOne with chain %j', async (...chain) => {
+    const cfg = config();
+    cfg.decision.providers.future = { ...cfg.decision.providers.one!, kind: 'openai-decisions' };
+    cfg.decision.chain = chain;
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      answers: Object.fromEntries(Object.entries(safe).map(([id, noul]) => [id, { type: 'noul', noul }])),
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    try {
+      const gate = createGate(cfg, { audit });
+      expect(await gate.decide(action, ctx)).toMatchObject({ outcome: 'allow', provider: 'one' });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(gate.stats().provider_health.future?.failures).toBe(chain[0] === 'future' ? 1 : 0);
+    } finally { fetch.mockRestore(); }
+  });
+  it.each([NaN, Infinity, -0.01, 1.01, undefined])('fails over malformed probability %s and tracks health', async (score) => {
+    const invalid = provider({ ...safe, destructive: score } as Answers, 'bad'); const good = provider(safe, 'good');
+    const gate = createGate(config(), { providers: [invalid, good], audit });
+    expect(await gate.decide(action, ctx)).toMatchObject({ outcome: 'allow', provider: 'good' });
+    expect(gate.stats().provider_health).toEqual({ bad: { failures: 1, successes: 0 }, good: { failures: 0, successes: 1 } });
+  });
+  it.each(['block', 'allow'] as const)('uses explicit provider failure %s without caching failure', async (failure) => {
+    const cfg = config(); cfg.gate.on_provider_failure = failure;
+    const p = provider(); p.decide.mockRejectedValue(new Error('private-provider-error'));
+    const gate = createGate(cfg, { providers: [p], audit });
+    expect(await gate.decide(action, ctx)).toMatchObject({ outcome: failure, rule: 'provider-unavailable' });
+    await gate.decide(action, ctx); expect(p.decide).toHaveBeenCalledTimes(2);
+  });
+  it('caller abort can never fail open, even if provider ignores abort', async () => {
+    const cfg = config(); cfg.gate.on_provider_failure = 'allow';
+    const controller = new AbortController();
+    const p: DecisionProvider = { id: 'one', decide: () => Promise.withResolvers<DecisionResult>().promise };
+    const gate = createGate(cfg, { providers: [p], audit });
+    const work = gate.decide(action, { ...ctx, signal: controller.signal }); controller.abort();
+    expect(await work).toMatchObject({ outcome: 'block', rule: 'caller-aborted' });
+    expect(await gate.decide(action, { ...ctx, signal: controller.signal })).toMatchObject({ outcome: 'block' });
+  });
+  it('bounds an ignoring provider to 60 seconds and aborts its signal', async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    const p: DecisionProvider = { id: 'one', decide: (_state, _questions, options) => { signal = options?.signal; return Promise.withResolvers<DecisionResult>().promise; } };
+    const gate = createGate(config(), { providers: [p], audit }); const work = gate.decide(action, ctx);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await work).toMatchObject({ outcome: 'block', rule: 'decision-timeout' }); expect(signal?.aborted).toBe(true);
+  });
+  it('reuses only complete successes and returns independent verdict objects', async () => {
+    const p = provider(); const gate = createGate(config(), { providers: [p], audit });
+    const first = await gate.decide(action, ctx); first.reasons.push('poison'); first.probabilities!.destructive = 1;
+    expect(await gate.decide(action, ctx)).toMatchObject({ outcome: 'allow', cache_hit: true, cost_usd: 0, probabilities: safe });
+    expect(p.decide).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    { lastUserText: 'different user intent' }, { project_dir: '/different' },
+    { trusted_directories: ['/different'] }, { workdir: '/different' },
+    { platform: 'windows' }, { git_branch: 'other' },
+  ])('does not cross effective context %j', async (change) => {
+    const p = provider(); const gate = createGate(config(), { providers: [p], audit });
+    await gate.decide(action, ctx); await gate.decide(action, { ...ctx, ...change });
+    expect(p.decide).toHaveBeenCalledTimes(2);
+  });
+  it('isolates full-content digests, action identity and expiry', async () => {
+    let time = 0; const p = provider(); const gate = createGate(config(), { providers: [p], audit, now: () => time });
+    const write: Action = { ...action, kind: 'file_write', paths: ['/project/note'], content_excerpt: 'inert', content_digest: 'first' };
+    await gate.decide(write, ctx); await gate.decide({ ...write, content_digest: 'second' }, ctx);
+    await gate.decide({ ...write, tool: 'OtherWrite' }, ctx);
+    time = 600_000; await gate.decide(write, ctx); expect(p.decide).toHaveBeenCalledTimes(4);
+  });
+  it('isolates config instances, credential changes, policy, provider order and shadow/enforce', async () => {
+    const p = provider(); const cfg = config();
+    const first = createGate(cfg, { providers: [p], audit }); await first.decide(action, ctx);
+    cfg.gate.mode = 'shadow'; cfg.policy.version = 'changed'; cfg.decision.providers.one!.api_key = 'changed-secret';
+    const shadow = createGate(cfg, { providers: [p], audit }); await shadow.decide(action, ctx);
+    cfg.gate.mode = 'enforce';
+    const enforce = createGate(cfg, { providers: [p], audit }); await enforce.decide(action, ctx);
+    expect(p.decide).toHaveBeenCalledTimes(3);
+    expect(audit.mock.calls[1]?.[0]).toMatchObject({ delivery: 'shadow' });
+    expect((await first.decide(action, ctx)).cache_hit).toBe(true);
+  });
+});

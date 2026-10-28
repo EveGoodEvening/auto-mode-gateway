@@ -5,6 +5,8 @@ import pkg from '../../package.json' with { type: 'json' };
 import { registerInitCommand } from './init.js';
 import { registerTokenCommand } from './token.js';
 import { registerServeCommand } from './serve.js';
+import { registerCheckCommand } from './check.js';
+import { registerAuditCommand } from './audit.js';
 
 const program = new Command();
 
@@ -16,6 +18,8 @@ program
 registerInitCommand(program);
 registerTokenCommand(program);
 registerServeCommand(program);
+registerCheckCommand(program);
+registerAuditCommand(program);
 
 try {
   await program.parseAsync();

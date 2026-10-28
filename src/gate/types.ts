@@ -1,3 +1,4 @@
+import type { Answers } from '../decision/types.js';
 import type { Config } from '../config/schema.js';
 import type { RequestContext, ToolCall } from '../protocols/types.js';
 
@@ -35,4 +36,45 @@ export interface Action {
   destructive?: boolean;
   execution_unavailable?: boolean;
   raw: ToolCall['raw'];
+}
+
+export interface GateContext extends ActionContext {
+  signal?: AbortSignal;
+  route?: string;
+  protocol?: Protocol;
+  agent_hint?: string;
+  session_id?: string;
+  delivery?: 'safeguard' | 'rewrite' | 'shadow' | 'passthrough';
+}
+
+export type Outcome = 'allow' | 'block' | 'uncertain';
+export interface Verdict {
+  outcome: Outcome;
+  reasons: string[];
+  probabilities?: Answers;
+  provider?: string;
+  rule?: string;
+  latency_ms: number;
+  cost_usd: number | null;
+  policy_version: string;
+  raw_outcome?: Outcome;
+  cache_hit?: boolean;
+  input_tokens?: number;
+  output_tokens?: number;
+}
+
+export interface GateStats {
+  decisions: number;
+  allow: number;
+  block: number;
+  uncertain: number;
+  cache_hits: number;
+  provider_failures: number;
+  provider_health: Record<string, { successes: number; failures: number }>;
+}
+
+export interface Gate {
+  decide(action: Action, context: GateContext): Promise<Verdict>;
+  stats(): GateStats;
+  flushAudit(): Promise<void>;
 }

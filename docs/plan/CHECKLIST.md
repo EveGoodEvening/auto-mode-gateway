@@ -100,21 +100,24 @@
   - 实现 `DecisionProvider` 接口 `decide(state, questions) → Answers{[id]: probability}`。请求 `{model, state, questions}`；鉴权 `Authorization: Bearer`；支持 `headers` 追加（Cloudflare `cf-aig-gateway-id`）；`envelope:"cloudflare"` 时解包 `{result, success, errors}`；超时取 `gate.provider_timeout_ms`；429/529 重试一次（遵守 `retry-after`）；记录 `usage.input_tokens` 与成本估算（按 provider 配置单价，默认 Jev $0.042/M）。
   - 位置：`src/decision/{types,systemone,http}.ts`。
   - 完成标准：mock HTTP 单测覆盖四种 URL 形态、信封解包、超时、重试；`check` 命令对真实 provider 成功。
+  - C07 local adapter/check verified with full1331test gates and actual built check against loopback provider. Full task remains unchecked: real-provider canary blocked by absent configured provider keys/default config; exact observed prerequisites in PROGRESS/docs/compat.
 
 - [ ] P2-6 调查：OpenRouter 与 Cloudflare 的请求细节
   - 对 `https://openrouter.ai/api/v1/systemone` 分别用 `typesafe/jev-1.14` 与 `jev-latest` 发 canary；若 `/systemone` 两者都拒绝，则 OpenRouter provider 改为 `kind:"systemone"` + `base_url: https://openrouter.ai/api/alpha/decisions`（同 schema，允许 `body_extra.provider`）。对 Cloudflare REST 发 canary：若响应为 `{result,...}` 信封则默认 `envelope:"cloudflare"`，若直接返回 System One 响应则 `envelope` 自动探测（存在 `answers` 顶层即视为无信封）。
   - 位置：结论写入 `docs/compat.md` 与 `deploy/config.example.yaml` 注释。
   - 完成标准：两家 provider 的 `check` 均返回有效概率；文档记录实测模型 ID 与端点。
+  - [blocked] Both real canary investigations require provisioned OpenRouter key and Cloudflare token/account/endpoint. Safe presence probes found those environment values and active config absent. No accepted model/path/envelope is fabricated; mock support implemented and verified separately.
 
-- [ ] P2-7 判定管线与缓存
+- [x] P2-7 判定管线与缓存
   - `decide(action, ctx) → Verdict{outcome:"allow"|"block"|"uncertain", reasons[], probabilities?, provider?, rule?, latency_ms, cost_usd}`：截断/不可用执行动作安全检查 → 硬拒绝 → 敏感路径标记 → 非敏感只读/管理豁免及泛化 other 直接 allow → 缓存 → 决策链 → 阈值。敏感标记跳过豁免而进入 review；真正泛化 other（含显式 tool_map other）保留原直接 allow，不以未知名称或无执行语义上下文本身为 block 理由；可见 command/path 与不可解析执行输入由 P2-1 先归一为相应待审动作。P4-3 前 uncertain 一律 block；P4-3 后二审确实不可用才应用 on_provider_failure。缓存保留 action/POLICY_VERSION/chain IDs、TTL 600 s/LRU 10000，并加入完整本地内容摘要、有效脱敏 state、policy/provider/二审配置和模式/故障策略隔离；不缓存故障 allow，原始凭证不进键或日志。
   - 位置：`src/gate/decide.ts`、`src/gate/cache.ts`、`src/decision/chain.ts`。
   - 完成标准：单测覆盖每条分支、failover、缓存命中、fail-closed/fail-open。
 
-- [ ] P2-8 审计日志
+- [x] P2-8 审计日志
   - JSONL 追加写（异步、失败不影响请求）；记录 `ts, route, protocol, agent_hint(user-agent/x-claude-code-request-class), session_id(x-claude-code-session-id 或 x-codex-* 或无), tool, action(脱敏), rule, provider, probabilities, verdict, delivery("safeguard"|"rewrite"|"shadow"|"passthrough"), latency_ms, cost_usd, policy_version`；`audit tail` 命令按行格式化输出。
   - 位置：`src/audit/{logger,record}.ts`、`src/cli/audit.ts`。
   - 完成标准：集成测试后文件可被逐行 `JSON.parse`；grep 不到任何 token/key 明文。
+  - C07 parent typecheck/lint/test/build passed1331tests with maxWorkers2. Direct actual pipeline smoke: built check success on mock, model allow then cache allow, harddeny block,2total provider calls including canary,3JSONL audit records, configured secrets absent. Actual built audit tail returned parseable block record. Independent review underway; no live provider/HTTP-gate acceptance claimed.
 
 ### Phase 3：Claude Code 投递与改道
 
