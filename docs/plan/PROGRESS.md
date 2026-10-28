@@ -2,7 +2,7 @@
 
 ## Status and evidence
 
-- Independent final plan gate: **CLEAN** in both accounting/dependency and security/feasibility reviews (`agent://plan-final-gate-1`, `agent://plan-final-gate-2`). Original generic-other policy retained; proposed narrowing DISCARDED. C01 authorized after planning commit. Implementation and acceptance remain unchecked; no implementation verification claimed.
+- Independent final plan gate: **CLEAN** in both accounting/dependency and security/feasibility reviews (`agent://plan-final-gate-1`, `agent://plan-final-gate-2`). Original generic-other policy retained; proposed narrowing DISCARDED. C01 authorized after planning commit. P0-1 local bootstrap gates are now parent-verified; P0-2 and full P0-3 acceptance remain pending. C01 implementation-review fixes and re-review are pending, distinct from the completed planning gate.
 - Actual root: `/root/github.com/EveGoodEvening/auto-mode-gateway`; initial commit supplied by assignment: `ca125a8`. Product/bin remains `auto-mode-proxy`. Only root `AGENTS.md` and planning artifacts existed at research time.
 - Research record includes AGENTS, full DESIGN/CHECKLIST and implementation-context reports from original planner; earlier correction read the original plan-review reports, and this dependency-coupled correction read both plan-rereview reports and relevant sections of the three artifacts. All task IDs and external acceptance retained; original P2-1/P2-7 generic other semantics restored, sensitive-read ordering tied to existing P2-3 acceptance, all other accepted corrections retained.
 - Context-1 registry observations: TypeScript latest 7.0.2 conflicts with the source TypeScript 5 choice and typescript-eslint 8.72.1 peer `<6.1.0`; parser latest 4.1.3 is not the requested v3. C01 selects highest compatible stable TypeScript 5.x and parser v3, Node 24 types, compatible ESLint/plugins, and commits exact versions/lock. Document deviations before approving them, not after silent installation. tsup 9 requires Node `^22.18 || ^24.11 || >=26`; if selected, engines must express the actual supported Node 24 floor, not falsely promise 24.0 compatibility.
@@ -57,11 +57,11 @@ The dispositions below record reviewed plan-level decisions, not implementation 
 | review-2 #7 gray metrics | R7a exact full-label denominators/raw uncertain/effective block, honest failure; C12/14. |
 | review-2 operations notes | R1 precedence retained; R2 generic other/explicit other and named exemptions with exact residual risks; R3 shadow/enforce regression; R4 raw frames; R5 bounded evidence-triggered selective replay; C08 shared-path ownership made exact below. |
 
-Final independent reviewers inspected all three restored artifacts and returned CLEAN (`agent://plan-final-gate-1`, `agent://plan-final-gate-2`). C01 is dependency-ready. No implementation checks/tests/lint/format/build were run during planning; all acceptance remains pending.
+Final independent plan reviewers inspected all three restored artifacts and returned CLEAN (`agent://plan-final-gate-1`, `agent://plan-final-gate-2`). No implementation checks/tests/lint/format/build were run during planning. Subsequent C01 implementation evidence appears below; planning review alone does not establish implementation acceptance.
 
 ## Ordered committable chunks
 
-Each row below is unchecked. Dependency is the immediately previous committed chunk unless a stronger dependency is stated; thus no cross-chunk parallel work. Files named here are prospective implementation paths, not files claimed to exist. All chunks also give I exclusive ownership of planning ledger/checklist accounting and any AGENTS lesson additions.
+The chunk descriptions below define the execution sequence; current acceptance evidence is recorded separately below. Dependency is the immediately previous committed chunk unless a stronger dependency is stated; thus no cross-chunk parallel work. Paths in future chunks are prospective, not files claimed to exist. All chunks give I exclusive ownership of planning ledger/checklist accounting and any AGENTS lesson additions.
 
 ### C01 — Toolchain and executable version (P0-1; P0-3 version portion)
 
@@ -72,15 +72,17 @@ Each row below is unchecked. Dependency is the immediately previous committed ch
 - Gate: `npm ci`, G, `node dist/cli/index.js --version`; inspect packed entry path via build result. No provider/Docker/live prerequisites.
 - Risk/rollback: incompatible moving tags; reject peer mismatch, commit lock. Revert this isolated chunk if bootstrap cannot install, no global toolchain mutation.
 
-#### C01 execution evidence — active, NOT complete
+#### C01 execution evidence — P0-1 verified; review corrections/re-review pending
 
 - 2026-10-28 bootstrap report (`agent://c01-bootstrap-1`): exact direct dependencies and lockfile generated; `npm install --ignore-scripts --no-audit --no-fund` exited 0 (225 packages added; no peer/engine warnings reported). This records the initial installation, not final gate-fix versions.
 - Initial runtime selection approved by Main: `engines.node = ^24.11.0 || >=26.0.0`. tsup 9.0.0 requires Node 24.11+ on the Node 24 line and excludes Node 25. TypeScript remains major 5; parser remains major 3. `eventsource-parser` 3.1.1 uses `createParser({ onEvent })`, not the callback-only API from older versions.
 - Initially installed production dependencies: `@hono/node-server` 2.1.5; `@inquirer/prompts` 8.7.5; `commander` 15.0.0; `eventsource-parser` 3.1.1; `hono` 4.13.14; `partial-json` 0.1.7; `pino` 10.4.0; `shell-quote` 1.12.0; `yaml` 2.9.1; `zod` 4.6.7.
 - Initially installed development dependencies: `@eslint/js` 10.0.1; `@types/node` 24.19.2; `@types/shell-quote` 1.7.5; `@vitest/coverage-v8` 5.0.5; `eslint` 10.13.0; `tsx` 4.23.15; `tsup` 9.0.0; `typescript` 5.9.3; `typescript-eslint` 8.72.1; `vitest` 5.0.5. Toolchain repair may supersede these versions; this list is historical installation evidence, not an assertion of final selected versions.
-- Parent-reported initial gate results (2026-10-28): `npm ci` exited 0; `npm run typecheck` exited 2 due to broken tsup declarations in `node_modules/tsup/dist/index.d.ts` referencing missing `./types.cts` and `@swc/core`. No subsequent lint/test/build/version-smoke gates ran after that failure. Configuration mode: C01 local no-secret bootstrap; sanitized artifact path was not supplied with this evidence. No passing typecheck, packed-entry or executable-version evidence is claimed.
-- LSP unavailable: `No language server found`. No editor diagnostic verification is claimed. C01 remains active and NOT complete; no acceptance boxes are checked, no C01 commit is recorded, and C02 is not authorized by this evidence. Dependency repair and the parent-owned remaining gates/review are pending.
-- Toolchain-owner correction (2026-10-28, `agent://c01-gate-fixes-1`): selected `tsup` 8.5.0, superseding initial 9.0.0; investigated 8.5.1 also shipped declarations importing missing `./types.cts`. Added exact development peer `@swc/core` 1.16.20 because tsup 8.5.0 declarations unconditionally import its `Options` type. Retained Node `^24.11.0 || >=26.0.0`; no `skipLibCheck` or compiler/config suppression. Owner reports package-local `allowScripts` permits only `esbuild@0.25.12` and `esbuild@0.28.2`, with `@swc/core` disabled (type peer only; installer can install fallback SWC WASM). Refresh esbuild's versioned allowlist when lock upgrades change its versions. Repair installs used `--ignore-scripts`; these changes are not passing gate evidence. Parent must rerun clean `npm ci` and gates; C01 remains NOT complete.
+- Parent-reported initial gate results (2026-10-28, historical): `npm ci` exited 0; `npm run typecheck` exited 2 due to broken tsup declarations in `node_modules/tsup/dist/index.d.ts` referencing missing `./types.cts` and `@swc/core`. No subsequent gates ran in that initial attempt; the repaired parent run below supersedes this failure, not the historical record.
+- Toolchain-owner correction (2026-10-28, `agent://c01-gate-fixes-1`): actual selected versions are TypeScript 5.9.3, `eventsource-parser` 3.1.1 and `tsup` 8.5.0 (superseding initial 9.0.0; investigated 8.5.1 also imported missing `./types.cts`). Exact dev peer `@swc/core` 1.16.20 supplies tsup's unconditionally imported `Options` type. Node remains `^24.11.0 || >=26.0.0`; no `skipLibCheck` or compiler/config suppression. Package-local `allowScripts` permits only `esbuild@0.25.12` and `esbuild@0.28.2`, with `@swc/core` disabled (type peer only; installer can install fallback SWC WASM). Refresh the allowlist when lock upgrades change esbuild. Owner repair installs used `--ignore-scripts`, not the final gate.
+- Parent-reported repaired gate evidence (2026-10-28; C01 local no-secret bootstrap): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test` (explicit `--passWithNoTests` empty-bootstrap allowance), `npm run build`, `node dist/cli/index.js --version` (output `0.1.0`) and `node dist/cli/index.js --help` all exited 0. This verifies P0-1 and P0-3's version/help portion only; it does not exercise eval, config loading or packed-tarball execution. Sanitized command-artifact path was not supplied with this parent evidence. LSP unavailable (`No language server found`); no editor diagnostic verification is claimed.
+- Draft C01 commit: `98c1970`; not final reviewed sign-off. Independent implementation reviews `agent://c01-review-1` and `agent://c01-review-2` identified the unspecified npm installer floor, staged eval script and stale gate accounting. Active review corrections: npm `>=12.0.0` installer floor in manifest/lock root plus `.npmrc` `engine-strict=true` enforcement (reported by `agent://c01-review-fixes-1`); accounting corrected here. These post-review changes have not been parent-verified; their gate and independent re-review are forthcoming. Fix/re-review closure and final C01 commit status remain pending; C02 is not yet authorized.
+- `eval` script is staged and intentionally unavailable until real C12 implementation/registration; only version/help are currently exposed. Do not count it as a working/verified script or add a stub. Remove C01's empty-suite allowance in C02 when tests arrive. P0-2 and full P0-3 remain unchecked; no eval/P8-1 pack acceptance is claimed.
 
 ### C02 — Validated configuration (P0-2)
 
@@ -207,12 +209,13 @@ Each row below is unchecked. Dependency is the immediately previous committed ch
 - Final accounting additionally rejects stale policy/provider/injection reports under R8 and distinguishes exact dangerous-string inert proof from additional safe live denial; unexercised original external acceptance never silently deleted or greened.
 - Risk/rollback: flaky timing, hidden external gap, lessons fabricated from docs; record failed/outstanding portions precisely, do not green source tasks. Stop release if mandatory gate fails; committed local implementation may remain complete with external acceptance pending, but do not call entire source plan done.
 
-## Acceptance portion ledger (initial, no green entries)
+## Acceptance portion ledger
 
 | Source portion | Local implementation placement | Additional acceptance evidence / prerequisite to audit | Current status |
 |---|---|---|---|
-| P0-1/2 | C01–02 | local install/build/config | unchecked, not run |
-| P0-3 | C01/03/04/07/12 | real registered commands; mock check, loadable init | unchecked, not run |
+| P0-1 | C01 | parent-reported install/typecheck/lint/empty-bootstrap-test/build/version/help all exit 0 (2026-10-28), evidence above | verified in CHECKLIST; draft `98c1970`, post-review corrections/re-review pending |
+| P0-2 | C02 | config example load, three specified negative cases and unit tests | unchecked, not run |
+| P0-3 | C01/03/04/07/12 | real registered commands; mock check, loadable init; C01 version/help parent-verified only | full task unchecked; eval staged/unavailable until C12; remaining commands pending |
 | P1-1..4 | C04–05 | routing/auth/transport/SSE fixtures and measured latency | unchecked, not run |
 | P1-5 | C05 + C08 | CLI version/auth/real upstream second-turn cache hit | all code pending; live prerequisite unknown |
 | P2-1..4/7/8 | C06–07 | all branch/table/cache/log evidence | unchecked, not run |
