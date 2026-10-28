@@ -19,7 +19,7 @@
   "scripts": {
     "dev": "tsx watch src/cli/index.ts",
     "build": "tsup",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "eval": "tsx src/cli/index.ts eval"

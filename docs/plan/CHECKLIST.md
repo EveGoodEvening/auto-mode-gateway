@@ -1,4 +1,4 @@
-全部原任务与外部验收保留，安全语义澄清见下文。计划评审通过；P0-1 已验证，C01 修正已落地且修正后 gate 全通过，安全复审 CLEAN，最终记账复审进行中。P0-2 及其余验收未完成；顺序与证据见 [PROGRESS.md](PROGRESS.md)。
+原任务与外部验收均保留。最新执行状态与逐块证据以 [PROGRESS.md](PROGRESS.md) 为准；以下仅标记已实现并验证的完整任务。
 
 # Todo List
 
@@ -24,14 +24,15 @@
   - 位置：仓库根目录。
   - 完成标准：`npm run typecheck`、`npm test`（空测试）、`npm run build` 均通过；`node dist/cli/index.js --version` 输出版本。
   - C01 parent-reported verification (2026-10-28, local no-secret bootstrap): `npm ci`, `npm run typecheck`, `npm run lint`, `npm test` (explicit bootstrap empty suite), `npm run build`, `node dist/cli/index.js --version` (`0.1.0`) and `node dist/cli/index.js --help` all exit 0. Actual pins: TypeScript 5.9.3, eventsource-parser 3.1.1, tsup 8.5.0 (replaces initial 9.0.0 after published declaration defects); Node `^24.11.0 || >=26.0.0`.
-  - Draft `98c1970`; green review-fix commit `e8f5f15` enforces npm `>=12.0.0`. Parent post-fix install/typecheck/lint/empty-test/build/version/help all exited 0. Independent re-review underway; final C01 sign-off pending. P0-2 remains uncovered.
+  - C01 CLOSED at `1ed739a`: post-fix gates all passed, security and final accounting reviews CLEAN; version/help implemented, later CLI commands remain in scope.
   - `eval` script is staged and intentionally unavailable until C12 implements/registers the real command. It is not counted as a working or verified script; no eval/packed-tarball acceptance is claimed. Remove bootstrap `--passWithNoTests` in C02 when tests are introduced.
 
-- [ ] P0-2 配置 schema 与加载器
+- [x] P0-2 配置 schema 与加载器
   - 用 zod 定义 `Config`：`listen{host,port}`、`auth{mode:"vault"|"passthrough", client_tokens[]}`、`routes[]{prefix, protocol:"anthropic-messages"|"openai-responses"|"openai-chat", upstream, project_dirs[]?, tool_map?}`、`upstreams{<id>:{base_url, api_key?, auth_header:"authorization"|"x-api-key"|"both", forward_safeguards:false, extra_headers?}}`、`gate{mode:"enforce"|"shadow", on_provider_failure:"block"|"allow", hold_keepalive_ms:5000, provider_timeout_ms:5000}`、`decision{chain[], providers{<id>:{kind:"systemone"|"openai-decisions", base_url, api_key, model, headers?, envelope?:"none"|"cloudflare", body_extra?}}, second_stage?{kind:"anthropic-messages", base_url, api_key, model, pin?}}`、`classifier_reroute{enabled, provider, model_map?}`、`audit{path, redact:true}`、`policy{thresholds, readonly_allow_extra[], hard_deny_extra[], sensitive_paths_extra[]}`、`log_level`。实现 `${ENV}` 插值（缺失变量报错并指出键路径）、默认值、`passthrough` 且非 loopback 监听时报错。
   - 投递补充 schema：`routes[].claude_delivery:"auto"|"native"|"rewrite"`（默认 auto），`routes[].claude_delivery_by_version?:{<exact-version>:"native"|"rewrite"}`（route 显式非 auto 优先，其次精确版本覆盖，其次 scoped auto）。未知版本按原请求有无 safeguards 选择 native/rewrite；实际 session/version 提取只采用已观测可信客户端请求元数据，缺失不猜。自动 fallback 关联/30 s 窗口/1024 session/30 min TTL 见 DESIGN。P3-5 的 conditional `upstreams[].strip_beta?:boolean` 与现有布尔 `forward_safeguards` 独立，默认 true（不是把布尔改对象）；验证不剥 beta 可用后才接入 false 分支。
   - 位置：`src/config/schema.ts`、`src/config/load.ts`、`src/config/defaults.ts`、`deploy/config.example.yaml`。
   - 完成标准：对 `config.example.yaml` 加载成功；三个负例（缺变量、passthrough+0.0.0.0、未知 protocol）给出含键路径的错误；单测覆盖。
+  - C02 parent verification: typecheck/lint/test/build exit 0, 81 tests passed. Direct loader smoke loaded the example with disposable per-variable values and all three routes/providers; missing variable error includes `auth.client_tokens[0]`. Bootstrap empty-suite allowance removed. Independent C02 review underway.
 
 - [ ] P0-3 CLI 骨架
   - commander 子命令：`init`（交互生成配置、签发 token、打印三种 agent 接入片段）、`serve [--config] [--log-level]`、`check`（校验配置并向每个决策提供方发送固定 canary 问题，打印延迟与结果）、`eval`、`audit tail [-n]`、`token new`。`token new` 生成 `amp_` + 32 字节 base64url。

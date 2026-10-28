@@ -1,0 +1,108 @@
+# Set every referenced environment variable before loading this file.
+# Interpolation applies to parsed string VALUES, not YAML source or mapping keys.
+# Values remain strings: ${PORT} is not a substitute for a numeric YAML port.
+# These provider model/endpoint examples are not live-canary verification.
+listen:
+  host: 127.0.0.1
+  port: 8484
+trust_proxy: false
+limits:
+  request_body_bytes: 64000000
+  upstream_connect_timeout_ms: 10000
+  upstream_read_timeout_ms: 30000
+auth:
+  mode: vault
+  client_tokens: ["${AMP_TOKEN_CC}", "${AMP_TOKEN_CODEX}", "${AMP_TOKEN_WORKBUDDY}"]
+  admin_token: "${AMP_ADMIN_TOKEN}"
+routes:
+  - prefix: /cc
+    protocol: anthropic-messages
+    upstream: relay-a
+    project_dirs: ["${PROJECT_DIR}"]
+    claude_delivery: auto
+    # Add claude_delivery_by_version only for exact versions with recorded
+    # compatibility evidence. Absence is not evidence of native incompatibility.
+  - prefix: /codex
+    protocol: openai-responses
+    upstream: relay-b
+    project_dirs: ["${PROJECT_DIR}"]
+  - prefix: /workbuddy
+    protocol: openai-chat
+    upstream: relay-b
+    project_dirs: ["${PROJECT_DIR}"]
+    tool_map:
+      run_command: { kind: command, arg: cmd }
+      write_file: { kind: file_write, arg: path }
+      fetch_url: url
+      remote_tool: mcp
+      # Explicit other preserves the generic direct-allow policy. Only use it
+      # for tools whose execution/read/write/network effects you understand.
+      update_task_status: other
+upstreams:
+  relay-a:
+    base_url: https://relay.example.com
+    api_key: "${RELAY_A_KEY}"
+    auth_header: both
+    forward_safeguards: false
+    extra_headers: { x-client-name: auto-mode-proxy }
+  relay-b:
+    base_url: https://relay2.example.com/v1
+    api_key: "${RELAY_B_KEY}"
+    auth_header: authorization
+    forward_safeguards: false
+gate:
+  mode: enforce
+  on_provider_failure: block
+  hold_keepalive_ms: 5000
+  provider_timeout_ms: 5000
+decision:
+  chain: [jev-openrouter, clef-cf, luna-vercel]
+  providers:
+    jev-openrouter:
+      kind: systemone
+      base_url: https://openrouter.ai/api/v1
+      api_key: "${OPENROUTER_API_KEY}"
+      model: typesafe/jev-1.14
+      envelope: none
+      body_extra: {}
+      pricing: { input_usd_per_million: 0.042 }
+    clef-cf:
+      kind: systemone
+      base_url: https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/@cf/cloudflare/clef-flash
+      api_key: "${CF_API_TOKEN}"
+      model: clef-flash
+      headers: { cf-aig-gateway-id: "${CF_GATEWAY_ID}" }
+      envelope: cloudflare
+    luna-vercel:
+      kind: openai-decisions
+      base_url: https://ai-gateway.vercel.sh/v1
+      api_key: "${AI_GATEWAY_API_KEY}"
+      model: openai/gpt-6-luna-decisions
+  second_stage:
+    kind: anthropic-messages
+    base_url: https://openrouter.ai/api/v1
+    api_key: "${OPENROUTER_API_KEY}"
+    model: anthropic/claude-haiku-5.5
+    pin:
+      provider:
+        only: [anthropic]
+        allow_fallbacks: false
+classifier_reroute:
+  enabled: true
+  provider: second_stage
+  model_map:
+    claude-haiku-5-5: anthropic/claude-haiku-5.5
+audit:
+  path: "${AMP_AUDIT_PATH}"
+  redact: true
+policy:
+  thresholds:
+    risk_block: 0.70
+    risk_allow: 0.30
+    intent_mismatch: 0.30
+    intent_risk: 0.50
+    outside_scope_allow: 0.50
+  readonly_allow_extra: []
+  hard_deny_extra: []
+  sensitive_paths_extra: []
+log_level: info
