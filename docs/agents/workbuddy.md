@@ -1,5 +1,13 @@
 # WorkBuddy 接入 auto-mode-proxy
 
+## C11 本地闭合，不等于 WorkBuddy 实机验收
+
+**C11 LOCALLY CLOSED：**源01847b9三项独立复审CLEAN、父代理G2234/AFTER959/actualHTTP10及private controlled AFTER970/Stage3/4 SAFE。P6-1/P6-2/P3-6自身local标准满足；无剩余可获授权本地修复/准备。精确官方当前Linuxx64DEB/RPM metadata GET均404，scoped未建立现有WorkBuddy或accessible approved genuine build/operator GUI host；具体前提不足，不等于Linux不支持/认证或沙箱错误。native根目录/metadata/control/primary-source ledger全部保留，无package/readelf/runtime执行，不伪造S2布局。
+
+**P6-3仍未勾选：**原文要求完整自定义模型接入/工具调用、“AI 智能审批 = 自动审批”且非“完全访问”、真实无害Chat mock注入阻断/无执行、实际头抓取与条件`X-Agent-Type: auxiliary`记录；完成标准“接入成功、拦截生效、头信息记录”不能从fixtures/init/文档推断。辅助头存在或不存在都unknown；DefaultPermissions/模型AutoMode/CodeBuddyCLI/Enterprise/online不替代原生Desktop目标。
+
+**全局Validation另行保留：**“WorkBuddy（自动审批开启）各完成一次注入拦截验证与一次 ≥ 5 轮正常对话。”baseline/拦截/历史连续性/≥5轮均未观察，需要上述真实build或操作员GUIhost后补证；不把这些相邻全局条件追加给已完成P6-1/P6-2/P3-6。LOCAL CLOSED不是完整P6-3/overallGoal完成；完整原文/证据/具体外部前提见[进度账本](../plan/PROGRESS.md)。
+
 ## 接入范围与前提
 
 本指南针对 WorkBuddy 的 **OpenAI Chat Completions 自定义模型**入口，代理路由为 `/workbuddy`，协议为 `openai-chat`。先在私有配置中配置真实中转站和可信判定提供方，再启动 `auto-mode-proxy serve --config <私有配置文件路径>`。`init` 打印接入说明不代表客户端或上游已验收成功。当前原生客户端实机结果、平台与辅助请求头证据以[兼容性记录](../compat.md)为准；HTTP mock 成功不能代替实机接入、真实上游多轮或缓存命中证明。
@@ -35,7 +43,7 @@ WorkBuddy 的工具名和参数依版本/插件而异。优先根据实际工具
 
 共享资源边界为单工具/未闭合 SSE frame 1 MiB、整体保留表示 8 MiB、其中 reasoning 4 MiB；独立 idle/调用完成/整轮判定截止为 30/60/60 秒。异常 EOF、超限、超时或取消不能释放未批准的执行。该限制不是“原始响应小于 8 MiB 就一定接受”，原始、解码、解析及输出等同时保留的表示共享账本。
 
-v1 **不实现 WorkBuddy 或 Codex 的客户端 classifier 改道**。可信 Anthropic classifier 改道仅适用于 Claude Code/Anthropic Messages 的指定指纹；把同样文字放进 Chat 请求不应将请求伪装成已支持的原生改道。Anthropic `safeguard_results` 也不是 WorkBuddy 的原生批准协议。
+v1不实现原生WorkBuddy/Codex格式classifier改道。R7已支持精确Anthropic-shaped classifier payload（顶层system数组指定前缀且无tools）经所有generation ingress匹配并换可信凭证；原生Chat/Responses请求仅包含同样安全文字不匹配，仍走main。这不是WorkBuddy原生classifier支持；Anthropic safeguard_results不是WorkBuddy原生批准协议。
 
 ## 安全验收与证据记录
 
@@ -50,7 +58,7 @@ v1 **不实现 WorkBuddy 或 Codex 的客户端 classifier 改道**。可信 Ant
 
 [官方 FAQ](https://www.workbuddy.ai/docs/workbuddy/From-Beginner-to-Expert-Guide/FAQ)列出 macOS（Apple Silicon/Intel）与 Windows（x64/ARM64），并说明 Google/GitHub OAuth 登录。[Windows 安装说明](https://www.workbuddy.ai/docs/workbuddy/From-Beginner-to-Expert-Guide/Installation-Win-Guide)要求 Windows 10 1809 或更高/Windows 11；[macOS 安装说明](https://www.workbuddy.ai/docs/workbuddy/From-Beginner-to-Expert-Guide/Installation-Mac-Guide)要求 macOS 12 或更高。安装指南要求网络连接。这些是公开文档前提，不是本机已经安装或登录的证明。
 
-[官方首页](https://www.workbuddy.ai/)链接的[下载辅助模块](https://download.codebuddy.ai/web/workbuddy/6e15c02e35d8844ab84fb594e5cd3b3614b23b4b/assets/download-BWbWuQGT.js)明确列出 **WorkBuddy Linux x64/ARM64 的 DEB/RPM**，与独立 `ide-*` 产品标识区分。[Linux x64 DEB 官方 manifest](https://www.workbuddy.ai/v2/update?platform=workbuddy-linux-x64-deb)调查时给出版本 `5.5.2.37849279` 及[官方 HTTPS DEB 地址](https://download.codebuddy.ai/workbuddy/saas/linux-x64-deb/WorkBuddy-linux-x64-deb-5.5.2.37849279-910352f0.deb)，但 hash 字段为空；公开资料未建立 Linux 发行版/依赖要求。FAQ/菜单未列全 Linux，不能据此断言不支持；包元数据可取得也不代表已下载、安装或成功运行。调查时 Mac/Windows manifest 为 `5.9.3.42398134`，与 Linux 有版本差异，不能推断同一稳定/测试通道或相同审批 UI。目标主机已识别为 Ubuntu 26.04.1、x64（Debian 系），窄范围应用目录/包元数据审计未建立现有 WorkBuddy；官方包仍可作为获授权的私有准备路径，不能把“未安装”当成最终不可解决阻塞。原生 GUI、账号、工具声明、要求的智能审批模式和请求头仍未观察；后续准备与启动需单独记录实际证据，不能套用其他客户端的失败结论或借用浏览器认证。
+[官方首页](https://www.workbuddy.ai/)链接的[辅助模块](https://download.codebuddy.ai/web/workbuddy/6e15c02e35d8844ab84fb594e5cd3b3614b23b4b/assets/download-BWbWuQGT.js)列出WorkBuddy Linuxx64/ARM64 DEB/RPM，区别ide-*产品。[x64DEB manifest](https://www.workbuddy.ai/v2/update?platform=workbuddy-linux-x64-deb)识别5.5.2.37849279/官方URL，publisher hash为空；Mac/Windows manifest5.9.3.42398134，通道/UI parity未知。Ubuntu26.04.1/x64/debian-like只确定DEB family，不证明vendor distro支持。scoped审计无现有target，精确x64DEB/RPM GET404且bounded primary-source ledger已冻结，不能把manifest当可用package。所有可做安全准备/控制完成后，剩余具体前提是accessible approved genuine WorkBuddy build或操作员已安装GUIhost，而非猜URL/channel/mirror/旧版本/ARM/替代产品。原生GUI/认证/工具/指定审批/头未观察；不借浏览器认证或套用他客户端沙箱结论。
 
 **manifest 已识别，但观察到的包元数据请求均未取得包：**上述 DEB 链接不是已验证可下载的安装包。该精确 DEB URL 的首次直接 TLS HEAD 返回 **HTTP 404**（XML，`Content-Length: 502`），保留记录中的 DEB 元数据 GET 也返回 **404**。随后对[官方 Linux x64 RPM manifest](https://www.workbuddy.ai/v2/update?platform=workbuddy-linux-x64-rpm)所指向的独立 RPM URL，元数据 GET 同样返回 **404**（XML，`Content-Length: 502`）；此次仅检查响应头，未读取 body，未下载二进制包。两项 manifest 均识别 Linux `5.5.2.37849279`，但发布方 hash 字段为空，没有独立于 TLS 的包真实性验证。不能把 manifest 存在写成“下载可用”，也不能把这些特定 URL 的检索失败扩展为“Linux 不支持”、认证失败或 WorkBuddy 沙箱失败。原生调查尚无安装、GUI、智能审批模式、请求头或验收成功结论；Default Permissions、CodeBuddy CLI、Enterprise 或在线版均不能替代目标 Desktop 验收。
 

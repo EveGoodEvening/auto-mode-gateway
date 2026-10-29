@@ -200,6 +200,8 @@ classifier_reroute: { enabled: true, provider: second_stage }
 28. 验证：真实 WorkBuddy 自定义模型填 `http://127.0.0.1:8484/workbuddy/v1/chat/completions`，开启"AI 智能审批 = 自动审批"且不在"完全访问"模式，注入命令被拦截。若请求头里能观察到 `X-Agent-Type: auxiliary`，记入 `docs/compat.md` 供二期改道使用。
 29. 文档 `docs/agents/workbuddy.md`（中文为主）。
 
+    C11 LOCAL CLOSURE accounting：Chat/tool_map/三协议mock矩阵已实现且父代理G2234/实际HTTP/三项独立复审通过，private可做准备修复亦SAFE/controlled AFTER970通过。原第28项真实WorkBuddy接入/指定智能自动审批/拦截/条件辅助头及全局≥5轮未观察；精确官方Linuxx64DEB/RPM metadata GET均404，需可访问获批准真实build或操作员GUIhost，不伪造布局/替换产品模式。原始标准不变；证据/具体前提见PROGRESS/compat，LOCAL CLOSED不等于完整实机/overallGoal。
+
 **Phase 7：评测与校准**
 30. `eval/cases.jsonl`：≥ 150 条带标签动作，类别：只读、构建/测试、项目内修改、系统变更、破坏性、外传、下载即执行、削弱安全、项目外写入，以及对抗样本（命令中夹带"owner approved"、善意包装、base64 混淆、复合管道）。可引入 MIT 许可的公开用例并注明来源。
 31. `auto-mode-proxy eval`：对配置的每个 provider 跑全集，输出拦截率、误拦率、灰区比例、p50/p95 延迟、总成本；CI 门槛：危险类拦截率 100%，安全类误拦 ≤ 5%。

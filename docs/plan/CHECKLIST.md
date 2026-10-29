@@ -243,7 +243,7 @@
   - Historical GREEN DRAFT exercised coverage：父代理22:56:12 全量2214 tests/build/type/lint 与10例 actual HTTP smoke 通过已覆盖的单/多/部分拦截、reasoning、nonstream、usage/[DONE]、终态案例。后续 SEC-001..004 静态发现使 P6-1 重新打开；这些旧通过不能证明新增 allocation/ownership/usage/header 边界。实际 WorkBuddy UI/模式/头仍独立属于未勾选 P6-3，不替代 P6-1 自身修复。
   - [x] C11 R4/MATRIX001 独立 per-tool ≤1MiB 参数字节边界：父代理 TARGET946 有效 Unicode JSON、多帧各自低于 frame cap 的近界允许/累计超限与单独 frame cases 在 protocol+actualHTTP 均通过，matrix全36通过。保持同一参数字节 cap/断言，不借 frame/无效 JSON 代替 tool 边界。此局部 proof 不关闭 SEC-001..004 或恢复整体 P6-1/C11 green。
     - Historical artifact942：matrix/overflow cases 通过，但两个 below1MiB controls 当时失败（协议参数1048448bytes触发 aggregate ResponseBudget；actual HTTP terminated）。这不是缺失 tool cap 证据；后续 TARGET946 有效多字节 UTF-8 控制在不放宽同一参数字节 cap/断言下补足独立近界/超界 proof，见上项。
-  - [x] C11-CHAT-SEC-001..004 本地修复/AFTER：父代理23:41:32 type/lint/36files2234tests/build全通过，含4项回归与独立Unicode tool/frame边界。 unchanged paired AFTER959 EXIT0：usage早发0/总1、duplicate两类fail/output0、named execution/event/id各1、reasoning在JSON.parse前拒绝(entries0)。SEC-002 discardFrame清引用后释放的source/order证据待独立复审，不冒充heap/livepeak测量。重复actualHTTP10 smoke通过/10 trusted mock requests/12audit/cleanuptrue。P6-1自身local标准恢复checked；所有security/matrix/accounting独立复审与C11 closure仍待完成，P6-3实际WorkBuddy标准不受此本地证据替代。
+  - [x] C11-CHAT-SEC-001..004 本地修复/AFTER/独立复审CLOSED：父代理G2234(type/lint/36files2234tests/build)、unchanged AFTER959、重复actualHTTP10/10trusted mock requests/12audit/cleanuptrue均通过。SEC-002源引用清理独立复审CLEAN，order trace非heap/livepeak。P6-1自身local标准checked；三项postfix review CLEAN/new[]，native containment001/inspector002003修复复审SAFE+actual AFTER970完成后C11 LOCALLY CLOSED。P6-3实际模式/头/工具/≥5turn未观察且原文未缩减，完整外部前提/分账见下项，localclosure不等于整体goal完成。
     - Historical TARGET946：SEC-003/004的7个HTTP BEFORE失败（早发usage2、duplicate usage2未及时拒绝/取消而5000ms超时、deferred event/id缺失3）已观察；当时SEC-001/002还仅静态且A held。后续948资源/API trace与修复release状态以上项为准，保留946原始失败事实，不推断heap/livepeak或整体完成。
 
 - [x] P6-2 WorkBuddy 工具映射与路径处理
@@ -257,6 +257,8 @@
   - 位置：`docs/agents/workbuddy.md`（中文为主）、`docs/compat.md`、`src/cli/init.ts`。
   - 完成标准：接入成功、拦截生效、头信息记录。
   - C11 的本地 Chat fixtures/HTTP 与真实 WorkBuddy 验收分账：自动审批模式、非完全访问、真实注入拦截、实际辅助头存在/不存在及 ≥5 轮必须由实际客户端观察，不能从 mock 注册场景或 init 片段推断。
+  - **C11 LOCALLY CLOSED，P6-3自身仍未完成：**源01847b9三项复审CLEAN、父代理G2234/AFTER959/featureHTTP10及private AFTER970/Stage3/4 SAFE；reachable local修复/调查/准备结束。精确官方Linuxx64DEB/RPM metadata GET均404；scoped无现有app、无accessible approved genuine artifact/operator GUI host。需要该具体前提后才可观察原文完整接入/工具调用、"AI 智能审批 = 自动审批"且非"完全访问"、无害mock注入拦截/无执行、实际辅助头有/无；不以DefaultPermissions/CodeBuddyCLI/Enterprise/online替代，不称Linux不支持/认证或沙箱失败。
+  - ≥5native正常轮次属于Validation原文“WorkBuddy（自动审批开启）各完成一次注入拦截验证与一次 ≥ 5 轮正常对话”，仍未观察且全局框不勾选；不追加P6-1/P6-2/P3-6 own条件。guide/compat/init已实现，不等于P6-3“接入成功、拦截生效、头信息记录”。完整原文不改；local closure不是完整P6-3/overallGoal验收。
 
 ### Phase 7：评测与校准
 
