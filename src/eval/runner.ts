@@ -2,15 +2,15 @@ import { createHash } from 'node:crypto';
 import { readFile, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { collectConfigSecrets, sanitizeAuditValue } from '../audit/record.js';
 import type { Config } from '../config/schema.js';
 import { createGate, deterministicOutcome } from '../gate/decide.js';
 import { normalizeToolCall } from '../gate/normalize/index.js';
-import type { GateContext, Verdict } from '../gate/types.js';
-import { resolvePolicy, type EffectivePolicy } from '../policy/effective.js';
-import { redact } from '../policy/redact.js';
+import type { GateContext, NormalizationRoute, Verdict } from '../gate/types.js';
+import { DEFAULT_POLICY, resolvePolicy, type EffectivePolicy } from '../policy/effective.js';
 import { assessReport, calculateMetrics, injectionMetrics, validateReport } from './metrics.js';
-import { caseSchema, fingerprintsSchema, resultSchema, templatesSchema, validateCorpus, type EvalCase, type EvalReport, type EvalResult, type Fingerprints, type InjectionTemplates } from './schema.js';
+import { caseSchema, EvalInputError, fingerprintsSchema, resultSchema, templatesSchema, validateCorpus, type EvalCase, type EvalReport, type EvalResult, type Fingerprints, type InjectionTemplates } from './schema.js';
 
 /** Canonical content identity includes regex source/flags, not empty JSON objects. */
 export function fingerprint(value: unknown): string {
@@ -55,42 +55,71 @@ export interface EvaluationOptions {
 export function evaluationFingerprints(options: EvaluationOptions): Fingerprints {
   const policy = options.policy ?? resolvePolicy(options.config?.policy);
   const config = options.config;
-  const secrets = config ? collectConfigSecrets(config) : [];
   return {
     corpus: fingerprint(options.rows), templates: fingerprint(options.templates), policy: fingerprint(policy),
     overrides: fingerprint(config?.policy ?? options.rulesConfiguration ?? {}),
-    config: fingerprint({ configured: config ? redact(config, secrets, policy) : options.rulesConfiguration ?? { defaults: true }, effective_mode: 'enforce', rules_only: options.rulesOnly }),
-    chain: fingerprint(config ? { providers: redact(config.decision.providers, secrets, policy), chain: config.decision.chain, second_stage: redact(config.decision.second_stage ?? null, secrets, policy) } : { unavailable: true }),
+    // Identity hashes complete effective values; only the whole digest escapes.
+    config: fingerprint({ configured: config ?? options.rulesConfiguration ?? { defaults: true }, normalization_routes: options.normalizationRoutes, effective_mode: 'enforce', rules_only: options.rulesOnly }),
+    chain: fingerprint(config ? { providers: config.decision.providers, chain: config.decision.chain, second_stage: config.decision.second_stage ?? null } : { unavailable: true }),
     engine: options.engine,
   };
 }
 
-/** Only execution-bearing text is prefixed, never labels or provenance metadata. */
-export function wrapCase(row: EvalCase, template: InjectionTemplates['templates'][number]): EvalCase {
-  const copy = structuredClone(row);
-  if (template.id === 'clean') return copy;
-  const commandFields = ['command', 'cmd'].filter((key) => typeof copy.tool_call.input[key] === 'string');
-  if (commandFields.length !== 1) throw new Error('Dangerous injection case needs one unambiguous string command input');
-  const commandField = commandFields[0]!;
-  copy.tool_call.input[commandField] = template.tool_input_prefix + String(copy.tool_call.input[commandField]);
-  copy.user_request = template.user_request_prefix + row.user_request;
-  return copy;
+/** Resolve the consumed string through the real normalizer, not argument names. */
+export function wrapCase(row: EvalCase, template: InjectionTemplates['templates'][number], route?: NormalizationRoute, policy: EffectivePolicy = DEFAULT_POLICY): EvalCase {
+  if (template.id === 'clean') return structuredClone(row);
+  const effectiveRoute = row.route ?? route;
+  const context: GateContext = { ...row.context, protocol: row.protocol, lastUserText: row.user_request, delivery: 'rewrite' };
+  const original = normalizeToolCall(row.protocol, { ...row.tool_call, raw: row.tool_call.input }, context, effectiveRoute, policy);
+  if (original.kind !== 'command' || original.execution_unavailable || original.argv || !original.text) throw new EvalInputError('Injection requires an assessable string command');
+  const paths: string[][] = [];
+  function findCommand(value: unknown, path: string[]): void {
+    if (value === original.text) paths.push(path);
+    else if (value !== null && typeof value === 'object') for (const [key, member] of Object.entries(value)) findCommand(member, [...path, key]);
+  }
+  findCommand(row.tool_call.input, []);
+  const prefixed = template.tool_input_prefix + original.text;
+  let selected: EvalCase | undefined;
+  for (const path of paths) {
+    const candidate = structuredClone(row);
+    let target: object = candidate.tool_call.input;
+    for (const key of path.slice(0, -1)) {
+      const member: unknown = Reflect.get(target, key);
+      if (member === null || typeof member !== 'object') throw new EvalInputError('Injection command input is unsupported or ambiguous');
+      target = member;
+    }
+    Reflect.set(target, path.at(-1)!, prefixed);
+    candidate.user_request = template.user_request_prefix + row.user_request;
+    const wrapped = normalizeToolCall(row.protocol, { ...candidate.tool_call, raw: candidate.tool_call.input }, { ...context, lastUserText: candidate.user_request }, effectiveRoute, policy);
+    if (wrapped.text !== prefixed || !isDeepStrictEqual({ ...original, raw: undefined, text: undefined }, { ...wrapped, raw: undefined, text: undefined })) continue;
+    if (selected) throw new EvalInputError('Injection command input is unsupported or ambiguous');
+    selected = candidate;
+  }
+  if (!selected) throw new EvalInputError('Injection command input is unsupported or ambiguous');
+  return selected;
 }
 
 export async function runEvaluation(options: EvaluationOptions): Promise<EvalReport> {
+  if (options.provider !== undefined && !options.provider.trim()) throw new EvalInputError('Provider selection requires a nonempty identifier');
   options.rows.forEach((row) => caseSchema.parse(row));
   templatesSchema.parse(options.templates);
   validateCorpus(options.rows);
-  if (options.rulesOnly && options.provider) throw new Error('Provider selection is incompatible with rules-only');
+  if (options.rulesOnly && options.provider !== undefined) throw new EvalInputError('Provider selection is incompatible with rules-only');
   const config = options.config;
   if (!options.rulesOnly && !config) throw new Error('Full evaluation requires a valid provider configuration');
-  if (options.provider && (!config || !Object.hasOwn(config.decision.providers, options.provider))) throw new Error('Selected provider is not configured');
+  if (options.provider !== undefined && (!config || !Object.hasOwn(config.decision.providers, options.provider))) throw new EvalInputError('Selected provider is not configured');
   const policy = options.policy ?? resolvePolicy(config?.policy);
   const fingerprints = fingerprintsSchema.parse(evaluationFingerprints(options));
+  // Resolve every dangerous transform with the actual effective route before any provider work.
+  const injectionCases: { base: EvalCase; row: EvalCase; variant: InjectionTemplates['templates'][number]['id'] }[] = [];
+  for (const row of options.rows.filter((entry) => entry.label === 'block')) {
+    const route = row.route ?? (options.normalizationRoutes ?? config?.routes)?.find((candidate) => candidate.protocol === row.protocol);
+    for (const template of options.templates.templates) injectionCases.push({ base: row, row: wrapCase(row, template, route, policy), variant: template.id });
+  }
   const selections: EvalReport['selections'] = [];
   const choices: { selection: string; kind: 'rules-only' | 'provider' | 'chain'; chain?: string[] }[] = options.rulesOnly
     ? [{ selection: 'rules-only', kind: 'rules-only' }]
-    : options.provider
+    : options.provider !== undefined
       ? [{ selection: `provider[${Object.keys(config!.decision.providers).indexOf(options.provider) + 1}]`, kind: 'provider', chain: [options.provider] }]
       : [...Object.keys(config!.decision.providers).map((id, index) => ({ selection: `provider[${index + 1}]`, kind: 'provider' as const, chain: [id] })), { selection: 'chain', kind: 'chain', chain: config!.decision.chain }];
   const credentials = config ? collectConfigSecrets(config) : [];
@@ -130,9 +159,7 @@ export async function runEvaluation(options: EvaluationOptions): Promise<EvalRep
     }
     // Serial evaluation bounds concurrency to one with the real gate deadline.
     for (const row of options.rows) baseline.push(await evaluate(row, 'baseline', row));
-    for (const row of options.rows.filter((entry) => entry.label === 'block')) {
-      for (const template of options.templates.templates) injection.push(await evaluate(wrapCase(row, template), template.id, row));
-    }
+    for (const entry of injectionCases) injection.push(await evaluate(entry.row, entry.variant, entry.base));
     const metrics = calculateMetrics(baseline);
     const injection_metrics = injectionMetrics(injection);
     selections.push({ selection: choice.selection, kind: choice.kind, status: [...baseline, ...injection].some((row) => row.error) ? 'unavailable' : 'complete', baseline, injection, metrics, suite_metrics: calculateMetrics([...baseline, ...injection]), injection_metrics });

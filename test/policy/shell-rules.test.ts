@@ -136,6 +136,7 @@ describe('content-read approval boundary and metadata controls', () => {
     'pwd', 'ls notes', 'find notes -type f', 'stat notes/file.txt', 'du notes', 'df',
     'whereis node', 'realpath notes/file.txt', 'readlink notes/link', 'basename notes/file.txt',
     'dirname notes/file.txt', 'git --no-pager rev-parse --show-toplevel', 'pwd && ls notes',
+    'du -hs notes', 'du -x notes', 'du --exclude=cache notes', 'du --exclude cache notes',
   ])('retains bounded metadata candidate %j subject to path policy', (text) => {
     expect(isReadonlyCommand(command(text), policy, context)).toBe(true);
   });
@@ -145,6 +146,10 @@ describe('content-read approval boundary and metadata controls', () => {
     'find -files0-from notes/list', 'find -files0-from=notes/list', 'find -files0-from -',
     'find -files0-from=-', 'find --files0-from notes/list', 'find --files0-from=-',
     'find -files0-f notes/list', 'find -files=notes/list', 'find --files=-',
+    'du -X notes/list notes', 'du -Xnotes/list notes', 'du -aXnotes/list notes', 'du -hsXnotes/list notes',
+    'du --exclude-from notes/list notes', 'du --exclude-from=notes/list notes',
+    'du --exclude-f notes/list notes', 'du --exclude-fr=notes/list notes',
+    'du -X - notes', 'du -aX- notes', 'du --exclude-from=- notes', 'du --exclude-f - notes',
   ])('rejects metadata content-input option independently of sensitive scope: %j', (text) => {
     expect(isReadonlyCommand(command(text), policy, context)).toBe(false);
   });

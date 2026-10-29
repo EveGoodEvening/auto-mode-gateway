@@ -57,21 +57,25 @@ export function registerEvalCommand(program: Command): void {
       // Fixed diagnostics: filesystem, parser, config and provider exceptions may contain secrets.
       let phase = 'corpus read';
       try {
+        if (options.provider !== undefined && !options.provider.trim()) { process.stderr.write('eval: --provider requires a nonempty identifier\n'); process.exitCode = 1; return; }
+        if (options.config !== undefined && !options.config.trim()) { process.stderr.write('eval: --config requires a nonempty path\n'); process.exitCode = 1; return; }
+        if (options.rulesOnly && options.provider !== undefined) { process.stderr.write('eval: --provider cannot be combined with --rules-only\n'); process.exitCode = 1; return; }
+        if (options.validate && (options.rulesOnly || options.provider !== undefined)) { process.stderr.write('eval: --validate cannot be combined with an evaluation mode or provider selection\n'); process.exitCode = 1; return; }
         const rows = parseCorpus(await readFile(options.corpus, 'utf8'));
         phase = 'template validation';
         const templates = templatesSchema.safeParse(JSON.parse(await readFile(options.templates, 'utf8')) as unknown);
         if (!templates.success) throw new Error();
-        // Check all command transformations even in validation mode without normalizing/executing them.
-        if (options.rulesOnly && options.provider) { process.stderr.write('eval: --provider cannot be combined with --rules-only\n'); process.exitCode = 1; return; }
-        if (options.validate && (options.rulesOnly || options.provider)) { process.stderr.write('eval: --validate cannot be combined with an evaluation mode or provider selection\n'); process.exitCode = 1; return; }
-        for (const row of rows.filter((entry) => entry.label === 'block')) for (const template of templates.data.templates) wrapCase(row, template);
-        if (options.validate) { process.stdout.write(`eval: validated ${rows.length} cases, ten categories, both label groups and three injection templates; no provider calls\n`); return; }
+        if (options.validate) {
+          for (const row of rows.filter((entry) => entry.label === 'block')) for (const template of templates.data.templates) wrapCase(row, template);
+          process.stdout.write(`eval: validated ${rows.length} cases, ten categories, both label groups and three injection templates; no provider calls\n`);
+          return;
+        }
         phase = 'configuration';
-        const rules = options.rulesOnly && options.config ? await loadRulesConfiguration(options.config) : undefined;
+        const rules = options.rulesOnly && options.config !== undefined ? await loadRulesConfiguration(options.config) : undefined;
         const config = options.rulesOnly ? undefined : await loadConfig(options.config);
         const evaluation: EvaluationOptions = { rows, templates: templates.data, rulesOnly: options.rulesOnly === true,
           ...(config ? { config } : {}), ...(rules ? { policy: resolvePolicy(rules.policy), rulesConfiguration: rules, normalizationRoutes: rules.routes } : {}),
-          ...(options.provider ? { provider: options.provider } : {}), engine: await engineFingerprint() };
+          ...(options.provider !== undefined ? { provider: options.provider } : {}), engine: await engineFingerprint() };
         phase = 'evaluation';
         const report = await runEvaluation(evaluation);
         phase = 'report write';

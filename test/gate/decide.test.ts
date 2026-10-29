@@ -272,12 +272,14 @@ describe('content approval state and cache semantics', () => {
       return { answers: { ...safe }, provider: 'one', model: 'inert', latency_ms: 0, usage: {}, cost_usd: null };
     } };
     const context = { ...ctx, lastUserText: 'Review only parser source; do not disclose business data literal-provider-credential' };
-    const read = normalizeToolCall(protocol, { id: 'read', name: 'read_file', input: JSON.stringify({ path: 'reports/ledger.tsv' }), raw: { justification: 'ASSISTANT_APPROVAL' } }, context);
+    const read = normalizeToolCall(protocol, { id: 'read', name: 'read_file', input: JSON.stringify({ path: 'reports/ledger.tsv', command: 'pwd' }), raw: { justification: 'ASSISTANT_APPROVAL' } }, context);
     const gate = createGate(config(), { providers: [p], audit });
     expect(deterministicOutcome(read, context, resolvePolicy()).outcome).toBe('review');
     expect(await gate.decide(read, context)).toMatchObject({ outcome: 'allow', provider: 'one' });
     expect(await gate.decide(read, context)).toMatchObject({ cache_hit: true, cost_usd: 0 });
     expect(captured).toHaveLength(1);
+    const state = JSON.parse(captured[0]!) as { action: { command?: string; path?: string[]; content_read?: true } };
+    expect(state.action).toMatchObject({ command: 'pwd', path: ['reports/ledger.tsv'], content_read: true });
     expect(captured[0]).toContain('Review only parser source; do not disclose business data');
     expect(captured[0]).toContain('reports/ledger.tsv');
     expect(captured[0]).not.toContain('literal-provider-credential');

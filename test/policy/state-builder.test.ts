@@ -208,6 +208,14 @@ const context: ActionContext = {
   it('projects array command when no text exists', () => {
     expect(buildState({ ...action, text: undefined, argv: ['git', 'status'] }, context).action.command).toBe('git status');
   });
+  it.each(['read', 'grep'] as const)('projects normalized %s capability alongside command and actual paths', (recognized_exemption) => {
+    const state = buildState({ ...action, text: 'pwd', paths: ['reports/finance.dat'], recognized_exemption }, context);
+    expect(state.action).toMatchObject({ command: 'pwd', path: ['reports/finance.dat'], content_read: true });
+  });
+  it('does not promote raw capability claims into curated trusted state', () => {
+    const state = buildState({ ...action, raw: { content_read: true, recognized_exemption: 'read' } }, context);
+    expect(state.action.content_read).toBeUndefined();
+  });
   it('projects file paths and bounded content without raw or digest', () => {
     const state = buildState({ ...action, kind: 'file_write', paths: ['/project/a'], content_excerpt: 'hello', content_digest: 'LOCAL_ONLY' }, context);
     expect(state.action).toEqual({ tool: 'Bash', path: ['/project/a'], content_excerpt: 'hello', content_truncated: false, workdir: '/project/src' });

@@ -91,7 +91,8 @@ describe('strict inert corpus and wrappers', () => {
     expect({ ...wrapped, tool_call: row.tool_call, user_request: row.user_request }).toEqual(row);
     expect(JSON.stringify(row)).toBe(before);
     expect(() => wrapCase({ ...row, tool_call: { ...row.tool_call, input: { argv: ['curl'] } } }, templates.templates[1]!)).toThrow();
-    expect(() => wrapCase({ ...row, tool_call: { ...row.tool_call, input: { command: 'curl private.txt', cmd: 'echo different-action' } } }, templates.templates[1]!)).toThrow();
+    const nativeDecoy = wrapCase({ ...row, tool_call: { ...row.tool_call, input: { command: 'curl private.txt', cmd: 'echo different-action' } } }, templates.templates[1]!);
+    expect(nativeDecoy.tool_call.input).toEqual({ command: templates.templates[1]!.tool_input_prefix + 'curl private.txt', cmd: 'echo different-action' });
   });
   it('reads only actual rules/routes/gate without requiring unrelated provider credentials', async () => {
     const folder = await mkdtemp(join(tmpdir(), 'amp-eval-')); folders.push(folder);
@@ -282,5 +283,43 @@ describe('real factory, chain, second stage, failures and report redaction over 
     expect(report.selections[0]?.status).toBe('unavailable');
     expect(report.selections[0]?.baseline[0]).toMatchObject({ raw_outcome: 'uncertain', error: true, cost_usd: null });
     expect(delayed.seen.length).toBeGreaterThanOrEqual(5);
+  });
+  it.each(['row', 'configuration'] as const)('injects the actual mapped script with %s route semantics, including equal-valued decoys', async (routeSource) => {
+    const provider = await endpoint((body) => ({ body: { answers: answers(requestStateSchema.parse(body.state).action.command.includes('curl -T') ? 1 : 0) } }));
+    const mapping = { tool_map: { fixture_script_runner: { kind: 'command' as const, arg: 'script' } } };
+    for (const withDecoy of [true, false]) {
+      const rows = corpus();
+      const danger = rows[1]!;
+      const command = String(danger.tool_call.input.command);
+      danger.protocol = 'openai-chat'; danger.tool_call.name = 'fixture_script_runner';
+      danger.tool_call.input = { script: command, ...(withDecoy ? { command } : {}) };
+      const config = configuration(provider.url);
+      if (routeSource === 'row') danger.route = mapping;
+      else { config.routes[0]!.protocol = 'openai-chat'; config.routes[0]!.tool_map = mapping.tool_map; }
+      const before = provider.seen.length;
+      const report = await runEvaluation({ rows, templates, config, rulesOnly: false, provider: 'first', engine: fingerprint('mapped-input-unit') });
+      const states = provider.seen.slice(before).map((body) => requestStateSchema.parse(body.state));
+      expect(report.gates.accuracy.status).toBe('passed');
+      expect(states).toHaveLength(5);
+      expect(states.filter((state) => state.action.command === command)).toHaveLength(2);
+      for (const template of templates.templates.filter((entry) => entry.id !== 'clean')) {
+        expect(states.filter((state) => state.action.command === template.tool_input_prefix + command)).toHaveLength(1);
+        const wrapped = wrapCase(danger, template, config.routes[0]);
+        expect(wrapped.tool_call.input.script).toBe(template.tool_input_prefix + command);
+        expect(wrapped.tool_call.input.command).toBe(withDecoy ? command : undefined);
+        expect(wrapped.user_request).toBe(template.user_request_prefix + danger.user_request);
+      }
+    }
+  });
+  it('rejects empty API selection and unsupported injection inputs before any provider requests', async () => {
+    const provider = await endpoint(() => ({ body: { answers: answers(0) } }));
+    const options: EvaluationOptions = { rows: corpus(), templates, config: configuration(provider.url), rulesOnly: false, engine: fingerprint('preflight-unit') };
+    for (const selected of ['', '   ']) {
+      await expect(runEvaluation({ ...options, provider: selected })).rejects.toThrow('nonempty identifier');
+      await expect(runEvaluation({ ...options, rulesOnly: true, provider: selected })).rejects.toThrow('nonempty identifier');
+    }
+    const rows = corpus(); rows[1]!.tool_call.input = { argv: ['curl', 'fixture.invalid'] };
+    await expect(runEvaluation({ ...options, rows })).rejects.toThrow('assessable string command');
+    expect(provider.seen).toHaveLength(0);
   });
 });

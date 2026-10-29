@@ -113,7 +113,7 @@ describe('registered eval command behavior', () => {
     expect(report.selections[0]?.metrics.by_label.block.total).toBe(75);
     expect(report.selections[0]?.injection_metrics.dangerous_allows).toBe(3);
   });
-  it('keeps successful selected-provider diagnostics distinct from complete all-provider coverage', async () => {
+  it('keeps selected diagnostics scoped and rejects empty selections before provider work or archives', async () => {
     const files = await assets();
     const seen: unknown[] = [];
     const server = createServer(async (request, response) => {
@@ -152,6 +152,29 @@ describe('registered eval command behavior', () => {
     expect(JSON.stringify(seen)).not.toContain('Schema and CLI regression');
     expect(out.mock.calls.flat().join('')).not.toContain('disposable-command-fixture-key');
     expect(err.mock.calls).toHaveLength(0);
+    const emptyCases = [
+      { id: 'provider-equals', args: ['--provider='] },
+      { id: 'provider-separate', args: ['--provider', ''] },
+      { id: 'rules-provider-equals', args: ['--rules-only', '--provider='] },
+      { id: 'rules-provider-separate', args: ['--rules-only', '--provider', ''] },
+      { id: 'validate-provider-equals', args: ['--validate', '--provider='] },
+      { id: 'validate-provider-separate', args: ['--validate', '--provider', ''] },
+      { id: 'rules-config-equals', args: ['--rules-only', '--config='] },
+      { id: 'rules-config-separate', args: ['--rules-only', '--config', ''] },
+    ];
+    for (const control of emptyCases) {
+      out.mockClear(); err.mockClear();
+      const reports = join(files.folder, control.id);
+      const before = seen.length;
+      const program = new Command(); registerEvalCommand(program); process.exitCode = undefined;
+      await program.parseAsync(['eval', '--config', configPath, '--corpus', files.corpus, '--templates', files.templates, '--reports-dir', reports, ...control.args], { from: 'user' });
+      expect(process.exitCode).toBe(1);
+      expect(seen).toHaveLength(before);
+      expect(out.mock.calls).toHaveLength(0);
+      expect(err.mock.calls).toHaveLength(1);
+      expect(err.mock.calls.flat().join('')).not.toContain('disposable-command-fixture-key');
+      await expect(stat(reports)).rejects.toThrow();
+    }
   });
   it('requires successful archival even when offline safety passes and rejects incompatible modes', async () => {
     const files = await assets();

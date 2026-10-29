@@ -47,15 +47,16 @@ export function normalizeWorkBuddy(call: ToolCall, context: ActionContext, route
     return action;
   }
   if (kind === 'mcp') { action.kind = 'mcp'; action.paths = visiblePaths; return action; }
+  const contentRead = contentReadName.test(call.name) || descriptions.some((description) => contentReadDescription.test(description));
+  if (contentRead) {
+    action.recognized_exemption = /^grep$/i.test(call.name) ? 'grep' : 'read';
+    if (action.recognized_exemption === 'grep' && typeof input.glob === 'string') action.paths.push(normalizePath(input.glob, effective));
+  }
   if (commandKey !== undefined) return command(action, input[commandKey]);
   if (pathEvidence.present && ['content', 'new_string', 'new_source', 'edits'].some((key) => Object.hasOwn(input, key))) {
     return fileWrite(action, input, effective, policy);
   }
-  if (!executionHint && (contentReadName.test(call.name) || descriptions.some((description) => contentReadDescription.test(description)))) {
-    action.recognized_exemption = /^grep$/i.test(call.name) ? 'grep' : 'read';
-    if (action.recognized_exemption === 'grep' && typeof input.glob === 'string') action.paths.push(normalizePath(input.glob, effective));
-    return action;
-  }
+  if (!executionHint && contentRead) return action;
   // A mapped argument of an 'other' tool is still visible when it is named command/path.
   if (pathEvidence.present) {
     action.kind = 'file_write';

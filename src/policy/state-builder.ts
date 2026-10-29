@@ -8,6 +8,8 @@ export interface DecisionState {
     tool: string;
     command?: string;
     path?: string[];
+    /** Normalized read capability, never copied from raw tool arguments. */
+    content_read?: true;
     content_excerpt?: string;
     content_truncated?: boolean;
     url?: string;
@@ -32,6 +34,7 @@ function userText(context: ActionContext): string {
 /** Pure projection: raw inputs, model prose, results and justifications are excluded. */
 export function buildState(action: Action, context: ActionContext, policy: EffectivePolicy = DEFAULT_POLICY): DecisionState {
   const projected: DecisionState['action'] = { tool: action.tool };
+  if (action.recognized_exemption === 'read' || action.recognized_exemption === 'grep') projected.content_read = true;
   if (action.kind === 'command') {
     projected.command = action.text ?? action.argv?.join(' ') ?? '';
   } else if (action.kind === 'url') {

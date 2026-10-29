@@ -32,7 +32,11 @@ export function isReadonlyCommand(input: Action | string, policy: EffectivePolic
     if ((program === 'du' || program === 'find') && args.some((arg) => {
       const option = arg.split('=', 1)[0]!;
       return (option.length > 2 && '--files0-from'.startsWith(option))
-        || (program === 'find' && option.length > 2 && '-files0-from'.startsWith(option));
+        || (program === 'find' && option.length > 2 && '-files0-from'.startsWith(option))
+        || (program === 'du' && (
+          (option.startsWith('-') && !option.startsWith('--') && option.slice(1).includes('X'))
+          || (option !== '--exclude' && option.length > 2 && '--exclude-from'.startsWith(option))
+        ));
     })) return false;
     const forbidden = policy.readonly_unsafe_arguments[program] ?? [];
     if (args.some((arg) => {

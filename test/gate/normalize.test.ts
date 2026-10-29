@@ -363,7 +363,26 @@ describe('content-read capability survives residual other across protocols', () 
       expect(deterministicOutcome(executable, context, policy).outcome).toBe('block');
       const write = normalize('inspect_document', { path: 'data/a.txt', content: 'inert' }, protocol, undefined, context);
       expect(write.kind).toBe('file_write');
-      expect(write.recognized_exemption).toBeUndefined();
+      expect(write.recognized_exemption).toBe('read');
+    });
+    it.each([false, true])(`${protocol}: benign command arguments cannot erase read capabilities (encoded=%s)`, (encoded) => {
+      for (const explicitOther of [false, true]) {
+        for (const name of ['read_file', 'file_read', 'read-file', 'file-read', 'grep']) {
+          const input = { path: 'private/ledger.tsv', command: 'pwd' };
+          const action = normalize(name, encoded ? JSON.stringify(input) : input, protocol,
+            explicitOther ? { tool_map: { [name]: 'other' } } : undefined);
+          expect(action).toMatchObject({ kind: 'command', text: 'pwd', paths: ['private/ledger.tsv'], recognized_exemption: name === 'grep' ? 'grep' : 'read' });
+          expect(deterministicOutcome(action, ctx, policy).outcome).toBe('review');
+        }
+        for (const definition of [{ name: 'inspect_document', description: 'read file contents' }, { type: 'function', function: { name: 'inspect_document', description: 'read the contents of a file' } }]) {
+          const context = { ...ctx, request: { stream: false, tools: [definition] } };
+          const input = { path: 'reports/finance.dat', command: 'pwd' };
+          const action = normalize('inspect_document', encoded ? JSON.stringify(input) : input, protocol,
+            explicitOther ? { tool_map: { inspect_document: 'other' } } : undefined, context);
+          expect(action).toMatchObject({ kind: 'command', text: 'pwd', paths: ['reports/finance.dat'], recognized_exemption: 'read' });
+          expect(deterministicOutcome(action, context, policy).outcome).toBe('review');
+        }
+      }
     });
   }
   it.each(['command', 'file_write', 'url', 'mcp'] as const)('retains explicit non-other %s mapping before a read-capability hint', (kind) => {
