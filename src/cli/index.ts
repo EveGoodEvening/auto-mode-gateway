@@ -7,6 +7,7 @@ import { registerTokenCommand } from './token.js';
 import { registerServeCommand } from './serve.js';
 import { registerCheckCommand } from './check.js';
 import { registerAuditCommand } from './audit.js';
+import { registerEvalCommand } from './eval.js';
 
 const program = new Command();
 
@@ -20,6 +21,7 @@ registerTokenCommand(program);
 registerServeCommand(program);
 registerCheckCommand(program);
 registerAuditCommand(program);
+registerEvalCommand(program);
 
 try {
   await program.parseAsync();

@@ -49,13 +49,14 @@ describe('one constants-backed effective policy', () => {
     expect(DEFAULT_POLICY.thresholds.risk_block).toBe(0.7);
   });
 
-  it('replaces readonly programs before appending extras and retains shell invariants', () => {
-    const policy = configured({ readonly_programs: ['localread'], readonly_allow_extra: ['extra-read'] });
-    expect(isReadonlyCommand('localread', policy)).toBe(true);
-    expect(isReadonlyCommand('extra-read', policy)).toBe(true);
-    expect(isReadonlyCommand('pwd', policy)).toBe(false);
-    expect(isReadonlyCommand('extra-read > output', policy)).toBe(false);
-    expect(isReadonlyCommand('extra-read && rm file', policy)).toBe(false);
+  it('replaces readonly membership before extras without expanding audited metadata capabilities', () => {
+    const policy = configured({ readonly_programs: ['stat'], readonly_allow_extra: ['pwd', 'cat', 'localread'] });
+    expect(isReadonlyCommand('stat file', policy)).toBe(true);
+    expect(isReadonlyCommand('pwd', policy)).toBe(true);
+    expect(isReadonlyCommand('ls', policy)).toBe(false);
+    expect(isReadonlyCommand('cat file', policy)).toBe(false);
+    expect(isReadonlyCommand('localread', policy)).toBe(false);
+    expect(isReadonlyCommand('stat > output', policy)).toBe(false);
   });
 
   it('uses shell vocabulary replacements in parsing rather than retaining default aliases', () => {
@@ -66,11 +67,10 @@ describe('one constants-backed effective policy', () => {
   });
 
   it('merges argument records by program and replaces supplied entries in real classification', () => {
-    const policy = configured({ readonly_unsafe_arguments: { cat: ['--local-write'] }, readonly_positional_limits: { cat: 0 } });
-    expect(isReadonlyCommand('cat --local-write', policy)).toBe(false);
-    expect(isReadonlyCommand('cat file', policy)).toBe(false);
-    expect(isReadonlyCommand('sort -o output input', policy)).toBe(false);
-    expect(isReadonlyCommand('cat', policy)).toBe(true);
+    const policy = configured({ readonly_unsafe_arguments: { stat: ['--local-write'] }, readonly_positional_limits: { stat: 0 } });
+    expect(isReadonlyCommand('stat --local-write', policy)).toBe(false);
+    expect(isReadonlyCommand('stat file', policy)).toBe(false);
+    expect(isReadonlyCommand('stat', policy)).toBe(true);
   });
 
   it('replaces deny patterns and compiles extras with their historical case/unicode flags', () => {

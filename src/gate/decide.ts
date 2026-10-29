@@ -24,6 +24,30 @@ export interface GateOptions {
   policy?: EffectivePolicy;
 }
 
+export interface DeterministicResult {
+  outcome: 'allow' | 'block' | 'review';
+  rule: string;
+  reasons: string[];
+}
+
+/** The real pre-provider boundary, shared by enforcement and data-only evaluation. */
+export function deterministicOutcome(action: Action, context: GateContext, policy: EffectivePolicy): DeterministicResult {
+  const structural = action.execution_unavailable ? 'execution-unavailable'
+    : action.content_truncated || (action.kind === 'file_write' && Buffer.byteLength(action.content_excerpt ?? '', 'utf8') > policy.write_content_max_bytes) ? 'content-truncated' : undefined;
+  const denied = structural ?? hardDeny(action, policy, context);
+  if (denied) return { outcome: 'block', rule: denied, reasons: [denied] };
+  const sensitive = sensitivePaths(action, context, policy);
+  if (action.recognized_exemption === 'read' || action.recognized_exemption === 'grep') {
+    return { outcome: 'review', rule: 'content-read-review', reasons: sensitive.review ? [...sensitive.reasons] : ['content-read-review'] };
+  }
+  const exempt = !sensitive.review && (action.kind === 'other' || action.recognized_exemption !== undefined || isReadonlyCommand(action, policy, context));
+  if (exempt) {
+    const rule = action.kind === 'other' ? 'generic-other' : 'readonly';
+    return { outcome: 'allow', rule, reasons: [rule] };
+  }
+  return { outcome: 'review', rule: 'review-required', reasons: sensitive.reasons.length ? [...sensitive.reasons] : ['review-required'] };
+}
+
 /** The order is significant when configured thresholds overlap. */
 export function thresholdOutcome(answers: Answers, policy: EffectivePolicy): Outcome {
   const t = policy.thresholds;
@@ -115,15 +139,9 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
     try {
       if (context.signal?.aborted) verdict = base('block', 'caller-aborted');
       else {
-        const structural = action.execution_unavailable ? 'execution-unavailable'
-          : action.content_truncated || (action.kind === 'file_write' && Buffer.byteLength(action.content_excerpt ?? '', 'utf8') > policy.write_content_max_bytes) ? 'content-truncated' : undefined;
-        const denied = structural ?? hardDeny(action, policy, context);
-        if (denied) verdict = base('block', denied);
+        const deterministic = deterministicOutcome(action, context, policy);
+        if (deterministic.outcome !== 'review') verdict = base(deterministic.outcome, deterministic.rule, deterministic.reasons);
         else {
-          const sensitive = sensitivePaths(action, context, policy);
-          const exempt = !sensitive.review && (action.kind === 'other' || action.recognized_exemption !== undefined || isReadonlyCommand(action, policy, context));
-          if (exempt) verdict = base('allow', action.kind === 'other' ? 'generic-other' : 'readonly');
-          else {
             // Literal credentials are removed before state truncation, not afterwards.
             const stateContext: Omit<GateContext, 'signal'> = Object.fromEntries(Object.entries(context).filter(([key]) => key !== 'signal'));
             const state = buildState(redact({ ...action, raw: undefined }, secrets, policy), redact(stateContext, secrets, policy), policy);
@@ -169,7 +187,7 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
                     cost_usd: reviewed.cost_usd, input_tokens: reviewed.usage.input_tokens ?? null, output_tokens: reviewed.usage.output_tokens ?? null,
                     ...(reviewed.final_response ? { final_response: { ...reviewed.final_response } } : {}) });
                   verdict.outcome = reviewed.verdict;
-                  verdict.rule = 'llm-review';
+                  verdict.rule = reviewed.invalid_response ? 'llm-review-invalid' : 'llm-review';
                   cacheable = !reviewed.invalid_response;
                   // Provider text is never a diagnostic; audit sanitizes the full reason.
                   verdict.reasons = [redact(reviewed.reason, secrets, policy)];
@@ -189,7 +207,6 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
               if (cacheable) cache.set(key, cloneVerdict(verdict));
             }
           }
-        }
       }
     } catch {
       // Caller cancellation is not provider failure and can never fail open.

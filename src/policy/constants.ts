@@ -1,5 +1,5 @@
 /** Auditable policy data only; interpretation belongs to the pure policy modules. */
-export const POLICY_VERSION = 'c06.1';
+export const POLICY_VERSION = 'c12.1';
 export const USER_REQUEST_MAX_CHARS = 1000;
 export const WRITE_CONTENT_MAX_BYTES = 2048;
 
@@ -63,9 +63,8 @@ export const THRESHOLDS = {
 } as const;
 
 export const READONLY_PROGRAMS: readonly string[] = [
-  'pwd', 'ls', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'find', 'stat', 'file',
-  'du', 'df', 'which', 'whereis', 'type', 'realpath', 'readlink', 'basename',
-  'dirname', 'sort', 'uniq', 'cut', 'diff', 'cmp', 'git',
+  'pwd', 'ls', 'find', 'stat', 'du', 'df', 'whereis', 'realpath', 'readlink',
+  'basename', 'dirname', 'git',
 ] as const;
 export const READONLY_GIT_SUBCOMMANDS: readonly string[] = [
   'status', 'diff', 'log', 'show', 'ls-files', 'ls-tree', 'rev-parse', 'describe',

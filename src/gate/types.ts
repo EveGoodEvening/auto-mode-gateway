@@ -6,6 +6,7 @@ import type { AuditStage } from '../audit/record.js';
 export type Protocol = Config['routes'][number]['protocol'];
 export type NormalizationRoute = Pick<Config['routes'][number], 'tool_map' | 'project_dirs'>;
 export type ActionKind = 'command' | 'file_write' | 'url' | 'mcp' | 'other';
+/** Legacy field name: read/grep identify content capabilities requiring review, not exemptions. */
 export type RecognizedExemption = 'read' | 'glob' | 'grep' | 'ls' | 'todo' | 'task';
 
 /** Trusted caller context, never inferred from the gateway host's environment. */

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { normalizeToolCall } from '../../src/gate/normalize/index.js';
+import { deterministicOutcome } from '../../src/gate/decide.js';
 import { resolvePolicy } from '../../src/policy/effective.js';
 import { sensitivePaths } from '../../src/policy/sensitive-paths.js';
 import type { ActionContext, NormalizationRoute, Protocol } from '../../src/gate/types.js';
@@ -311,5 +312,64 @@ describe('write content identity and UTF-8 evidence bounds', () => {
     }, ctx, undefined, policy);
     expect(action.content_excerpt).toBe('ab💠');
     expect(action.content_truncated).toBe(false);
+  });
+});
+
+describe('content-read capability survives residual other across protocols', () => {
+  const policy = resolvePolicy();
+  for (const protocol of ['anthropic-messages', 'openai-responses', 'openai-chat'] as const) {
+    it.each(['Read', 'read', 'read_file', 'file_read', 'READ-FILE', 'file-read', 'Grep', 'grep'])(`${protocol}: reviews known %s with object and encoded arguments`, (name) => {
+      for (const input of [{ path: 'reports/business.tsv' }, JSON.stringify({ path: 'reports/business.tsv' })]) {
+        const action = normalize(name, input, protocol, { tool_map: { [name]: 'other' } });
+        expect(action.recognized_exemption).toBe(/^grep$/i.test(name) ? 'grep' : 'read');
+        expect(action.paths).toContain('reports/business.tsv');
+        expect(deterministicOutcome(action, ctx, policy).outcome).toBe('review');
+      }
+    });
+    it.each(['read file contents', 'read file content', 'read the contents of a file'])(`${protocol}: matched declaration capability %s is review, not permission`, (description) => {
+      for (const definition of [{ name: 'inspect_document', description }, { type: 'function', function: { name: 'inspect_document', description } }]) {
+        const context = { ...ctx, request: { stream: false, tools: [definition] } };
+        const action = normalize('inspect_document', JSON.stringify({ path: 'data/ledger.dat' }), protocol,
+          { tool_map: { inspect_document: 'other' } }, context);
+        expect(action).toMatchObject({ kind: 'other', recognized_exemption: 'read', paths: ['data/ledger.dat'] });
+        expect(deterministicOutcome(action, context, policy).outcome).toBe('review');
+      }
+      const action = normalizeToolCall(protocol, { id: 'description', name: 'inspect_document', input: {}, raw: { description } }, ctx);
+      expect(action.recognized_exemption).toBe('read');
+      expect(deterministicOutcome(action, ctx, policy).outcome).toBe('review');
+    });
+    it(`${protocol}: neither unrelated declarations nor read substrings tighten genuine other`, () => {
+      for (const name of ['breadboard', 'thread', 'opaque_tool']) {
+        const context = { ...ctx, request: { stream: false, tools: [{ name: 'different_tool', description: 'read file contents' }] } };
+        const action = normalize(name, {}, protocol, undefined, context);
+        expect(action.recognized_exemption).toBeUndefined();
+        expect(deterministicOutcome(action, context, policy).outcome).toBe('allow');
+      }
+      for (const description of ['read-only', 'metadata']) {
+        const action = normalizeToolCall(protocol, { id: 'other', name: 'opaque_tool', input: {}, raw: { description } }, ctx);
+        expect(deterministicOutcome(action, ctx, policy).outcome).toBe('allow');
+      }
+    });
+    it(`${protocol}: missing or unusable read paths never become generic-other allow`, () => {
+      for (const input of [{}, { path: '' }, { path: 42 }, 'not JSON']) {
+        const action = normalize('read_file', input, protocol);
+        expect(deterministicOutcome(action, ctx, policy).outcome).not.toBe('allow');
+      }
+    });
+    it(`${protocol}: new read hints never erase visible command or file-write capabilities`, () => {
+      const context = { ...ctx, request: { stream: false, tools: [{ name: 'inspect_document', description: 'read file contents' }] } };
+      const executable = normalize('inspect_document', { command: 'rm -rf /', path: 'data/a.txt' }, protocol, undefined, context);
+      expect(executable.kind).toBe('command');
+      expect(deterministicOutcome(executable, context, policy).outcome).toBe('block');
+      const write = normalize('inspect_document', { path: 'data/a.txt', content: 'inert' }, protocol, undefined, context);
+      expect(write.kind).toBe('file_write');
+      expect(write.recognized_exemption).toBeUndefined();
+    });
+  }
+  it.each(['command', 'file_write', 'url', 'mcp'] as const)('retains explicit non-other %s mapping before a read-capability hint', (kind) => {
+    const action = normalize('read_file', { path: 'notes.txt', content: 'inert', command: 'pwd', url: 'https://example.invalid' },
+      'openai-chat', { tool_map: { read_file: kind } });
+    expect(action.kind).toBe(kind);
+    expect(action.recognized_exemption).toBeUndefined();
   });
 });

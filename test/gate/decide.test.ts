@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { configSchema } from '../../src/config/schema.js';
 import type { Answers, DecisionProvider, DecisionResult } from '../../src/decision/types.js';
 import type { ReviewResult } from '../../src/decision/llm-review.js';
-import { createGate, thresholdOutcome } from '../../src/gate/decide.js';
+import { createGate, deterministicOutcome, thresholdOutcome } from '../../src/gate/decide.js';
 import { normalizeToolCall } from '../../src/gate/normalize/index.js';
 import type { Action, GateContext } from '../../src/gate/types.js';
 import { resolvePolicy } from '../../src/policy/effective.js';
@@ -44,6 +44,50 @@ describe('threshold precedence and exact boundaries', () => {
   });
 });
 
+describe('shared deterministic boundary', () => {
+  const policy = resolvePolicy();
+  it.each([
+    [{ ...action, text: 'pwd' }, 'allow'],
+    [{ ...action, kind: 'other' as const, text: undefined }, 'allow'],
+    [action, 'review'],
+    [{ ...action, kind: 'file_write' as const, paths: ['/project/note.txt'], content_excerpt: 'inert' }, 'review'],
+    [{ ...action, kind: 'other' as const, paths: ['/project/.env'], recognized_exemption: 'read' as const }, 'review'],
+    [{ ...action, kind: 'other' as const, paths: ['/project/.env'] }, 'review'],
+    [{ ...action, text: 'rm -rf /' }, 'block'],
+    [{ ...action, kind: 'other' as const, execution_unavailable: true }, 'block'],
+    [{ ...action, kind: 'file_write' as const, content_truncated: true }, 'block'],
+  ])('preserves the real pre-provider result for %j', async (input, outcome) => {
+    const result = deterministicOutcome(input, ctx, policy);
+    expect(result.outcome).toBe(outcome);
+    const p = provider();
+    const cfg = config(); cfg.gate.on_provider_failure = 'allow';
+    const verdict = await createGate(cfg, { providers: [p], audit, policy }).decide(input, ctx);
+    if (outcome === 'review') {
+      expect(p.decide).toHaveBeenCalledTimes(1);
+      expect(verdict.provider).toBe('one');
+    } else {
+      expect(p.decide).not.toHaveBeenCalled();
+      expect(verdict).toMatchObject({ outcome, rule: result.rule, reasons: result.reasons });
+    }
+  });
+});
+
+describe('review outcome provenance', () => {
+  it.each([false, true])('distinguishes valid denial from invalid review without changing block/cache semantics: %s', async (invalid) => {
+    const review = vi.fn(async (): Promise<ReviewResult> => ({
+      verdict: 'block', reason: 'Inert review result', provider: 'second_stage', model: 'inert',
+      latency_ms: 0, usage: {}, cost_usd: null, ...(invalid ? { invalid_response: true } : {}),
+    }));
+    const gate = createGate(config(), { providers: [provider({ ...safe, destructive: 0.4 })], reviewer: { review }, audit });
+    const first = await gate.decide(action, ctx);
+    const second = await gate.decide(action, ctx);
+    expect(first).toMatchObject({ outcome: 'block', raw_outcome: 'uncertain', rule: invalid ? 'llm-review-invalid' : 'llm-review' });
+    expect(second).toMatchObject({ outcome: 'block', raw_outcome: 'uncertain' });
+    expect(second.cache_hit === true).toBe(!invalid);
+    expect(review).toHaveBeenCalledTimes(invalid ? 2 : 1);
+  });
+});
+
 describe('gate branches and audit', () => {
   it.each([
     [{ ...action, text: 'rm -rf /' }, 'root-home-delete'],
@@ -72,7 +116,6 @@ describe('gate branches and audit', () => {
     { ...action, kind: 'other' as const, text: undefined, paths: [] },
     { ...action, kind: 'other' as const, text: undefined, recognized_exemption: 'todo' as const },
     { ...action, kind: 'other' as const, text: undefined, recognized_exemption: 'task' as const },
-    { ...action, kind: 'other' as const, text: undefined, paths: ['/project/note.txt'], recognized_exemption: 'read' as const },
     { ...action, text: 'pwd' },
   ])('allows non-sensitive genuine other and recognized exemptions', async (input) => {
     const p = provider(); const gate = createGate(config(), { providers: [p], audit });
@@ -81,9 +124,11 @@ describe('gate branches and audit', () => {
   });
   it.each([
     { ...action, text: 'cat ~/.ssh/id_rsa' },
+    { ...action, text: 'cat /project/reports/ledger.tsv' },
+    { ...action, kind: 'other' as const, paths: ['/project/plain.txt'], recognized_exemption: 'read' as const },
     { ...action, kind: 'other' as const, paths: ['/project/.env'], recognized_exemption: 'read' as const },
     { ...action, kind: 'other' as const, paths: ['/project/.env'] },
-  ])('reviews sensitive paths before any exemption', async (input) => {
+  ])('reviews content reads and sensitive paths before any exemption', async (input) => {
     const p = provider({ ...safe, exfiltration: 0.9 });
     expect(await createGate(config(), { providers: [p], audit }).decide(input, ctx)).toMatchObject({ outcome: 'block', provider: 'one' });
     expect(p.decide).toHaveBeenCalledTimes(1);
@@ -216,5 +261,42 @@ describe('failure, cancellation and cache boundaries', () => {
     expect(p.decide).toHaveBeenCalledTimes(3);
     expect(audit.mock.calls[1]?.[0]).toMatchObject({ delivery: 'shadow' });
     expect((await first.decide(action, ctx)).cache_hit).toBe(true);
+  });
+});
+
+describe('content approval state and cache semantics', () => {
+  it.each(['anthropic-messages', 'openai-responses', 'openai-chat'] as const)('%s: native reads reach the actual provider with redacted user intent and remain context-cached', async (protocol) => {
+    const captured: string[] = [];
+    const p: DecisionProvider = { id: 'one', async decide(state) {
+      captured.push(JSON.stringify(state));
+      return { answers: { ...safe }, provider: 'one', model: 'inert', latency_ms: 0, usage: {}, cost_usd: null };
+    } };
+    const context = { ...ctx, lastUserText: 'Review only parser source; do not disclose business data literal-provider-credential' };
+    const read = normalizeToolCall(protocol, { id: 'read', name: 'read_file', input: JSON.stringify({ path: 'reports/ledger.tsv' }), raw: { justification: 'ASSISTANT_APPROVAL' } }, context);
+    const gate = createGate(config(), { providers: [p], audit });
+    expect(deterministicOutcome(read, context, resolvePolicy()).outcome).toBe('review');
+    expect(await gate.decide(read, context)).toMatchObject({ outcome: 'allow', provider: 'one' });
+    expect(await gate.decide(read, context)).toMatchObject({ cache_hit: true, cost_usd: 0 });
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('Review only parser source; do not disclose business data');
+    expect(captured[0]).toContain('reports/ledger.tsv');
+    expect(captured[0]).not.toContain('literal-provider-credential');
+    expect(captured[0]).not.toContain('ASSISTANT_APPROVAL');
+    await gate.decide(read, { ...context, lastUserText: 'Different actual user request' });
+    expect(captured).toHaveLength(2);
+    const changed = config(); changed.policy.version = 'different-reviewed-policy';
+    const other = createGate(changed, { providers: [p], audit });
+    expect((await other.decide(read, context)).policy_version).toBe('different-reviewed-policy');
+    expect(captured).toHaveLength(3);
+  });
+  it('retains hard barriers before read approval even with failure allow', async () => {
+    const cfg = config(); cfg.gate.on_provider_failure = 'allow';
+    const p = provider(); const gate = createGate(cfg, { providers: [p], audit });
+    for (const input of [
+      { ...action, text: 'rm -rf /', recognized_exemption: 'read' as const },
+      { ...action, kind: 'other' as const, execution_unavailable: true, recognized_exemption: 'read' as const },
+      { ...action, kind: 'file_write' as const, content_truncated: true, recognized_exemption: 'read' as const },
+    ]) expect((await gate.decide(input, ctx)).outcome).toBe('block');
+    expect(p.decide).not.toHaveBeenCalled();
   });
 });

@@ -73,17 +73,17 @@ describe('shell-parse: quote-aware complete command classification', () => {
   });
 });
 
-describe('readonly-allowlist: every segment must be side-effect free', () => {
+describe('readonly-allowlist: every segment must be audited metadata-only', () => {
   const cases: [string, boolean][] = [
-    ['pwd', true], ['ls -lah src', true], ['cat README.txt', true],
-    ['head -n 20 file.txt', true], ['tail -n 5 file.txt', true], ['wc -l file.txt', true],
-    ['grep -n pattern file.txt', true], ['rg --files src', true], ['stat file.txt', true],
+    ['pwd', true], ['ls -lah src', true], ['cat README.txt', false],
+    ['head -n 20 file.txt', false], ['tail -n 5 file.txt', false], ['wc -l file.txt', false],
+    ['grep -n pattern file.txt', false], ['rg --files src', false], ['stat file.txt', true],
     ['find src -type f -name "*.ts"', true], ['git status --short', false],
     ['git --no-pager diff --no-ext-diff --no-textconv --stat', false],
     ['git --no-pager log --no-ext-diff --no-textconv -5 --oneline', false],
     ['git --no-pager show --no-ext-diff --no-textconv HEAD:README.txt', false],
-    ['git --no-pager status', false], ['ls | head && pwd; wc file.txt', true],
-    ['sort file.txt', true], ['uniq file.txt', true], ['file document.txt', true],
+    ['git --no-pager status', false], ['ls | head && pwd; wc file.txt', false],
+    ['sort file.txt', false], ['uniq file.txt', false], ['file document.txt', false],
     ['ls | rm -rf x', false], ['ls; touch x', false], ['ls && npm install', false],
     ['find . -delete', false], ['find . -exec rm {} \\;', false],
     ['find . -execdir cat {} \\;', false], ['find . -ok cat {} \\;', false],
@@ -103,10 +103,11 @@ describe('readonly-allowlist: every segment must be side-effect free', () => {
   it.each(cases)('%j readonly=%s', (text, expected) => {
     expect(isReadonlyCommand(text)).toBe(expected);
   });
-  it('does not grant extras the power to override unsafe syntax', () => {
-    const policy = resolvePolicy({ readonly_allow_extra: ['inspect'] });
-    expect(isReadonlyCommand('inspect src', policy)).toBe(true);
-    expect(isReadonlyCommand('inspect > result', policy)).toBe(false);
+  it('does not let extras approve content programs or unaudited custom programs', () => {
+    const policy = resolvePolicy({ readonly_allow_extra: ['inspect', 'cat', 'type', 'which'] });
+    for (const text of ['inspect src', 'cat src/plain.txt', 'type helper', 'which helper', 'inspect > result']) {
+      expect(isReadonlyCommand(text, policy)).toBe(false);
+    }
   });
   it('sensitive reads are not exempt even when their program is readonly', () => {
     for (const text of ['cat .env', 'cat ~/.ssh/id_rsa', 'head server.pem', 'grep token secrets.key']) {
@@ -115,6 +116,37 @@ describe('readonly-allowlist: every segment must be side-effect free', () => {
   });
   it('missing command path context is not proof of a safe read', () => {
     expect(isReadonlyCommand(command('cat README.txt'))).toBe(false);
+  });
+});
+
+describe('content-read approval boundary and metadata controls', () => {
+  const policy = resolvePolicy({ sensitive_path_globs: [], readonly_allow_extra: ['cat', 'which', 'type'] });
+  const context = { platform: 'linux', project_dir: '/project', workdir: '/project' };
+  it.each([
+    'cat notes/public.txt', 'head notes/public.txt', 'tail notes/public.txt', 'wc -l notes/public.txt',
+    'grep -l pattern notes/public.txt', 'rg --files notes', 'sort notes/public.txt', 'uniq',
+    'cut -f1 notes/public.txt', 'diff a.txt b.txt', 'cmp a.txt b.txt', 'file image.bin',
+    'type helper', 'which helper', 'cat', 'cat unrelated/payroll.tsv',
+    'pwd | cat', 'ls; head note.txt', 'stat note.txt && wc note.txt', 'pwd || tail note.txt',
+    'ls < note.txt', 'ls $(cat note.txt)', 'ls `cat note.txt`', 'sh -c "cat note.txt"',
+  ])('never exempts content-bearing or nested %j', (text) => {
+    expect(isReadonlyCommand(command(text), policy, context)).toBe(false);
+  });
+  it.each([
+    'pwd', 'ls notes', 'find notes -type f', 'stat notes/file.txt', 'du notes', 'df',
+    'whereis node', 'realpath notes/file.txt', 'readlink notes/link', 'basename notes/file.txt',
+    'dirname notes/file.txt', 'git --no-pager rev-parse --show-toplevel', 'pwd && ls notes',
+  ])('retains bounded metadata candidate %j subject to path policy', (text) => {
+    expect(isReadonlyCommand(command(text), policy, context)).toBe(true);
+  });
+  it.each([
+    'du --files0-from notes/list', 'du --files0-from=notes/list', 'du --files0-from -',
+    'du --files0-from=-', 'du --files0-f notes/list', 'du --files=notes/list', 'du --f=-',
+    'find -files0-from notes/list', 'find -files0-from=notes/list', 'find -files0-from -',
+    'find -files0-from=-', 'find --files0-from notes/list', 'find --files0-from=-',
+    'find -files0-f notes/list', 'find -files=notes/list', 'find --files=-',
+  ])('rejects metadata content-input option independently of sensitive scope: %j', (text) => {
+    expect(isReadonlyCommand(command(text), policy, context)).toBe(false);
   });
 });
 
@@ -340,15 +372,17 @@ describe('resolved policy reaches shell classification boundaries', () => {
   });
   it('replaces readonly programs and arguments without relaxing syntax barriers', () => {
     const policy = resolvePolicy({
-      readonly_programs: ['inspect', 'uniq', 'find'],
-      readonly_unsafe_arguments: { inspect: ['--write'] },
-      readonly_positional_limits: { uniq: 2 }, find_unsafe_arguments: ['-custom-write'],
+      readonly_programs: ['stat', 'ls', 'uniq', 'find'],
+      readonly_unsafe_arguments: { stat: ['--write'] },
+      readonly_positional_limits: { ls: 2 }, find_unsafe_arguments: ['-custom-write'],
     });
     expect(isReadonlyCommand('pwd', policy)).toBe(false);
-    expect(isReadonlyCommand('inspect src', policy)).toBe(true);
-    expect(isReadonlyCommand('inspect --write src', policy)).toBe(false);
-    expect(isReadonlyCommand('inspect src > out', policy)).toBe(false);
-    expect(isReadonlyCommand('uniq input output', policy)).toBe(true);
+    expect(isReadonlyCommand('stat src', policy)).toBe(true);
+    expect(isReadonlyCommand('stat --write src', policy)).toBe(false);
+    expect(isReadonlyCommand('stat src > out', policy)).toBe(false);
+    expect(isReadonlyCommand('ls input output', policy)).toBe(true);
+    expect(isReadonlyCommand('ls a b c', policy)).toBe(false);
+    expect(isReadonlyCommand('uniq input output', policy)).toBe(false);
     expect(isReadonlyCommand('find src -custom-write', policy)).toBe(false);
   });
   it('replaces Git command/option data without relaxing helper guarantees', () => {
@@ -377,4 +411,10 @@ describe('resolved policy reaches shell classification boundaries', () => {
     expect(hardDeny(command('publish ~/.ssh/authorized_keys'), policy)).toBe('authorized-keys-write');
     expect(hardDeny(command('edit -i ~/.ssh/authorized_keys'), policy)).toBe('authorized-keys-write');
   });
+});
+
+it.each(['type notes.txt', 'type helper', 'which helper'])('never treats Windows/shell content %j as metadata', (text) => {
+  const context = { platform: 'win32', project_dir: 'c:/repo', workdir: 'c:/repo' };
+  const policy = resolvePolicy({ sensitive_path_globs: [], readonly_allow_extra: ['type', 'which'] });
+  expect(isReadonlyCommand(command(text), policy, context)).toBe(false);
 });

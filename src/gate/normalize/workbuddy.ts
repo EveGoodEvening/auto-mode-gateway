@@ -1,10 +1,12 @@
 import { DEFAULT_POLICY, type EffectivePolicy } from '../../policy/effective.js';
 import type { ToolCall } from '../../protocols/types.js';
 import type { Action, ActionContext, NormalizationRoute } from '../types.js';
-import { base, command, fileWrite, inputObject, object, pathInput, string } from './shared.js';
+import { base, command, fileWrite, inputObject, normalizePath, object, pathInput, string } from './shared.js';
 
 const commandKeys = ['command', 'cmd', 'script', 'chars'] as const;
 const executionName = /shell|bash|command|terminal|exec|run/i;
+const contentReadName = /^(?:read|grep|read[_-]file|file[_-]read)$/i;
+const contentReadDescription = /\bread file contents?\b|\bread the contents of a file\b/i;
 
 export function normalizeWorkBuddy(call: ToolCall, context: ActionContext, route?: NormalizationRoute, policy: EffectivePolicy = DEFAULT_POLICY): Action {
   const effective = { ...context };
@@ -46,11 +48,16 @@ export function normalizeWorkBuddy(call: ToolCall, context: ActionContext, route
   }
   if (kind === 'mcp') { action.kind = 'mcp'; action.paths = visiblePaths; return action; }
   if (commandKey !== undefined) return command(action, input[commandKey]);
+  if (pathEvidence.present && ['content', 'new_string', 'new_source', 'edits'].some((key) => Object.hasOwn(input, key))) {
+    return fileWrite(action, input, effective, policy);
+  }
+  if (!executionHint && (contentReadName.test(call.name) || descriptions.some((description) => contentReadDescription.test(description)))) {
+    action.recognized_exemption = /^grep$/i.test(call.name) ? 'grep' : 'read';
+    if (action.recognized_exemption === 'grep' && typeof input.glob === 'string') action.paths.push(normalizePath(input.glob, effective));
+    return action;
+  }
   // A mapped argument of an 'other' tool is still visible when it is named command/path.
   if (pathEvidence.present) {
-    if (['content', 'new_string', 'new_source', 'edits'].some((key) => Object.hasOwn(input, key))) {
-      return fileWrite(action, input, effective, policy);
-    }
     action.kind = 'file_write';
     action.paths = visiblePaths;
     return action;

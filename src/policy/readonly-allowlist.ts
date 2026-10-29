@@ -1,6 +1,7 @@
 import { quote } from 'shell-quote';
 
 import type { Action, ActionContext } from '../gate/types.js';
+import { READONLY_PROGRAMS } from './constants.js';
 import { DEFAULT_POLICY, type EffectivePolicy } from './effective.js';
 import { sensitivePaths } from './sensitive-paths.js';
 import { parseShell, shellProgram } from './shell-parse.js';
@@ -12,7 +13,7 @@ const GIT_METADATA_FLAGS: Readonly<Record<string, true>> = {
   '--is-bare-repository': true,
 };
 
-/** Syntax-only strings are useful for classification; Actions additionally require safe path context. */
+/** Metadata-only classification; Actions additionally require safe lexical path context. */
 export function isReadonlyCommand(input: Action | string, policy: EffectivePolicy = DEFAULT_POLICY, context: ActionContext = {}): boolean {
   if (typeof input !== 'string') {
     if (input.kind !== 'command' || input.execution_unavailable) return false;
@@ -26,7 +27,13 @@ export function isReadonlyCommand(input: Action | string, policy: EffectivePolic
     const program = shellProgram(executable);
     // An arbitrary ./git is not the audited system git just because the basename matches.
     if (executable.includes('/') || executable.includes('\\')) return false;
-    if (!policy.readonly_programs.includes(program)) return false;
+    // Effective overrides may narrow the audited metadata subset, never approve content reads.
+    if (!READONLY_PROGRAMS.includes(program) || !policy.readonly_programs.includes(program)) return false;
+    if ((program === 'du' || program === 'find') && args.some((arg) => {
+      const option = arg.split('=', 1)[0]!;
+      return (option.length > 2 && '--files0-from'.startsWith(option))
+        || (program === 'find' && option.length > 2 && '-files0-from'.startsWith(option));
+    })) return false;
     const forbidden = policy.readonly_unsafe_arguments[program] ?? [];
     if (args.some((arg) => {
       const option = arg.split('=', 1)[0]!;

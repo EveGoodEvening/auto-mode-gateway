@@ -158,10 +158,4 @@ describe('check actual configuration and HTTP behavior', () => {
     expect(result.stderr).not.toContain(home);
   });
 
-  it('registers check and audit alongside existing implemented commands', async () => {
-    const result = await run(['--help']);
-    expect(result.code).toBe(0);
-    for (const command of ['init', 'token', 'serve', 'check', 'audit']) expect(result.stdout).toContain(command);
-    expect(result.stdout).not.toContain('eval [');
-  });
 });
