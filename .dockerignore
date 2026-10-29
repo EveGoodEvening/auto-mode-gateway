@@ -1,0 +1,32 @@
+# Deny by default: audit, reports, private config, fixtures and local artifacts
+# never enter a build context or any image layer.
+**
+!package.json
+!package-lock.json
+!.npmrc
+!LICENSE
+!tsconfig.json
+!tsup.config.ts
+!src/
+!src/**
+!eval/
+!eval/cases.jsonl
+!eval/injection-templates.json
+!deploy/
+!deploy/Dockerfile
+# Defense in depth even inside the explicitly included source directories.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/id_rsa*
+**/id_ed25519*
+**/credentials*
+**/secrets*
+**/config.yaml
+**/config.yml
+**/reports/**
+**/fixtures/**
+**/node_modules/**

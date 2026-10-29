@@ -2,8 +2,11 @@
 # Interpolation applies to parsed string VALUES, not YAML source or mapping keys.
 # Values remain strings: ${PORT} is not a substitute for a numeric YAML port.
 # These provider model/endpoint examples are not live-canary verification.
+# Docker example: config.yaml must be readable by uid 1000; never put keys here.
+# For local non-container use, change host to 127.0.0.1.
+# Non-loopback listeners require nonempty client tokens. Keep 8484 internal.
 listen:
-  host: 127.0.0.1
+  host: 0.0.0.0
   port: 8484
 trust_proxy: false
 limits:

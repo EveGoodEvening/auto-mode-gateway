@@ -1,0 +1,70 @@
+# Copy config.example.yaml to config.yaml and .env.example to .env; fill .env.
+# config.yaml must be readable by uid 1000 (e.g. 0644 with NO literal keys).
+# Keep .env private (0600). Values enter runtime env, never build arguments.
+# New audit volumes inherit uid 1000; existing volumes must already be writable
+# by uid 1000. Never repair permissions by running the proxy as root.
+services:
+  proxy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: auto-mode-proxy:local
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      AMP_AUDIT_PATH: /app/audit/audit.jsonl
+    volumes:
+      - type: bind
+        source: ./config.yaml
+        target: /app/config/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - audit:/app/audit
+    # No ports: Caddy is the only ingress. Egress is needed for trusted providers.
+    expose:
+      - "8484"
+    networks:
+      - gateway
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    pids_limit: 128
+    stop_grace_period: 20s
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN to your authorized public DNS name}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - type: bind
+        source: ./Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind:
+          create_host_path: false
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - gateway
+    depends_on:
+      proxy:
+        condition: service_healthy
+    mem_limit: 128m
+    pids_limit: 64
+networks:
+  gateway:
+volumes:
+  audit:
+  caddy_data:
+  caddy_config:

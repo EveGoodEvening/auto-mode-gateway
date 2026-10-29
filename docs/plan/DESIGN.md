@@ -244,6 +244,10 @@ Authority is the user's explicit `content_reads = A：读取内容先审批` and
 36. 加固：非 loopback 监听必须配置 client token；请求体上限；上游超时；`trust_proxy` 处理 `X-Forwarded-For`；日志与审计全程不含凭证；`/_amp/status` 仅 loopback 或管理 token 可访问。
 37. 文档：README（EN/中文）、`docs/threat-model.md`（含明确的非目标：不防中转站篡改文本内容、不是沙箱、决策模型可被欺骗故以规则与 fail-closed 兜底）、`docs/compat.md`（各 agent 版本验证矩阵）。
 
+**C13 ACTIVE after C12 local closure `4b6b9ab1ab942a90283a9c2eed9b61578e3aaf13`.** Scope is ONLY P8-1/P8-2/P8-4 LOCAL, not C14/C15. Distribution retains `files` = `dist`, `README*`, `LICENSE`; only public corpus/templates enter `dist/eval/assets`, with module-relative defaults and caller-owned report output. Runtime logs reuse complete configured-secret collection/effective-policy sanitization; forwarded IP addresses are logging-only, never status authorization. Existing inbound/response limits and transport deadlines remain intact. Implementation is not verification: parent package/HTTP/container/audit and fresh R8 proofs remain pending, public HTTPS/live providers/release remain unverified, and P7-2/P7-3 remain unchecked with scoped blockers.
+
+**C13 green implementation-only DRAFT checkpoint authorized, not closure.** Parent bg30 G2444/typecheck/lint/build, corrected isolated npm audit0 and source+built validation PASS. Latest source report5b4 matches all seven cf3dd fingerprints and passes offline-safety while numerical accuracy FAILS/release remains incomplete/live unverified; built bundle needs its own appropriate engine identity. Package/container actual runtime proofs and execution-safety clearance remain PENDING. Selected deploy/.env/config.yaml and projected DOMAIN prerequisites are absent only in the audited deployment scope; ownership/DNS/host/ports remain unknown. No P8/full-P7 checkbox or public HTTPS/release claim follows from the draft; C13 remains ACTIVE and C14 unselected.
+
 ## Validation plan
 
 - 单元测试：三种协议的 SSE 解析/改写（录制 fixture，含并行调用、ping、错误、容忍 JSON）；规则引擎表驱动测试；脱敏；归一化（含 `apply_patch` 路径解析）；三类决策 adapter 的请求/响应编解码（mock HTTP）。

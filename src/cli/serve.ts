@@ -1,7 +1,7 @@
 import type { Socket } from 'node:net';
 import { serve } from '@hono/node-server';
 import { Command, Option } from 'commander';
-import pino from 'pino';
+import { createLogger } from '../util/log.js';
 
 import { loadConfig } from '../config/load.js';
 import type { Config } from '../config/schema.js';
@@ -9,7 +9,7 @@ import { createApp } from '../server/app.js';
 
 /** Own only this listener and its sockets; never terminate another process. */
 export async function runServer(config: Config): Promise<void> {
-  const logger = pino({ level: config.log_level }, process.stderr);
+  const logger = createLogger(config);
   const app = createApp(config);
   const sockets = new Set<Socket>();
   const { promise, resolve, reject } = Promise.withResolvers<void>();
@@ -19,9 +19,6 @@ export async function runServer(config: Config): Promise<void> {
     port: config.listen.port,
   }, () => {
     if (config.gate.mode === 'shadow') logger.warn('Shadow mode records hypothetical decisions without blocking tools');
-    if (config.routes.some((route) => route.protocol === 'openai-chat')) {
-      logger.warn('Chat Completions tool-use enforcement is not installed; Chat routes are unprotected');
-    }
     logger.info('Server listening');
   });
   let closing = false;
@@ -65,7 +62,7 @@ export async function runServer(config: Config): Promise<void> {
 
 export function registerServeCommand(program: Command): void {
   program.command('serve')
-    .description('Run authenticated transport with Anthropic tool-use enforcement.')
+    .description('Run authenticated transport with protocol-specific tool-use enforcement.')
     .option('--config <path>', 'configuration file path')
     .addOption(new Option('--log-level <level>', 'override configured log level')
       .choices(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']))

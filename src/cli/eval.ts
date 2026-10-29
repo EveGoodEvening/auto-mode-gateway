@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Command } from 'commander';
 import { parseDocument } from 'yaml';
 import { z } from 'zod';
@@ -47,8 +48,8 @@ export function registerEvalCommand(program: Command): void {
   program.command('eval')
     .description('Evaluate inert labeled tool-call data against the real gate; never execute corpus actions.')
     .option('--config <path>', 'provider configuration (rules-only reads only policy, gate and routes)')
-    .option('--corpus <path>', 'JSONL corpus path', 'eval/cases.jsonl')
-    .option('--templates <path>', 'injection templates path', 'eval/injection-templates.json')
+    .option('--corpus <path>', 'JSONL corpus path', fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../../eval/cases.jsonl' : '../eval/assets/cases.jsonl', import.meta.url)))
+    .option('--templates <path>', 'injection templates path', fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../../eval/injection-templates.json' : '../eval/assets/injection-templates.json', import.meta.url)))
     .option('--reports-dir <path>', 'exclusive timestamped JSON report directory', 'eval/reports')
     .option('--provider <id>', 'evaluate one configured provider (otherwise all providers and full chain)')
     .option('--rules-only', 'offline-safety gate; retain measured accuracy and fail-closed uncertainty; no external calls')

@@ -1,7 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import type { HttpBindings } from '@hono/node-server';
 import { Hono } from 'hono';
-import pino from 'pino';
 
 import type { Config } from '../config/schema.js';
 import { createAuditLogger } from '../audit/logger.js';
@@ -14,6 +13,7 @@ import { isClassifierRequest, isSuspectedClassifierRequest, prepareClassifierTar
 import { responsesAdapter } from '../protocols/openai-responses/adapter.js';
 import { chatAdapter } from '../protocols/openai-chat/adapter.js';
 import type { RequestContext } from '../protocols/types.js';
+import { createLogger, clientAddressForLog } from '../util/log.js';
 import { authenticate, buildUpstreamHeaders } from './auth.js';
 import { errorResponse } from './errors.js';
 import { resolveRoute } from './router.js';
@@ -69,11 +69,19 @@ export function createApp(config: Config) {
   const deliveryState = createClaudeDeliveryState();
   // Process-local HMAC prevents stored correlation keys from exposing credentials.
   const identityKey = randomBytes(32);
-  const logger = pino({ level: config.log_level }, process.stderr);
+  const logger = createLogger(config);
 
   app.onError(() => {
     logger.error('Request transport failed');
     return errorResponse(500, 'api_error', 'Request transport failed');
+  });
+  app.use('*', async (context, next) => {
+    await next();
+    logger.info({
+      method: context.req.method,
+      status: context.res.status,
+      client_address: clientAddressForLog(context.req.raw.headers, context.env?.incoming?.socket.remoteAddress, config.trust_proxy),
+    }, 'Request completed');
   });
   app.get('/healthz', (context) => context.json({ status: 'ok' }));
   app.get('/_amp/status', (context) => status.response(
