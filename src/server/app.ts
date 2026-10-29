@@ -82,6 +82,43 @@ export function createApp(config: Config) {
       status: context.res.status,
       client_address: clientAddressForLog(context.req.raw.headers, context.env?.incoming?.socket.remoteAddress, config.trust_proxy),
     }, 'Request completed');
+    const response = context.res;
+    if (!response.body) return;
+    const reader = response.body.getReader();
+    let canceled = false;
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const chunk = await reader.read();
+          if (canceled) return;
+          if (chunk.done) {
+            reader.releaseLock();
+            controller.close();
+          } else controller.enqueue(chunk.value);
+        } catch {
+          if (canceled) return;
+          // Body failures occur after Hono's handler error boundary. Never hand
+          // parser diagnostics, causes or attached input to the Node adapter.
+          logger.error('Response stream failed');
+          const failure = new Error('Response stream failed');
+          controller.error(failure);
+          // Its initial-read lookahead can otherwise turn rejection into clean
+          // EOF; close the actual transport with only this fresh safe error.
+          context.env?.outgoing?.destroy(failure);
+          try { await reader.cancel(failure); } catch { /* The body already failed. */ }
+          finally { reader.releaseLock(); }
+        }
+      },
+      async cancel() {
+        canceled = true;
+        try { await reader.cancel(new Error('Response stream canceled')); }
+        catch {
+          logger.error('Response stream cancellation failed');
+          throw new Error('Response stream cancellation failed');
+        } finally { reader.releaseLock(); }
+      },
+    }, { highWaterMark: 0 });
+    context.res = new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   });
   app.get('/healthz', (context) => context.json({ status: 'ok' }));
   app.get('/_amp/status', (context) => status.response(
