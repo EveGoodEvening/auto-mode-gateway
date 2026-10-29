@@ -84,5 +84,11 @@ export function createLogger(config: Config, destination: DestinationStream = pr
   logger.child = function (this: Logger, bindings, options) {
     return child.call(this, bindings && sanitize(bindings) as pino.Bindings, options);
   } as typeof logger.child;
+  // setBindings uses the same reset formatter on descendants. Sanitize before
+  // native binding accumulation rather than replacing or rebuilding that state.
+  const setBindings = logger.setBindings;
+  logger.setBindings = function (this: Logger, bindings) {
+    setBindings.call(this, sanitize(bindings) as pino.Bindings);
+  };
   return logger;
 }

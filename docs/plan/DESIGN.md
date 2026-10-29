@@ -248,6 +248,8 @@ Authority is the user's explicit `content_reads = A：读取内容先审批` and
 
 **C13 green implementation-only DRAFT checkpoint authorized, not closure.** Parent bg30 G2444/typecheck/lint/build, corrected isolated npm audit0 and source+built validation PASS. Latest source report5b4 matches all seven cf3dd fingerprints and passes offline-safety while numerical accuracy FAILS/release remains incomplete/live unverified; built bundle needs its own appropriate engine identity. Package/container actual runtime proofs and execution-safety clearance remain PENDING. Selected deploy/.env/config.yaml and projected DOMAIN prerequisites are absent only in the audited deployment scope; ownership/DNS/host/ports remain unknown. No P8/full-P7 checkbox or public HTTPS/release claim follows from the draft; C13 remains ACTIVE and C14 unselected.
 
+**C13 mutable-binding correction checkpoint:** after drafte866/historicalG2444, actual parent A4AE found child/grandchild setBindings leakage. Same unchanged fake-only probe AFTER EXIT0/all checks true; parent bg31 typecheck/lint/build/43files2447tests PASS(+3 permanent regressions). Focused logger-fix commit authorized, not C13 closure. Docker execution-safety cleared but actual current-source run awaits commit/resource admission; packed helper56EB independent re-review/runtime remain pending. P8/full-P7/public HTTPS/release status unchanged.
+
 ## Validation plan
 
 - 单元测试：三种协议的 SSE 解析/改写（录制 fixture，含并行调用、ping、错误、容忍 JSON）；规则引擎表驱动测试；脱敏；归一化（含 `apply_patch` 路径解析）；三类决策 adapter 的请求/响应编解码（mock HTTP）。

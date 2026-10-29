@@ -43,6 +43,48 @@ describe('diagnostic logger credential boundary', () => {
     expect(output.rows()[0]).toMatchObject({ component: 'safe-child', count: 0, nested: [expect.stringContaining('[REDACTED:credential]')], err: { message: expect.stringContaining('Transport'), cause: { message: expect.stringContaining('Cause') } }, msg: expect.stringContaining('Failed') });
   });
 
+  it.each(['root', 'child', 'grandchild'] as const)('redacts %s setBindings while retaining native accumulated bindings and receiver isolation', (depth) => {
+    const output = capture();
+    const root = output.logger;
+    const child = root.child({ component: 'safe-child' }, { level: 'debug' });
+    const grandchild = child.child({ scope: 'safe-grandchild' });
+    const target = depth === 'root' ? root : depth === 'child' ? child : grandchild;
+    const input = {
+      mutation: 'safe-mutation',
+      [secrets[0]!]: secrets.join(' | '),
+      nested: { headers: { 'X-API-Key': 'fake-mutation-header-42', 'x-request-id': 'safe-mutation-id' } },
+    };
+    target.setBindings(input);
+    target.setBindings({ accumulated: 'safe-accumulated', literal: secrets[7] });
+    target.info({ record: 'target' }, 'Safe binding mutation');
+    for (const secret of secrets) expect(output.text()).not.toContain(secret);
+    expect(output.text()).not.toContain('fake-mutation-header-42');
+    expect(output.rows()[0]).toMatchObject({
+      record: 'target', mutation: 'safe-mutation', accumulated: 'safe-accumulated',
+      nested: { headers: { 'X-API-Key': '[REDACTED:credential]', 'x-request-id': 'safe-mutation-id' } },
+      literal: '[REDACTED:credential]', msg: 'Safe binding mutation',
+      ...(depth !== 'root' ? { component: 'safe-child' } : {}),
+      ...(depth === 'grandchild' ? { scope: 'safe-grandchild' } : {}),
+    });
+    expect(input[secrets[0]!]).toBe(secrets.join(' | '));
+    expect(input.nested.headers['X-API-Key']).toBe('fake-mutation-header-42');
+    expect(root.level).toBe('info');
+    expect(child.level).toBe('debug');
+    // Existing sibling/ancestor objects must not acquire this receiver's state;
+    // descendants created after mutation must inherit its safe accumulated data.
+    if (depth !== 'root') {
+      root.info({ record: 'ancestor' }, 'Safe ancestor');
+      expect(output.rows()[1]).not.toHaveProperty('mutation');
+    }
+    const sibling = root.child({ sibling: 'safe-sibling' });
+    sibling.info({ record: 'sibling' }, 'Safe sibling');
+    expect(output.rows().at(-1)).toMatchObject({ sibling: 'safe-sibling' });
+    if (depth !== 'root') expect(output.rows().at(-1)).not.toHaveProperty('mutation');
+    target.child({ descendant: 'safe-descendant' }).info({ record: 'descendant' }, 'Safe descendant');
+    expect(output.rows().at(-1)).toMatchObject({ mutation: 'safe-mutation', accumulated: 'safe-accumulated', descendant: 'safe-descendant' });
+    for (const secret of secrets) expect(output.text()).not.toContain(secret);
+  });
+
   it('redacts before any consumer output boundary and omits unsafe pre-truncated excerpts', () => {
     const output = capture();
     const secret = secrets[2]!;
