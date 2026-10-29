@@ -1,8 +1,10 @@
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { serve, type ServerType } from '@hono/node-server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -51,11 +53,139 @@ async function configuration(base = 'http://127.0.0.1:1', overrides: Partial<Con
 const auth = { authorization: `Bearer ${'fake-security-client-42'}` };
 
 describe('security transport consumer contracts', () => {
-  it('rejects nonloopback configuration without client credentials before creating a listener', async () => {
+  it('rejects missing nonloopback client tokens in the real serve CLI before any listener or network attempt', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'amp-security-startup-'));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const preload = join(directory, 'deny-network.cjs');
+    await writeFile(preload, `
+const fs = require('node:fs');
+const net = require('node:net');
+const http = require('node:http');
+const https = require('node:https');
+const dns = require('node:dns');
+const dgram = require('node:dgram');
+const { isMainThread } = require('node:worker_threads');
+const { syncBuiltinESMExports } = require('node:module');
+const path = require('node:path');
+const { fileURLToPath } = require('node:url');
+const NativeError = Error;
+const captureStackTrace = NativeError.captureStackTrace;
+const loaderRoot = path.dirname(require.resolve('tsx', { paths: [process.cwd()] }));
+const loaderOrigins = [
+  { path: path.join(loaderRoot, 'client-XItNFmsq.cjs'), kind: 'loader-cjs-ipc-denied' },
+  { path: path.join(loaderRoot, 'require-CBjy4Foe.mjs'), kind: 'loader-esm-ipc-denied' },
+];
+const privateLoaderPipe = path.join(__dirname, 'tsx-' + process.geteuid(), String(process.ppid) + '.pipe');
+function report(kind) { fs.writeSync(3, JSON.stringify({ kind }) + '\\n'); }
+function deny(kind) { return function () { report(kind); throw new Error('Startup network guard'); }; }
+net.Server.prototype.listen = deny('listen');
+net.Socket.prototype.connect = deny('network');
+net.connect = deny('network');
+net.createConnection = function deniedConnection(...args) {
+  let kind = 'network';
+  // The installed loader makes these exact bootstrap probes. Classify only its
+  // immediate native callsite AND its exact owned private pathname/signature.
+  // All calls still throw before native connection, including these probes.
+  if (args.length === 2 && args[0] === privateLoaderPipe && typeof args[1] === 'function') {
+    const previous = NativeError.prepareStackTrace;
+    try {
+      NativeError.prepareStackTrace = (_error, frames) => frames;
+      const marker = {};
+      captureStackTrace(marker, deniedConnection);
+      let filename = marker.stack[0]?.getFileName();
+      if (filename?.startsWith('file:')) filename = fileURLToPath(filename);
+      const origin = loaderOrigins.find((entry) => entry.path === filename);
+      if (origin) kind = origin.kind;
+    } catch {
+      kind = 'network';
+    } finally {
+      NativeError.prepareStackTrace = previous;
+    }
+  }
+  report(kind);
+  throw new NativeError('Startup network guard');
+};
+http.request = http.get = https.request = https.get = deny('network');
+dgram.Socket.prototype.connect = dgram.Socket.prototype.send = deny('network');
+for (const key of ['lookup', 'lookupService', 'reverse', 'resolve', 'resolve4', 'resolve6', 'resolveAny', 'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs', 'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTxt']) {
+  if (typeof dns[key] === 'function') dns[key] = deny('network');
+  if (typeof dns.promises[key] === 'function') dns.promises[key] = deny('network');
+}
+globalThis.fetch = deny('network');
+syncBuiltinESMExports();
+if (isMainThread) {
+  report('ready');
+  process.once('exit', () => report('exit'));
+}
+`, { mode: 0o600 });
     const config = await configuration();
-    expect(() => configSchema.parse({ ...config, listen: { host: '0.0.0.0', port: 8484 }, auth: { ...config.auth, client_tokens: [] } })).toThrow();
-    expect(configSchema.parse({ ...config, listen: { host: '0.0.0.0', port: 8484 } }).listen.host).toBe('0.0.0.0');
-  });
+    config.listen = { host: '0.0.0.0', port: 8484 };
+    async function startup(client_tokens: string[]) {
+      const path = join(directory, client_tokens.length === 0 ? 'missing.yaml' : 'present.yaml');
+      await writeFile(path, JSON.stringify({ ...config, auth: { ...config.auth, client_tokens } }), { mode: 0o600 });
+      const child = spawn(process.execPath, [
+        '--require', preload, '--import', 'tsx', 'src/cli/index.ts', 'serve', '--config', path,
+      ], {
+        cwd: fileURLToPath(new URL('../../', import.meta.url)),
+        env: {
+          HOME: directory, USERPROFILE: directory, XDG_CONFIG_HOME: directory,
+          XDG_STATE_HOME: directory, XDG_CACHE_HOME: directory, TMPDIR: directory,
+          PATH: '/usr/bin:/bin', FORCE_COLOR: '0', TSX_DISABLE_CACHE: '1',
+        },
+        stdio: ['ignore', 'pipe', 'pipe', 'pipe'], timeout: 5000, killSignal: 'SIGKILL',
+      });
+      const { promise, resolve } = Promise.withResolvers<{ code: number | null; signal: NodeJS.Signals | null }>();
+      let spawnFailed = false;
+      let overflow = false;
+      let stdout = '';
+      let stderr = '';
+      let guard = '';
+      let captured = 0;
+      function receive(stream: 'stdout' | 'stderr' | 'guard', chunk: Buffer) {
+        if (chunk.byteLength > 16_384 - captured) {
+          overflow = true;
+          child.kill('SIGKILL');
+          return;
+        }
+        captured += chunk.byteLength;
+        if (stream === 'stdout') stdout += chunk.toString();
+        else if (stream === 'stderr') stderr += chunk.toString();
+        else guard += chunk.toString();
+      }
+      child.stdout!.on('data', (chunk: Buffer) => receive('stdout', chunk));
+      child.stderr!.on('data', (chunk: Buffer) => receive('stderr', chunk));
+      child.stdio[3]!.on('data', (chunk: Buffer) => receive('guard', chunk));
+      child.once('error', () => { spawnFailed = true; });
+      child.once('close', (code, signal) => resolve({ code, signal }));
+      let result;
+      try {
+        result = await promise;
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill('SIGKILL');
+          await promise;
+        }
+      }
+      expect(spawnFailed).toBe(false);
+      expect(overflow).toBe(false);
+      expect(result).toEqual({ code: 1, signal: null });
+      expect(stdout).toBe('');
+      expect(stderr).toBe('Error: command failed. Check the command options and configuration.\n');
+      const events = guard.trim().split('\n').map((line) => JSON.parse(line) as { kind: string });
+      expect(events.filter(({ kind }) => kind === 'ready')).toHaveLength(1);
+      expect(events.filter(({ kind }) => kind === 'exit')).toHaveLength(1);
+      expect(events.filter(({ kind }) => kind === 'network')).toHaveLength(0);
+      expect(events.every(({ kind }) => ['ready', 'exit', 'listen', 'network', 'loader-cjs-ipc-denied', 'loader-esm-ipc-denied'].includes(kind))).toBe(true);
+      return events.filter(({ kind }) => kind === 'listen').length;
+    }
+    // Identical CLI/config path, changing only tokens: invalid configuration must
+    // fail before listen; its valid control must reach the real serve listener.
+    // The preloaded guard records and throws BEFORE native listen, so even a
+    // regression can never expose a public listener, and guard failure cannot
+    // itself satisfy the negative zero-attempt assertion.
+    expect(await startup([])).toBe(0);
+    expect(await startup(config.auth.client_tokens)).toBe(1);
+  }, 15_000);
 
   it('rejects a declared body over the default 64 MB boundary without contacting upstream', async () => {
     let upstreamCalls = 0;

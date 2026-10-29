@@ -304,18 +304,20 @@
 ### Phase 8：打包、部署、加固与文档
 
 - C13 ACTIVE after C12 local closure `4b6b9ab1ab942a90283a9c2eed9b61578e3aaf13`: ONLY P8-1/P8-2/P8-4 local implementation authorized. No checkbox advances before parent-observed package/security/container/audit evidence; C14/C15 remain unselected. Runtime/build changes require fresh R8 offline engine evidence without claiming full P7/provider/release acceptance.
-- C13 implementation-only DRAFT checkpoint authorized after parent bg30 typecheck/lint/build/43files2444tests PASS, corrected isolated npm audit0 and source+built validation. Latest source archive5b4 has all seven fingerprints equal to earlier cf3dd (source engine unchanged), offline-safety PASS/numerical accuracy FAIL/release incomplete/live unverified. Actual packed-install/container proofs and independent execution-safety reviews are still PENDING; selected deploy/.env/config.yaml absent and projected DOMAIN false only establish scoped public-provisioning blockers, not exhaustive absence. P8-1/P8-2/P8-4 and full P7 remain unchecked; C13 stays ACTIVE.
-- Current logger repair: parent unchanged A4AE BEFORE EXIT1 child/grandchild setBindings leakage → AFTER EXIT0/all privacy/normal-log/mutation/getter/header/XFF/cleanup checks true; fresh bg31 typecheck/lint/build/43files2447tests PASS(+3 permanent regressions). Historical e866/G2444 retained as preceding discovery. Focused green fix checkpoint authorized; packed/container actual proofs and packed-helper safety review remain pending. No checkbox advancement or C13 closure.
+- Historical initial DRAFT checkpoint: parent bg30 G2444/typecheck/lint/build, audit0/source+built validation; source5b4 fingerprints match cf3dd, offline-safety PASS/accuracy FAIL/release incomplete/live unverified. This checkpoint alone did not close any P8 task. Scoped selected deployment prerequisites remain missing, not exhaustive configuration/domain absence.
+- Current logger repair: unchanged A4AE BEFORE EXIT1 child/grandchild mutation leakage → AFTER EXIT0/all checks true; fresh bg31 typecheck/lint/build/43files2447tests PASS. This does not close full P8-4/C13. P8-1's later actual packed-consumer evidence is accounted separately below.
 
-- [ ] P8-1 构建与发布配置
+- [x] P8-1 构建与发布配置
   - `tsup` 产出 `dist/`（ESM、shebang、sourcemap）；`package.json` `files` 只含 `dist`、`README*`、`LICENSE`；可选 `npm run build:binary` 用 `bun build --compile` 产单文件。
   - 位置：`tsup.config.ts`、`package.json`。
   - 完成标准：`npm pack` 后在干净目录 `npx ./auto-mode-proxy-*.tgz --version` 成功。
+  - Parent actual819E/bg41 reached installed-http-boundaries after ASSERTED real npm pack, clean-directory actual relative-tarball npx version0.1.0, installed ESM/shebang/sourcemap/files admission, default asset validation/offline eval, token/init/check/audit and owned listener admission. Final cleanup all true. These satisfy P8-1's own package criterion; optional Bun not required. The subsequent HTTP failure is NOT package/full-security/container/public-HTTPS acceptance; P8-2/P8-4/C13 remain open.
 
 - [ ] P8-2 Docker 与 Compose
   - 多阶段 `Dockerfile`（`node:24-alpine`，非 root 用户，`npm ci --omit=dev`，`HEALTHCHECK` 访问 `/healthz`）；`docker-compose.yml`：`proxy`（监听 `0.0.0.0:8484` 但不 `ports` 发布，挂载配置与审计卷，`env_file`）+ `caddy`（`caddy:2`，发布 `443`/`80`，`Caddyfile`：`{$DOMAIN} { reverse_proxy proxy:8484 }`）；`.env.example`。
   - 位置：`deploy/{Dockerfile,docker-compose.yml,Caddyfile,.env.example}`。
   - 完成标准：`docker compose up` 后 `curl https://$DOMAIN/healthz` 返回 200，`ss -ltnp` 显示宿主机仅 Caddy 的 443/80 对外。
+  - Parent actual bg47/artifact1098 verified physical worker containment (3GiB/swap0/pids256), actual Compose image build, health, UID1000, read-only root/config, audit mount, absent proxy host ports, shared internal network and all three container resource constraints. Helper420 then failed Caddy published binding count expected1/actual0; host HTTP and fake relay/gate probes were NOT reached. A investigates isolated-gateway publishing semantics. Final owned-resource absence predicates all true, preexisting immutable vendor refs retained. Full runtime/persistence/public HTTPS acceptance remain unverified; checkbox unchanged.
 
 - [ ] P8-3 CI/CD
   - `ci.yml`：lint、typecheck、unit + integration、`eval --rules-only`；若存在 provider 密钥 secrets 则追加完整 eval。`release.yml`：tag 触发构建推送 `ghcr.io/evegoodevening/auto-mode-proxy`，存在 `NPM_TOKEN` 时 `npm publish`。
@@ -323,11 +325,12 @@
   - 完成标准：PR 上 CI 绿色；打 tag 后镜像可拉取。
   - **C12 A/A supersession / C14 consumer:** no-secret PR gate is v2 offline-safety, with separate explicitly numerical accuracy and raw uncertainty/coverage artifacts; no scalar green hiding failed accuracy. Optional provider-job skip or missing/stale/subset/mock/rules-only report cannot unlock release. Release requires current v2 full-accuracy/all-configured-provider+chain report validated by `assertFreshReport` with independently audited trusted-run receipt bound to report SHA256/current config+engine, plus all seven current fingerprints. Exact schema/API/exit/trust contract: DESIGN amendment. Old offline 5% CI clause retained only as history, explicitly superseded by user decision; live 100%/≤5%/wrapped-zero remains mandatory.
 
-- [ ] P8-4 安全加固
+- [x] P8-4 安全加固
   - 非 loopback 监听时强制 `client_tokens` 非空；请求体上限 64 MB；上游连接/读超时；`trust_proxy` 开启时解析 `X-Forwarded-For` 用于日志；pino 序列化器屏蔽 `authorization`、`x-api-key`、`cf-aig-authorization` 与配置中的 key；`/_amp/status` 访问控制；依赖 `npm audit` 无高危。
   - 响应缓冲/截止从 C05 即执行：单 tool/未闭合帧 1 MiB、单响应扣留总量 8 MiB（含有序后缀/参数/终态/重编码暂存，thinking/reasoning 子集 ≤4 MiB，不限 compat）、执行/兼容块完成 60 s、上游静默 30 s、判定全轮 60 s；后缀/ping 不重置截止。超限/EOF/超时整轮未发执行 fail-closed、取消上游，无 allow 泄漏；mock 假时钟与超大/不完整流覆盖。64 MB 入站上限不替代这些界限。
   - 位置：`src/server/{app,auth,upstream,status}.ts`、`src/util/log.ts`。
   - 完成标准：集成测试覆盖无 token 启动失败与超限 413；日志样本 grep 无凭证。
+  - Own criteria VERIFIED: parent latest bg49 at 2026-10-29 08:16:36 typecheck/lint/43files2447tests/build ALL PASS includes safety-cleared3940 real source-CLI tokenless listen0/token-present control listen1 DENIED/ordinary outbound0 (countdelta0 replaces schema-only). E21D/bg45 actual installed64MB413/no forward, auth401/relay200/status200, XFF logging/credential-free logs/cleanup PASS; connect/read timeout/status-spoof/chunk-boundary/response bounds regressions, causal A4AE privacy repair and isolated audit0 retained. Independently cleared F483/bg48 actual built startup EXIT0/9.02s verifies empty-token exit1/listen0/network0/subprocess0 and otherwise-identical token-present exit1/listen1 DENIED/network0/subprocess0, safe diagnostics/events/cleanup all true. Controls are NOT running servers/public binds. P8-2 Docker/public HTTPS remains separate and unchecked; no C13 overall closure/real model/receipt claim.
 
 - [ ] P8-5 文档与威胁模型
   - `README.md` / `README.zh-CN.md`：一分钟接入（init → serve → 三种 agent 片段）、架构图、成本估算（每 100 次判定约 $0.003，灰区二审每次约 $0.0002）、配置参考链接；`docs/threat-model.md`：防御范围与明确非目标（不防文本内容篡改、不是沙箱、决策模型可被欺骗故以规则与 fail-closed 兜底）、隐私说明（命令发往第三方决策提供方、脱敏、各网关 ZDR 差异）；`docs/config.md` 全字段说明；`docs/compat.md` 版本验证矩阵。
