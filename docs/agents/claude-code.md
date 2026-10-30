@@ -2,7 +2,7 @@
 
 ## Scope and prerequisites
 
-C08's Anthropic Messages gate on `/cc` is **LOCALLY CLOSED**, not full native/combined/source-external acceptance. Implementation69c130b/fixture3947436/setup6d0c44e/finaldocfix2339ec7, both final correction reviews CLEAN; currentparent1606G/initCLI smoke/cleanup and actualCLI349/TUI520/Desktopproof retained. P3-2/P3-3/P3-7checked; native2.1.311strictFAIL/P3-1 andcombinedorderedvalidation unchecked, P3-4fullunchecked/localcomplete, realprovider/beta/thinking/cache andfullmatrix separate. C07CLOSED212f8e9; Responses/Chat protection still C10/C11 futurework. Parentclosuretrackercommit mustprecedeC09.
+C08's Anthropic Messages gate on `/cc` is **locally closed**, not full native/combined/source-external acceptance. Responses and Chat Completions enforcement are also installed and locally closed through C10/C11. The latest parent-observed C13 checkpoint passed typecheck, lint, 44 test files / 2449 tests and build; independently reviewed C13-RUNTIME-001 is closed with causal malformed-stream privacy evidence. That checkpoint is not a new real-provider, native-client, cache or full live-matrix result. See [compatibility evidence](../compat.md).
 
 Use `gate.mode: enforce` and the default `on_provider_failure: block` for enforcement. **Shadow does not protect you**: original response bytes and upstream results pass through without waiting for hypothetical decisions. Audit observations are not approvals. Opaque endpoints and upstream error bodies are transport paths, not tool-use enforcement.
 
@@ -10,7 +10,7 @@ PrimaryClaude2.1.311 CLI349rewrite/override and finalTUI520Enabled/fiveassociate
 
 ## CLI setup
 
-Generate a private configuration with `auto-mode-proxy init --config <private-config-path>`. Keep its client token and printed setup output secret. Configure the actual upstream and trusted decision provider; the generated ENV references have no secret fallback. `init` defaults are setup guidance, not measured provider compatibility. It also prints future Codex/WorkBuddy snippets; do not mistake them for implemented protection.
+Generate a private configuration with `auto-mode-proxy init --config <private-config-path>`. Keep its client token and printed setup output secret. Configure the actual upstream and trusted decision provider; the generated ENV references have no secret fallback. `init` defaults are setup guidance, not measured provider compatibility. Its Codex/WorkBuddy snippets target installed enforcement, not proof of actual-client acceptance.
 
 After configuring and starting `auto-mode-proxy serve --config <private-config-path>`, use the issued **client** token, not an upstream key:
 

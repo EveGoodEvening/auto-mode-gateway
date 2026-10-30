@@ -1,0 +1,88 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.22.1'
+      - run: npm install --global npm@12.2.1
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run docs:check
+      - name: Offline safety (accuracy is reported independently, not silently greened)
+        run: node --import tsx scripts/ci-evaluation.ts offline "$RUNNER_TEMP/offline-evaluation"
+      - name: Archive offline safety
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: offline-safety
+          path: ${{ runner.temp }}/offline-evaluation/offline-safety.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Archive numerical accuracy, raw uncertainty and full measurements
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: numerical-accuracy-raw-gray-NOT-release-evidence
+          path: |
+            ${{ runner.temp }}/offline-evaluation/numerical-accuracy-raw-gray.json
+            ${{ runner.temp }}/offline-evaluation/report.json
+          if-no-files-found: error
+          retention-days: 30
+  providers:
+    # NEVER PR code, including same-repository PRs; no pull_request_target or
+    # workflow_run artifact-to-secret bridge. Protected default branch only.
+    if: github.event_name == 'push' && github.repository == 'EveGoodEvening/auto-mode-gateway' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.ref_protected
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Detect configured provider prerequisite without exposing it
+        id: configured
+        env:
+          EVAL_CONFIG_YAML: ${{ secrets.EVAL_CONFIG_YAML }}
+        run: |
+          if [ -n "$EVAL_CONFIG_YAML" ]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: State missing provider prerequisite honestly
+        if: steps.configured.outputs.present != 'true'
+        run: echo 'Full provider evaluation NOT RUN (configuration absent); full acceptance and release remain unverified.'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: steps.configured.outputs.present == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: steps.configured.outputs.present == 'true'
+        with:
+          node-version: '24.22.1'
+      - if: steps.configured.outputs.present == 'true'
+        run: npm install --global npm@12.2.1 && npm ci
+      - name: Every configured provider plus ordered chain (SOURCE identity)
+        if: steps.configured.outputs.present == 'true'
+        env:
+          EVAL_CONFIG_YAML: ${{ secrets.EVAL_CONFIG_YAML }}
+        run: node --import tsx scripts/ci-evaluation.ts full "$RUNNER_TEMP/provider-evaluation"
+      - name: Archive measurements, never an independently authorized receipt
+        if: always() && steps.configured.outputs.present == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: full-provider-measurements-NOT-authorized-release-evidence
+          path: ${{ runner.temp }}/provider-evaluation/*.json
+          if-no-files-found: error
+          retention-days: 30

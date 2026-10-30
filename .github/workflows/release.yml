@@ -1,0 +1,107 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  preflight:
+    # Deliberately NO job-level if: unprotected tags/missing prerequisites must
+    # fail the release workflow, not produce a misleading all-skipped green.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      RELEASE_AUDITOR_PUBLIC_KEY: ${{ vars.RELEASE_AUDITOR_PUBLIC_KEY }}
+    steps:
+      - name: Require server-authenticated protected tag and operator trust root
+        run: test "$GITHUB_REF_PROTECTED" = true && test "$GITHUB_REPOSITORY" = EveGoodEvening/auto-mode-gateway && test -n "$RELEASE_AUDITOR_PUBLIC_KEY"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.22.1'
+      - run: npm install --global npm@12.2.1 && npm ci
+      - name: Obtain mandatory same-tag audit assets without provider secrets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/release-evidence"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/release-evidence" --pattern release-report.json --pattern release-authorization.json --pattern release-authorization.sig
+      - name: Require independent signature and exact release target before secret-bearing job
+        run: node --import tsx scripts/release-evidence.ts --preflight "$RUNNER_TEMP/release-evidence"
+  publish:
+    needs: preflight
+    if: github.repository == 'EveGoodEvening/auto-mode-gateway' && github.ref_protected
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.22.1'
+          registry-url: https://registry.npmjs.org
+      - run: npm install --global npm@12.2.1 && npm ci
+      - name: Obtain pre-staged independent audit evidence for THIS tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/release-evidence"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/release-evidence" --pattern release-report.json --pattern release-authorization.json --pattern release-authorization.sig
+      - name: Mandatory independent authorization and current full-accuracy evidence
+        env:
+          RELEASE_AUDITOR_PUBLIC_KEY: ${{ vars.RELEASE_AUDITOR_PUBLIC_KEY }}
+          EVAL_CONFIG_YAML: ${{ secrets.EVAL_CONFIG_YAML }}
+        run: node --import tsx scripts/release-evidence.ts "$RUNNER_TEMP/release-evidence"
+      # Missing assets/key/config, skipped provider CI, stale/subset/rules-only/mock
+      # evidence, invalid signature or unprotected tags cannot reach publication.
+      # No key capable of signing authorization is ever supplied to this workflow.
+      - run: npm run lint && npm run typecheck && npm test && npm run build && npm run docs:check
+      - name: Require exact package/tag version agreement
+        run: node --input-type=module -e 'import fs from "node:fs"; if (`v${JSON.parse(fs.readFileSync("package.json", "utf8")).version}` !== process.env.GITHUB_REF_NAME) process.exit(1)'
+      - name: Build exact scoped image without provider configuration in context
+        run: docker build --file deploy/Dockerfile --tag "ghcr.io/evegoodevening/auto-mode-proxy:$GITHUB_REF_NAME" .
+      - name: Pack exact npm artifact and retain source-to-build provenance
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/release-package"
+          npm pack --pack-destination "$RUNNER_TEMP/release-package"
+          {
+            printf 'repository=%s\ncommit=%s\nref=%s\nevidence_identity=source\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_REF"
+            sha256sum "$RUNNER_TEMP/release-evidence/release-report.json" dist/cli/index.js "$RUNNER_TEMP/release-package/auto-mode-proxy-${GITHUB_REF_NAME#v}.tgz"
+            docker image inspect "ghcr.io/evegoodevening/auto-mode-proxy:$GITHUB_REF_NAME" --format '{{.Id}}'
+          } > "$RUNNER_TEMP/release-package/build-provenance.txt"
+      - name: Archive exact package and build provenance (not built-engine acceptance)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-package-and-build-provenance
+          path: ${{ runner.temp }}/release-package/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Authenticate only after mandatory evidence and build gates
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish exact tag image
+        run: docker push "ghcr.io/evegoodevening/auto-mode-proxy:$GITHUB_REF_NAME"
+      - name: Publish npm only when explicitly configured
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NODE_AUTH_TOKEN" ]; then
+            npm publish "$RUNNER_TEMP/release-package/auto-mode-proxy-${GITHUB_REF_NAME#v}.tgz" --access public
+          else
+            echo 'npm publication NOT RUN (NPM_TOKEN absent).'
+          fi
+      - name: Remove owned registry credentials
+        if: always()
+        run: docker logout ghcr.io

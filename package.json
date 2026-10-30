@@ -22,6 +22,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
+    "docs:check": "tsx scripts/check-docs.ts",
     "eval": "tsx src/cli/index.ts eval"
   },
   "allowScripts": {
