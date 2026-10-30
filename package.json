@@ -23,7 +23,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "docs:check": "tsx scripts/check-docs.ts",
-    "eval": "tsx src/cli/index.ts eval"
+    "eval": "tsx src/cli/index.ts eval",
+    "test:performance": "tsx test/performance/streaming.ts"
   },
   "allowScripts": {
     "@swc/core": false,

@@ -1,6 +1,6 @@
 # Compatibility and live acceptance
 
-## Current local baseline and C14 documentation boundary
+## Current local baseline and C15 verification boundary
 
 | Surface | Version / scope | Observed result and remaining boundary |
 | --- | --- | --- |
@@ -15,6 +15,17 @@
 | CI and publication | C14 | Implementation is not actual PR CI/tag push/registry pull. Public npm/image availability is not assumed; fresh trusted full-report authorization remains mandatory. |
 
 Historical rows below retain their evidence/failures; current C13 supersedes only local package/security/container pending states, not live-provider/client requirements.
+
+### C15 consolidated runbooks — core local proofs observed
+
+C15 is selected after committed C14 closure `e84c52e0c30cce31baeb14bbd161e4fa2f75ea46`. The [verification runbook](verification.md) maps the original acceptance portions to actual CLI/Desktop/provider/cache/replay/HTTPS/deployment/publication procedures and concrete prerequisites. It references the existing configuration, tuning and evaluator contracts rather than defining another schema. The historical matrices below remain unchanged; their earlier ACTIVE/unselected/pending wording records that checkpoint, not a newly failed or completed task.
+
+**C15 actual parent core local proofs PASS:** bg71 typecheck/lint/48 files2495 tests/build/coverage/docs-check; target coverage1574/1596 lines98.62% (policy373/37699.20%, gate390/39199.74%, stream Anthropic303/31895.28%, Chat214/21699.07%, Responses294/29599.66%, skipped0/exclude[]). bg72 nine measured direct/proxy pairs pass strict first-event<50ms and TOTALextra/1000text<5ms/event, with parity and two incremental acknowledgments in every measured response. bg70 authorized isolated registry audit found0 vulnerabilities; bg67 owned127.0.0.1:8484 socket/health/nonempty-log privacy/cleanup and bg71 persisted-audit fake-credential regression passed separately. Historical first union bg68 type/lintPASS2494testsPASS/one new fixture failure remains preserved;70C1 fixed its System One fixture/API contract, **not a production privacy bug**. Exact command/artifact/coverage/per-protocol timing evidence is in the [verification runbook](verification.md#c15-parent-observed-local-proofs), rooted at `/tmp/c15-verification.lmgw3AkD`. No worker runtime was performed.
+
+Keep three evaluation outcomes separate: fresh C15 bg73 SOURCE validation/offline2PASS and bg74 BUILT validation/offline2PASS retain offline-safety PASSED, **numerical accuracy FAILED** (dangerous93/93, safe false blocks54/57, raw gray134/150, wrapped allows0/279/errors0/flips0/186), release incomplete/live unverified/**NO trusted receipt**. Exact archive SHA256s and distinct engine fingerprints are in the runbook; the other six report fingerprints match, not engine identity. Historical v1 dangerous92/93/wrapped allows3, stale b646 and cf3dd/5b4/C14 SOURCE observations remain unchanged. Neither source/built equality nor full EACH-configured-trusted-provider plus ordered-chain accuracy/injection/provenance acceptance follows from offline green.
+
+The actual Claude2.1.312 bg65 proof remains **only** the disclosed installed-client tool-free README mock connection described below. **Additional2.1.312 harmless native/mixed investigation is locally actionable and under private safety review, not yet executed**:2.1.311 native317 failure cannot prove2.1.312 inability, and missing real keys do not block fake-only local probes. bg65 likewise proves no genuine native safeguards/Auto eligibility/replay. Preserve the unchanged strict observer, explicit parent authorization/current mandatory namespace/normal permissions/OS execution boundary; never forge opt-in or bypass eligibility/sandbox. The old unanswered third human endpoint stays unanswered. Real relay/cache/Jev-Clef p95, operator GUI, public HTTPS and hosted publication still require their separate concrete inputs. Fresh C15 metadata found only the selected default config entry absent and14 named public/deployment ENV nonempty checks false; no contents/alternate stores/provider authentication/hosted authority/DNS were verified. Scoped observations are not exhaustive absence.
+
 
 ### C14 fresh-user connection evidence and retained failures
 
