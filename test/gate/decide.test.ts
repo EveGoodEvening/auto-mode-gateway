@@ -3,9 +3,11 @@ import { configSchema } from '../../src/config/schema.js';
 import type { Answers, DecisionProvider, DecisionResult } from '../../src/decision/types.js';
 import type { ReviewResult } from '../../src/decision/llm-review.js';
 import { createGate, deterministicOutcome, thresholdOutcome } from '../../src/gate/decide.js';
+import { DecisionCache } from '../../src/gate/cache.js';
 import { normalizeToolCall } from '../../src/gate/normalize/index.js';
 import type { Action, GateContext } from '../../src/gate/types.js';
 import { resolvePolicy } from '../../src/policy/effective.js';
+import { buildState } from '../../src/policy/state-builder.js';
 
 function config() {
   return configSchema.parse({
@@ -300,5 +302,78 @@ describe('content approval state and cache semantics', () => {
       { ...action, kind: 'file_write' as const, content_truncated: true, recognized_exemption: 'read' as const },
     ]) expect((await gate.decide(input, ctx)).outcome).toBe('block');
     expect(p.decide).not.toHaveBeenCalled();
+  });
+});
+
+describe('visible write approval barriers', () => {
+  describe.each([
+    ['unmapped', undefined],
+    ['explicit-other', { tool_map: { generic: 'other' as const } }],
+  ] as const)('%s heuristic writes', (_label, route) => {
+    it.each([12, 2049])('blocks %i-byte writes alongside a benign command without provider work', async (size) => {
+      const cfg = config(); cfg.gate.on_provider_failure = 'allow';
+      const p = provider();
+      const normalized = normalizeToolCall('openai-chat', {
+        id: 'ambiguous-write', name: 'generic', input: { path: '/project/note.txt', content: 'x'.repeat(size), command: 'pwd' }, raw: {},
+      }, ctx, route);
+      const original = structuredClone(normalized);
+      const gate = createGate(cfg, { providers: [p], audit });
+      expect(await gate.decide(normalized, ctx)).toMatchObject({ outcome: 'block', rule: 'execution-unavailable' });
+      expect(normalized.text).toBe('pwd');
+      expect(normalized.execution_unavailable).toBe(true);
+      expect(JSON.stringify(normalized) === JSON.stringify(original)).toBe(true);
+      expect(p.decide).not.toHaveBeenCalled();
+      expect(gate.stats()).toMatchObject({ block: 1, provider_failures: 0, cache_hits: 0 });
+    });
+  });
+
+  it.each([
+    ['authoritative-command', { command: 'pwd', path: '/project/note.txt', content: 'x'.repeat(2049) }, { tool_map: { generic: 'command' as const } }, 'readonly', 0],
+    ['authoritative-write', { command: 'pwd', path: '/project/note.txt', content: 'inert note' }, { tool_map: { generic: 'file_write' as const } }, 'model-threshold', 1],
+    ['genuine-other', { opaque: 'inert note' }, undefined, 'generic-other', 0],
+    ['explicit-genuine-other', { opaque: 'inert note' }, { tool_map: { generic: 'other' as const } }, 'generic-other', 0],
+  ] as const)('preserves %s semantics', async (_label, input, route, rule, calls) => {
+    const normalized = normalizeToolCall('openai-chat', { id: 'control', name: 'generic', input, raw: {} }, ctx, route);
+    const p = provider();
+    expect(await createGate(config(), { providers: [p], audit }).decide(normalized, ctx)).toMatchObject({ outcome: 'allow', rule });
+    expect(p.decide).toHaveBeenCalledTimes(calls);
+  });
+
+  it.each(['would-allow', 'failure-allow'] as const)('blocks final redaction expansion before cache/provider access: %s', async (mode) => {
+    const cfg = config(); cfg.gate.on_provider_failure = 'allow';
+    const p = provider();
+    if (mode === 'failure-allow') p.decide.mockRejectedValue(new Error('inert provider failure'));
+    const normalized = normalizeToolCall('anthropic-messages', {
+      id: 'expanding-write', name: 'Write', input: { file_path: '/project/note.txt', content: '# token=a\n'.repeat(100) + 'UNSEEN_SUFFIX' }, raw: {},
+    }, ctx);
+    const original = structuredClone(normalized);
+    expect(normalized.content_truncated).toBe(false);
+    expect(Buffer.byteLength(normalized.content_excerpt ?? '', 'utf8') < 2048).toBe(true);
+    const projected = buildState(normalized, ctx);
+    expect(projected.action.content_truncated).toBe(true);
+    expect(projected.action.content_excerpt?.includes('UNSEEN_SUFFIX')).toBe(false);
+    const get = vi.spyOn(DecisionCache.prototype, 'get');
+    const set = vi.spyOn(DecisionCache.prototype, 'set');
+    try {
+      const gate = createGate(cfg, { providers: [p], audit });
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const verdict = await gate.decide(normalized, ctx);
+        expect(verdict).toMatchObject({ outcome: 'block', rule: 'content-truncated', cost_usd: 0 });
+        expect(verdict.cache_hit === true).toBe(false);
+      }
+      expect(get).not.toHaveBeenCalled();
+      expect(set).not.toHaveBeenCalled();
+      expect(p.decide).not.toHaveBeenCalled();
+      expect(gate.stats()).toMatchObject({ block: 2, cache_hits: 0, provider_failures: 0 });
+      expect(JSON.stringify(normalized) === JSON.stringify(original)).toBe(true);
+      expect(normalized.content_digest === original.content_digest).toBe(true);
+      expect(audit).toHaveBeenCalledTimes(2);
+      for (const [record] of audit.mock.calls) {
+        expect(record.action === normalized).toBe(true);
+        expect(record.action.content_truncated === false).toBe(true);
+        expect(record.action.content_digest === original.content_digest).toBe(true);
+        expect(record.verdict.rule === 'content-truncated' && record.verdict.outcome === 'block').toBe(true);
+      }
+    } finally { get.mockRestore(); set.mockRestore(); }
   });
 });

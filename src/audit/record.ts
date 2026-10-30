@@ -1,7 +1,7 @@
 import type { Config } from '../config/schema.js';
 import type { Action, Protocol } from '../gate/types.js';
 import { DEFAULT_POLICY, type EffectivePolicy } from '../policy/effective.js';
-import { redact } from '../policy/redact.js';
+import { redact, redactText } from '../policy/redact.js';
 
 export type AuditDelivery = 'safeguard' | 'rewrite' | 'shadow' | 'passthrough';
 export interface AuditContext {
@@ -66,14 +66,12 @@ export function collectConfigSecrets(config: Config): readonly string[] {
  * A final literal pass covers property names and custom replacement strings.
  * It operates on data, never JSON punctuation (credentials may contain quotes). */
 export function sanitizeAuditValue(value: unknown, credentials: readonly string[] = [], policy: EffectivePolicy = DEFAULT_POLICY): unknown {
-  const literals = [...new Set(credentials.filter(Boolean))].sort((a, b) => b.length - a.length);
-  function scrub(text: string): string {
-    for (const secret of literals) text = text.split(secret).join('[REDACTED:credential]');
-    return text;
-  }
+  // Keep both audit literal passes on the same decoded/generated spellings
+  // as provider projection, without reapplying custom policy replacements.
+  const literalPolicy: EffectivePolicy = { ...policy, redaction_patterns: [] };
   let seen = new WeakMap<object, object>();
   function visit(input: unknown): unknown {
-    if (typeof input === 'string') return scrub(input);
+    if (typeof input === 'string') return redactText(input, credentials, literalPolicy);
     if (typeof input === 'function') return undefined;
     if (input === null || typeof input !== 'object') return input;
     const previous = seen.get(input);
@@ -86,7 +84,7 @@ export function sanitizeAuditValue(value: unknown, credentials: readonly string[
       if (omitExcerpt && key === 'content_excerpt') continue;
       const descriptor = Object.getOwnPropertyDescriptor(input, key);
       if (!descriptor || !('value' in descriptor)) continue;
-      Object.defineProperty(result, scrub(key), {
+      Object.defineProperty(result, redactText(key, credentials, literalPolicy), {
         value: visit(descriptor.value), enumerable: true, configurable: true, writable: true,
       });
     }

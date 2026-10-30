@@ -257,6 +257,49 @@ describe('hard-deny: unconditional destructive and unseen-content barriers', () 
     expect(hardDeny(command('deploy production'), resolvePolicy({ hard_deny_extra: ['^deploy\\s'] }))).toBe('configured-hard-deny');
     expect(() => resolvePolicy({ hard_deny_extra: ['['] })).toThrow();
   });
+  it.each([
+    'mkfs /dev/inert', 'mkfs.btrfs /dev/inert',
+    "'mkfs' /dev/inert", '"/sbin/mkfs.xfs" /dev/inert',
+    "mk''fs.ext4 /dev/inert", "'/sbin/mk'fs.btrfs /dev/inert",
+  ])('hard blocks the parsed formatting family without relying on raw regex: %j', (text) => {
+    expect(hardDeny(command(text), resolvePolicy({ hard_deny_patterns: [] }))).toBe('filesystem-format');
+  });
+  it('honors effective formatting-family and exact-member selectors rather than hardcoding a deny', () => {
+    const family = resolvePolicy({ hard_deny_patterns: [], hard_deny_commands: ['mkfs'] });
+    const member = resolvePolicy({ hard_deny_patterns: [], hard_deny_commands: ['mkfs.xfs'] });
+    const disabled = resolvePolicy({ hard_deny_patterns: [], hard_deny_commands: [] });
+    for (const text of ["'mkfs' /dev/inert", "mk''fs.ext4 /dev/inert", '"/sbin/mkfs.xfs" /dev/inert']) {
+      expect(hardDeny(command(text), family)).toBe('filesystem-format');
+      expect(hardDeny(command(text), disabled)).toBeUndefined();
+    }
+    expect(hardDeny(command("'mkfs.xfs' /dev/inert"), member)).toBe('filesystem-format');
+    expect(hardDeny(command("'mkfs.ext4' /dev/inert"), member)).toBeUndefined();
+  });
+  it.each([
+    ['C:\\Users\\Agent\\.SSH\\AUTHORIZED_KEYS', 'win32', true],
+    ['c:/Users/Agent/.SSH/AUTHORIZED_KEYS2', 'linux', true],
+    ['/home/agent/.SSH/AUTHORIZED_KEYS', 'linux', false],
+    ['/home/agent/.ssh/authorized_keys', 'linux', true],
+  ] as const)('uses lexical Windows target casing without changing POSIX paths: %j', (path, platform, blocked) => {
+    const action: Action = { ...command(''), kind: 'file_write', paths: [path], content_excerpt: 'inert key data' };
+    expect(hardDeny(action, undefined, { platform }) !== undefined).toBe(blocked);
+  });
+  it('recognizes canonical UNC casing with empty context but preserves single-slash POSIX case', () => {
+    const action: Action = { ...command(''), kind: 'file_write', paths: ['//server/share/Agent/.SSH/AUTHORIZED_KEYS'], content_excerpt: 'inert key data' };
+    expect(hardDeny(action, undefined, {})).toBe('authorized-keys-write');
+    expect(hardDeny({ ...action, paths: ['/server/share/Agent/.SSH/AUTHORIZED_KEYS'] }, undefined, {})).toBeUndefined();
+  });
+  it('retains effective target RegexSpec replacement, flags and repeatability for UNC aliases', () => {
+    const action: Action = { ...command(''), kind: 'file_write', paths: ['//server/share/Agent/.SSH/AUTHORIZED_KEYS'], content_excerpt: 'inert key data' };
+    const selected = resolvePolicy({ hard_deny_target_patterns: { authorized_keys: { source: '/agent/\\.ssh/authorized_keys$', flags: 'g' } } });
+    const replaced = resolvePolicy({ hard_deny_target_patterns: { authorized_keys: { source: '/different-target$', flags: 'g' } } });
+    for (let call = 0; call < 2; call += 1) {
+      expect(hardDeny(action, selected, {})).toBe('authorized-keys-write');
+      expect(hardDeny(action, replaced, {})).toBeUndefined();
+    }
+    const insensitive = resolvePolicy({ hard_deny_target_patterns: { authorized_keys: { source: '/agent/\\.ssh/authorized_keys$', flags: 'i' } } });
+    expect(hardDeny({ ...action, paths: ['/server/share/Agent/.SSH/AUTHORIZED_KEYS'] }, insensitive, {})).toBe('authorized-keys-write');
+  });
 });
 
 describe('wrapped execution remains inert but cannot bypass classification', () => {

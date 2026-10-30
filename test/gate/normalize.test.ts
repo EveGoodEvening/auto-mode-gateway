@@ -207,6 +207,12 @@ describe('WorkBuddy mapping and visible capability boundaries', () => {
   it.each([{ command: 'printf inert' }, { command: { unparseable: true } }, { path: '.env' }, { path: 'x.txt', content: 'inert' }])('cannot erase visible capability using explicit other %#', (input) => {
     expect(normalize('generic', input, chat, { tool_map: { generic: 'other' } }).kind).not.toBe('other');
   });
+  it('does not resolve conflicting visible writes by hiding a dangerous command', () => {
+    const action = normalize('generic', { path: '/project/note.txt', content: 'inert note', command: 'rm -rf /' }, chat);
+    expect(action.text).toBe('rm -rf /');
+    expect(action.execution_unavailable).toBe(true);
+    expect(deterministicOutcome(action, ctx, resolvePolicy())).toMatchObject({ outcome: 'block', rule: 'execution-unavailable' });
+  });
   describe.each([
     ['without explicit mapping', undefined],
     ['with explicit other mapping', { tool_map: { generic: 'other' as const } }],

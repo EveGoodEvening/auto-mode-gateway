@@ -414,6 +414,7 @@ function mixedReplayFixture(delivery: 'native' | 'rewrite'): MixedReplayFixture 
   const texts: Record<number, string> = delivery === 'native' ? { 1: marker } : { 0: denial, 1: marker };
   const captured: MixedContentDelivery = { texts, captureFailed: false };
   if (delivery === 'native') {
+    captured.toolUses = { 0: { id, name: tool.name, input: structuredClone(tool.input) } };
     captured.nativeToolResults = { [id]: { type: 'evaluated', outcome: 'flagged', explanation: denial } };
   }
   const deliveries = new Map([[id, captured]]);
@@ -435,9 +436,25 @@ describe('manual CLI mixed content replay observer', () => {
     expect(observed.failures).toEqual([]);
   });
 
+  it('compares the complete emitted native input rather than a fixed command-only fixture', () => {
+    const fixture = mixedReplayFixture('native');
+    fixture.captured.toolUses![0]!.input = { command: PROBE, run_in_background: false, options: { timeout_ms: 2500 } };
+    fixture.assistant[0]!.input = { options: { timeout_ms: 2500 }, run_in_background: false, command: PROBE };
+    expect(observeMixedContentReplay('native', fixture.requests, fixture.probes, fixture.deliveries).passed).toBe(true);
+  });
+
+  it.each(['native', 'rewrite'] as const)('retains unrelated earlier history when validating the exact %s owner', (delivery) => {
+    const fixture = mixedReplayFixture(delivery);
+    fixture.messages.splice(1, 0,
+      { role: 'assistant', content: [{ type: 'text', text: 'Earlier unrelated assistant text' }] },
+      { role: 'user', content: 'Earlier unrelated follow-up' });
+    expect(observeMixedContentReplay(delivery, fixture.requests, fixture.probes, fixture.deliveries).passed).toBe(true);
+  });
+
   it.each([
     { label: 'wrong tool ID', change: (f: MixedReplayFixture) => { f.assistant[0]!.id = 'different_probe'; } },
     { label: 'wrong Bash command', change: (f: MixedReplayFixture) => { f.assistant[0]!.input = { command: 'printf unrelated' }; } },
+    { label: 'added background execution input despite unchanged command', change: (f: MixedReplayFixture) => { f.assistant[0]!.input = { command: PROBE, run_in_background: true }; } },
     { label: 'missing marker', change: (f: MixedReplayFixture) => { f.assistant.pop(); } },
     { label: 'marker preceding the tool', change: (f: MixedReplayFixture) => { f.assistant.reverse(); } },
     { label: 'successful correlated result', change: (f: MixedReplayFixture) => { f.result.is_error = false; } },
@@ -456,6 +473,10 @@ describe('manual CLI mixed content replay observer', () => {
 
   it.each([
     { label: 'different denial text', change: (f: MixedReplayFixture) => { f.assistant[0]!.text = 'Another request was denied, not this captured response'; } },
+    { label: 'unrelated typed block between exact denial and marker', change: (f: MixedReplayFixture) => { f.assistant.splice(1, 0, { type: 'thinking', thinking: 'Unrelated intervening stateful content' }); } },
+    { label: 'unrelated text block between exact denial and marker', change: (f: MixedReplayFixture) => { f.assistant.splice(1, 0, { type: 'text', text: 'Unrelated intervening assistant text' }); } },
+    { label: 'altered denial block retaining the captured denial substring', change: (f: MixedReplayFixture) => { f.assistant[0]!.text = `Unrelated prefix ${f.denial}`; } },
+    { label: 'altered marker block retaining the exact marker token', change: (f: MixedReplayFixture) => { f.assistant[1]!.text = `${f.marker} unrelated suffix`; } },
     { label: 'missing marker', change: (f: MixedReplayFixture) => { f.assistant.pop(); } },
     { label: 'marker before denial', change: (f: MixedReplayFixture) => { f.assistant.reverse(); } },
     { label: 'surviving emitted tool call', change: (f: MixedReplayFixture) => { f.assistant.push({ ...f.tool }); } },
@@ -471,6 +492,14 @@ describe('manual CLI mixed content replay observer', () => {
   ])('rejects rewrite replay with $label', ({ change }) => {
     const fixture = mixedReplayFixture('rewrite');
     change(fixture);
+    expectReplayRejected('rewrite', fixture);
+  });
+
+  // Actual349 preserved two adjacent original text blocks. Diagnostic text
+  // joining is not evidence of an SDK serialization/coalescing allowance.
+  it.each(['', '\n'])('rejects unsupported rewrite block coalescing with separator %j', (separator) => {
+    const fixture = mixedReplayFixture('rewrite');
+    fixture.assistant.splice(0, 2, { type: 'text', text: fixture.denial + separator + fixture.marker });
     expectReplayRejected('rewrite', fixture);
   });
 
@@ -537,6 +566,10 @@ describe('manual CLI authoritative native mixed denial', () => {
   });
 
   it.each([
+    { label: 'missing complete emitted tool capture', change: (f: MixedReplayFixture) => { delete f.captured.toolUses; } },
+    { label: 'different emitted tool identity', change: (f: MixedReplayFixture) => { f.captured.toolUses![0]!.id = 'different_emitted_probe'; } },
+    { label: 'different emitted tool name', change: (f: MixedReplayFixture) => { f.captured.toolUses![0]!.name = 'Read'; } },
+    { label: 'changed emitted non-command input field', change: (f: MixedReplayFixture) => { f.captured.toolUses![0]!.input = { command: PROBE, run_in_background: true }; } },
     { label: 'missing native result capture', change: (f: MixedReplayFixture) => { delete f.captured.nativeToolResults; } },
     { label: 'native result for a different probe ID', change: (f: MixedReplayFixture) => {
       f.captured.nativeToolResults = { different_probe: { type: 'evaluated', outcome: 'flagged', explanation: f.denial } };
@@ -586,8 +619,63 @@ describe('manual CLI authoritative native SSE capture', () => {
     const body = events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
     const response = new Response(body, { headers: { 'content-type': 'text/event-stream' } });
     const captured = await captureMixedContentDelivery(response.clone());
-    expect(captured).toEqual({ texts: { 1: marker }, captureFailed: false, nativeToolResults });
+    expect(captured).toEqual({ texts: { 1: marker }, captureFailed: false, nativeToolResults, toolUses: { 0: { id, name: 'Bash', input: { command: PROBE } } } });
     expect(await response.text()).toBe(body);
+  });
+
+  function toolInputEvents(): Record<string, unknown>[] {
+    return [
+      { type: 'message_start', message: { id: 'input_capture', type: 'message', role: 'assistant', content: [] } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'probe_input_capture', name: 'Bash', input: {} } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify({ command: PROBE }) } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: { type: 'text', text: 'AMP_TRAILING_TEXT_probe_input_capture' } },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'message_stop' },
+    ];
+  }
+  function captureEvents(events: Record<string, unknown>[]) {
+    const body = events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
+    return captureMixedContentDelivery(new Response(body, { headers: { 'content-type': 'text/event-stream' } }));
+  }
+
+  it('reconstructs all emitted input fields across JSON deltas before publishing closed tool authority', async () => {
+    const events = toolInputEvents();
+    const input = { command: PROBE, options: { timeout_ms: 5000 }, run_in_background: false };
+    const json = JSON.stringify(input);
+    const split = Math.floor(json.length / 2);
+    events.splice(2, 1,
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: json.slice(0, split) } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: json.slice(split) } });
+    const captured = await captureEvents(events);
+    expect(captured.captureFailed).toBe(false);
+    expect(captured.toolUses).toEqual({ 0: { id: 'probe_input_capture', name: 'Bash', input } });
+  });
+
+  it('preserves a complete start input when no JSON deltas are emitted', async () => {
+    const events = toolInputEvents();
+    const input = { command: PROBE, options: { timeout_ms: 5000 } };
+    events[1]!.content_block = { type: 'tool_use', id: 'probe_input_capture', name: 'Bash', input };
+    events.splice(2, 1);
+    const captured = await captureEvents(events);
+    expect(captured.captureFailed).toBe(false);
+    expect(captured.toolUses).toEqual({ 0: { id: 'probe_input_capture', name: 'Bash', input } });
+  });
+
+  it.each([
+    { label: 'missing start input', change: (events: Record<string, unknown>[]) => { events[1]!.content_block = { type: 'tool_use', id: 'probe_input_capture', name: 'Bash' }; } },
+    { label: 'missing tool stop', change: (events: Record<string, unknown>[]) => { events.splice(3, 1); } },
+    { label: 'delta without tool start', change: (events: Record<string, unknown>[]) => { events.splice(1, 1); } },
+    { label: 'delta after tool stop', change: (events: Record<string, unknown>[]) => { events.splice(4, 0, { ...events[2]! }); } },
+    { label: 'duplicate closed block index', change: (events: Record<string, unknown>[]) => { events.splice(4, 0, { ...events[1]! }); } },
+    { label: 'duplicate emitted tool ID at another index', change: (events: Record<string, unknown>[]) => { events.splice(4, 0, { ...events[1]!, index: 2 }); } },
+    { label: 'malformed streamed JSON', change: (events: Record<string, unknown>[]) => { events[2]!.delta = { type: 'input_json_delta', partial_json: '{"command":' }; } },
+    { label: 'non-object streamed input', change: (events: Record<string, unknown>[]) => { events[2]!.delta = { type: 'input_json_delta', partial_json: '[]' }; } },
+    { label: 'conflicting start input and streamed input', change: (events: Record<string, unknown>[]) => { events[1]!.content_block = { type: 'tool_use', id: 'probe_input_capture', name: 'Bash', input: { command: 'inert conflicting fixture' } }; } },
+  ])('does not grant capture authority after $label', async ({ change }) => {
+    const events = toolInputEvents();
+    change(events);
+    expect((await captureEvents(events)).captureFailed).toBe(true);
   });
 });
 

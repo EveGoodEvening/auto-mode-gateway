@@ -3,8 +3,12 @@ import { DEFAULT_POLICY, type EffectivePolicy } from './effective.js';
 /** Configured credentials are literal strings, never regular expressions. */
 export function redactText(text: string, credentials: readonly string[] = [], policy: EffectivePolicy = DEFAULT_POLICY): string {
   let result = text;
-  // Longest first prevents a shorter credential from exposing the remainder.
-  const literals = [...new Set(credentials.filter((value) => value.length > 0))].sort((a, b) => b.length - a.length);
+  // Normalization generates JSON for multi-part writes and single-quoted shell
+  // text for native argv. Cover those exact encoder spellings alongside decoded
+  // values, including historical audit text, without changing execution identity.
+  // Longest first prevents overlapping spellings from exposing a remainder.
+  const literals = [...new Set(credentials.filter((value) => value.length > 0)
+    .flatMap((value) => [value, JSON.stringify(value).slice(1, -1), value.replaceAll("'", "'\\''")]))].sort((a, b) => b.length - a.length);
   for (const credential of literals) result = result.split(credential).join('[REDACTED:credential]');
   for (const entry of policy.redaction_patterns) {
     const { pattern, type } = entry;

@@ -52,8 +52,16 @@ export function normalizeWorkBuddy(call: ToolCall, context: ActionContext, route
     action.recognized_exemption = /^grep$/i.test(call.name) ? 'grep' : 'read';
     if (action.recognized_exemption === 'grep' && typeof input.glob === 'string') action.paths.push(normalizePath(input.glob, effective));
   }
-  if (commandKey !== undefined) return command(action, input[commandKey]);
-  if (pathEvidence.present && ['content', 'new_string', 'new_source', 'edits'].some((key) => Object.hasOwn(input, key))) {
+  const visibleWrite = pathEvidence.present && ['content', 'new_string', 'new_source', 'edits'].some((key) => Object.hasOwn(input, key));
+  if (commandKey !== undefined) {
+    if (visibleWrite) {
+      // Neither visible capability can safely stand in for the combined execution.
+      fileWrite(action, input, effective, policy);
+      action.execution_unavailable = true;
+    }
+    return command(action, input[commandKey]);
+  }
+  if (visibleWrite) {
     return fileWrite(action, input, effective, policy);
   }
   if (!executionHint && contentRead) return action;

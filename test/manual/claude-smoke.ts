@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
@@ -302,6 +303,7 @@ export interface MixedContentDelivery {
   texts: Record<number, string>;
   captureFailed: boolean;
   nativeToolResults?: Record<string, MixedContentNativeToolResult>;
+  toolUses?: Record<number, { id: string; name: string; input: Record<string, unknown> }>;
   blockSequence?: MixedContentBlockSequence[];
   omittedSequenceEvents?: number;
 }
@@ -325,8 +327,14 @@ export async function captureMixedContentDelivery(response: Response, options: {
     void response.body?.cancel().catch(() => { captured.captureFailed = true; });
     return captured;
   }
+  const recordSchema = z.record(z.string(), z.unknown());
+  const openBlocks = new Map<number, { kind: string; tool?: { id: string; name: string; input: Record<string, unknown>; fragments: string[] } }>();
+  const startedIndices = new Set<number>();
+  const toolIds = new Set<string>();
+  const invalid = () => { throw new Error('Invalid mixed delivery capture'); };
   const reader = parseSse(response.body).getReader();
   let bytes = 0;
+  let messageStarted = false;
   let messageStopped = false;
   let terminalNativeResults: unknown;
   const timeout = setTimeout(() => {
@@ -337,44 +345,90 @@ export async function captureMixedContentDelivery(response: Response, options: {
     while (true) {
       const item = await reader.read();
       if (item.done) break;
-      bytes += item.value.raw.byteLength;
-      if (bytes > MAX_OUTPUT_BYTES) {
-        captured.captureFailed = true;
-        void reader.cancel().catch(() => { captured.captureFailed = true; });
-        break;
-      }
-      if (item.value.data === undefined) continue;
-      const decoded: unknown = JSON.parse(item.value.data);
-      const parsed = z.record(z.string(), z.unknown()).safeParse(decoded);
-      if (!parsed.success) { captured.captureFailed = true; break; }
-      const event = parsed.data;
-      if (messageStopped && event.type !== 'ping') { captured.captureFailed = true; break; }
-      if (event.type === 'message_stop') messageStopped = true;
-      if (event.type === 'error') captured.captureFailed = true;
-      if (event.type === 'message_delta') {
-        const delta = z.record(z.string(), z.unknown()).safeParse(event.delta);
-        if (!delta.success) { captured.captureFailed = true; break; }
-        // Only the final delta before message_stop is native-delivery authority.
-        terminalNativeResults = delta.data.safeguard_results;
-      }
-      const index = event.index;
-      if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0) continue;
-      if (event.type === 'content_block_start') {
-        const block = z.record(z.string(), z.unknown()).safeParse(event.content_block);
-        const kind = block.success ? block.data.type : undefined;
-        recordSequence('start', index, kind === 'text' || kind === 'tool_use' ? kind : 'other');
-        if (block.success && block.data.type === 'text' && typeof block.data.text === 'string') captured.texts[index] = block.data.text;
-      } else if (event.type === 'content_block_delta') {
-        const delta = z.record(z.string(), z.unknown()).safeParse(event.delta);
-        const kind = delta.success ? delta.data.type : undefined;
-        recordSequence('delta', index, kind === 'text_delta' || kind === 'input_json_delta' ? kind : 'other');
-        if (delta.success && delta.data.type === 'text_delta') {
-          if (!Object.hasOwn(captured.texts, index) || typeof delta.data.text !== 'string') captured.captureFailed = true;
-          else captured.texts[index] += delta.data.text;
+      const frame = item.value;
+      try {
+        bytes += frame.raw.byteLength;
+        if (bytes > MAX_OUTPUT_BYTES) {
+          captured.captureFailed = true;
+          void reader.cancel().catch(() => { captured.captureFailed = true; });
+          break;
         }
-      } else if (event.type === 'content_block_stop') {
-        recordSequence('stop', index, 'other');
-      }
+        if (!frame.complete) invalid();
+        if (frame.data === undefined) continue;
+        const event = recordSchema.parse(JSON.parse(frame.data) as unknown);
+        if (messageStopped && event.type !== 'ping') invalid();
+        if (event.type === 'ping') continue;
+        if (event.type === 'message_start') {
+          const message = recordSchema.parse(event.message);
+          if (messageStarted || !Array.isArray(message.content) || message.content.length !== 0) invalid();
+          messageStarted = true;
+          continue;
+        }
+        if (!messageStarted || event.type === 'error') invalid();
+        if (event.type === 'message_stop') {
+          if (openBlocks.size !== 0) invalid();
+          messageStopped = true;
+          continue;
+        }
+        if (event.type === 'message_delta') {
+          if (openBlocks.size !== 0) invalid();
+          const delta = recordSchema.parse(event.delta);
+          // Only the final delta before message_stop is native-denial authority.
+          terminalNativeResults = delta.safeguard_results;
+          continue;
+        }
+        if (!['content_block_start', 'content_block_delta', 'content_block_stop'].includes(String(event.type))) continue;
+        const index = event.index;
+        if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0) { invalid(); continue; }
+        if (event.type === 'content_block_start') {
+          if (startedIndices.has(index)) invalid();
+          const block = recordSchema.parse(event.content_block);
+          if (typeof block.type !== 'string') { invalid(); continue; }
+          startedIndices.add(index);
+          const state: { kind: string; tool?: { id: string; name: string; input: Record<string, unknown>; fragments: string[] } } = { kind: block.type };
+          if (block.type === 'tool_use') {
+            if (typeof block.id !== 'string' || !block.id || typeof block.name !== 'string' || !block.name || toolIds.has(block.id)) { invalid(); continue; }
+            toolIds.add(block.id);
+            if (block.input === null || typeof block.input !== 'object' || Array.isArray(block.input)) { invalid(); continue; }
+            state.tool = { id: block.id, name: block.name, input: block.input as Record<string, unknown>, fragments: [] };
+          } else if (block.type === 'text') {
+            if (typeof block.text !== 'string') { invalid(); continue; }
+            captured.texts[index] = block.text;
+          }
+          openBlocks.set(index, state);
+          recordSequence('start', index, block.type === 'text' || block.type === 'tool_use' ? block.type : 'other');
+        } else if (event.type === 'content_block_delta') {
+          const state = openBlocks.get(index);
+          if (!state) { invalid(); continue; }
+          const delta = recordSchema.parse(event.delta);
+          recordSequence('delta', index, delta.type === 'text_delta' || delta.type === 'input_json_delta' ? delta.type : 'other');
+          if (delta.type === 'input_json_delta') {
+            if (!state.tool || typeof delta.partial_json !== 'string') { invalid(); continue; }
+            state.tool.fragments.push(delta.partial_json);
+          } else if (delta.type === 'text_delta') {
+            const previous = captured.texts[index];
+            if (state.kind !== 'text' || typeof delta.text !== 'string' || typeof previous !== 'string') { invalid(); continue; }
+            captured.texts[index] = previous + delta.text;
+          } else if (state.tool || state.kind === 'text') invalid();
+        } else {
+          const state = openBlocks.get(index);
+          if (!state) { invalid(); continue; }
+          if (state.tool) {
+            let input = state.tool.input;
+            if (state.tool.fragments.length) {
+              // A populated start input plus streamed JSON has no unique source.
+              if (Object.keys(input).length !== 0) invalid();
+              const complete: unknown = JSON.parse(state.tool.fragments.join(''));
+              if (complete === null || typeof complete !== 'object' || Array.isArray(complete)) { invalid(); continue; }
+              input = complete as Record<string, unknown>;
+            }
+            captured.toolUses ??= {};
+            captured.toolUses[index] = { id: state.tool.id, name: state.tool.name, input };
+          }
+          openBlocks.delete(index);
+          recordSequence('stop', index, 'other');
+        }
+      } finally { frame.release(); }
     }
   } catch { captured.captureFailed = true; }
   finally {
@@ -382,7 +436,7 @@ export async function captureMixedContentDelivery(response: Response, options: {
     if (captured.captureFailed) void reader.cancel().catch(() => { captured.captureFailed = true; });
     reader.releaseLock();
   }
-  captured.captureFailed ||= !messageStopped;
+  captured.captureFailed ||= !messageStarted || !messageStopped || openBlocks.size !== 0;
   if (terminalNativeResults !== undefined) {
     const envelopes = z.array(z.object({ type: z.string(), status: z.unknown() })).safeParse(terminalNativeResults);
     const dangerous = envelopes.success ? envelopes.data.filter((entry) => entry.type === 'dangerous_tool_use') : [];
@@ -429,15 +483,12 @@ export function observeMixedContentReplay(
     const messages = parsed.data;
     const calls: { messageIndex: number; blockIndex: number; block: Record<string, unknown> }[] = [];
     const results: { messageIndex: number; block: Record<string, unknown> }[] = [];
-    const messageTexts: string[] = [];
     let markerCount = 0;
     for (const [messageIndex, message] of messages.entries()) {
       const blocks = typeof message.content === 'string' ? [] : message.content;
-      const text = typeof message.content === 'string' ? message.content : blocks.flatMap((block) =>
-        block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('\n');
-      messageTexts.push(text);
-      markerCount += text.split(/[^A-Za-z0-9_]+/u).filter((token) => token === probe.marker).length;
+      if (typeof message.content === 'string') markerCount += message.content.split(/[^A-Za-z0-9_]+/u).filter((token) => token === probe.marker).length;
       for (const [blockIndex, block] of blocks.entries()) {
+        if (block.type === 'text' && typeof block.text === 'string') markerCount += block.text.split(/[^A-Za-z0-9_]+/u).filter((token) => token === probe.marker).length;
         if (block.type === 'tool_use' && block.id === probe.id) calls.push({ messageIndex, blockIndex, block });
         if (block.type === 'tool_result' && block.tool_use_id === probe.id) results.push({ messageIndex, block });
       }
@@ -450,6 +501,11 @@ export function observeMixedContentReplay(
       const input = z.record(z.string(), z.unknown()).safeParse(call.block.input);
       if (owner.role !== 'assistant' || call.block.name !== 'Bash' || !input.success || input.data.command !== PROBE) {
         fail('native_probe_call_corrupt'); continue;
+      }
+      const emitted = z.record(z.string(), z.object({ id: z.string(), name: z.string(), input: z.record(z.string(), z.unknown()) })).safeParse(captured.toolUses);
+      const ownTools = emitted.success ? Object.values(captured.toolUses!).filter((tool) => tool.id === probe.id) : [];
+      if (ownTools.length !== 1 || ownTools[0]!.name !== call.block.name || !isDeepStrictEqual(call.block.input, ownTools[0]!.input)) {
+        fail('native_emitted_tool_input_missing_or_changed'); continue;
       }
       const markerIndex = typeof owner.content === 'string' ? -1 : owner.content.findIndex((block) =>
         block.type === 'text' && typeof block.text === 'string' && block.text.split(/[^A-Za-z0-9_]+/u).includes(probe.marker));
@@ -478,13 +534,11 @@ export function observeMixedContentReplay(
       if (typeof denial !== 'string' || !denial.startsWith('[auto-mode-proxy]') || !/\bblocked\b/i.test(denial)) {
         fail('captured_proxy_denial_missing_or_invalid'); continue;
       }
-      const matching = messages.filter((message, index) => {
-        if (message.role !== 'assistant') return false;
-        const text = messageTexts[index]!;
-        const denialIndex = text.indexOf(denial);
-        const markerIndex = text.indexOf(probe.marker);
-        return denialIndex >= 0 && markerIndex >= denialIndex + denial.length
-          && text.split(/[^A-Za-z0-9_]+/u).includes(probe.marker);
+      const matching = messages.filter((message) => {
+        if (message.role !== 'assistant' || typeof message.content === 'string' || message.content.length !== 2) return false;
+        const [denied, marker] = message.content;
+        return denied!.type === 'text' && denied!.text === denial
+          && marker!.type === 'text' && marker!.text === probe.marker;
       });
       if (matching.length !== 1) { fail('rewrite_denial_and_marker_missing_corrupt_or_misassociated'); continue; }
     }

@@ -1,5 +1,5 @@
 /** Auditable policy data only; interpretation belongs to the pure policy modules. */
-export const POLICY_VERSION = 'c12.1';
+export const POLICY_VERSION = 'c15.1';
 export const USER_REQUEST_MAX_CHARS = 1000;
 export const WRITE_CONTENT_MAX_BYTES = 2048;
 
@@ -99,7 +99,7 @@ export const READONLY_POSITIONAL_LIMITS: Readonly<Record<string, number>> = { un
 export const DOWNLOAD_PROGRAMS: readonly string[] = ['curl', 'wget'];
 export const FILE_WRITE_PROGRAMS: readonly string[] = ['tee', 'cp', 'mv', 'install', 'touch', 'truncate', 'rm', 'chmod', 'chown'];
 export const INPLACE_WRITE_PROGRAMS: readonly string[] = ['sed', 'perl', 'ruby'];
-export const HARD_DENY_COMMANDS: readonly string[] = ['rm', 'chmod', 'dd'];
+export const HARD_DENY_COMMANDS: readonly string[] = ['rm', 'chmod', 'dd', 'mkfs'];
 export const HARD_DENY_TARGET_PATTERNS = {
   root: /^\/+(?:(?:\*|\*\*|\.\*)\/?)?$/,
   home: /^(?:~|\$(?:HOME|\{HOME\})|\/root|\/home\/[^/*]+)(?:\/+(?:(?:\*|\*\*|\.\*)\/?)?)?$/,

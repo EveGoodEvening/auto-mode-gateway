@@ -243,7 +243,10 @@ export function createApp(config: Config) {
       lastUserText: requestContext.lastUserText,
       route: resolved.route.prefix,
       protocol: resolved.route.protocol,
-      agent_hint: version ? `claude-code/${version}` : undefined,
+      // Audit-only hints: retain both documented sources without interpreting
+      // either as identity. The audit sanitizer sees the complete uncropped text;
+      // delivery version extraction remains confined to the User-Agent above.
+      agent_hint: [sourceHeaders.get('user-agent'), sourceHeaders.get('x-claude-code-request-class')].filter(Boolean).join(' ') || undefined,
       session_id: session,
       delivery: config.gate.mode === 'shadow' ? 'shadow' : delivery === 'native' ? 'safeguard' : 'rewrite',
     };

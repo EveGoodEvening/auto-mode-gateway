@@ -9,6 +9,14 @@ function normalizedTarget(value: string): string {
   return posix.normalize(value.replaceAll('\\', '/'));
 }
 
+function authorizedKeysTarget(value: string, context: ActionContext): string {
+  const target = normalizedTarget(value);
+  // Match the client's lexical Windows semantics, never the gateway host's home.
+  const windows = context.platform === 'win32' || context.platform === 'windows'
+    || [value, context.project_dir, context.workdir, context.userprofile].some((path) => path !== undefined && (/^[a-z]:[\\/]/i.test(path) || path.startsWith('\\\\') || path.startsWith('//')));
+  return windows ? target.toLowerCase() : target;
+}
+
 function matches(pattern: RegExp, text: string): boolean {
   pattern.lastIndex = 0;
   const result = pattern.test(text);
@@ -27,7 +35,7 @@ function rootOrHome(value: string, context: ActionContext, policy: EffectivePoli
 export function hardDeny(action: Action, policy: EffectivePolicy = DEFAULT_POLICY, context: ActionContext = {}): string | undefined {
   if (action.kind === 'file_write' && action.content_truncated) return 'content-truncated';
   if (action.execution_unavailable) return 'execution-unavailable';
-  if (action.kind === 'file_write' && action.paths.some((path) => matches(policy.hard_deny_target_patterns.authorized_keys, normalizedTarget(path)))) {
+  if (action.kind === 'file_write' && action.paths.some((path) => matches(policy.hard_deny_target_patterns.authorized_keys, authorizedKeysTarget(path, context)))) {
     return 'authorized-keys-write';
   }
   if (action.kind !== 'command') return undefined;
@@ -48,7 +56,8 @@ export function hardDeny(action: Action, policy: EffectivePolicy = DEFAULT_POLIC
         const flag = args.findIndex((arg) => /^-[^-]*c/u.test(arg));
         if (flag >= 0 && args[flag + 1]) pending.push(args[flag + 1]!);
       }
-      if (policy.hard_deny_commands.includes(program) && (program === 'mkfs' || program.startsWith('mkfs.'))) return 'filesystem-format';
+      if ((program === 'mkfs' || program.startsWith('mkfs.'))
+        && (policy.hard_deny_commands.includes('mkfs') || policy.hard_deny_commands.includes(program))) return 'filesystem-format';
       if (policy.hard_deny_commands.includes(program) && program === 'dd' && args.some((arg) => arg.startsWith('of=') && matches(policy.hard_deny_target_patterns.device, normalizedTarget(arg.slice(3))))) {
         return 'device-overwrite';
       }
@@ -71,7 +80,7 @@ export function hardDeny(action: Action, policy: EffectivePolicy = DEFAULT_POLIC
           if (target.operator !== '|' && target.operator !== '|&') break;
         }
       }
-      const keyTarget = args.some((arg) => matches(policy.hard_deny_target_patterns.authorized_keys, normalizedTarget(arg)));
+      const keyTarget = args.some((arg) => matches(policy.hard_deny_target_patterns.authorized_keys, authorizedKeysTarget(arg, context)));
       if (keyTarget && (parsed.reasons.includes('redirection') || policy.file_write_programs.includes(program)
         || (policy.inplace_write_programs.includes(program) && args.some((arg) => /^-[^-]*i/u.test(arg))))) {
         return 'authorized-keys-write';

@@ -142,9 +142,12 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
         const deterministic = deterministicOutcome(action, context, policy);
         if (deterministic.outcome !== 'review') verdict = base(deterministic.outcome, deterministic.rule, deterministic.reasons);
         else {
-            // Literal credentials are removed before state truncation, not afterwards.
-            const stateContext: Omit<GateContext, 'signal'> = Object.fromEntries(Object.entries(context).filter(([key]) => key !== 'signal'));
-            const state = buildState(redact({ ...action, raw: undefined }, secrets, policy), redact(stateContext, secrets, policy), policy);
+          // Literal credentials are removed before state truncation, not afterwards.
+          const stateContext: Omit<GateContext, 'signal'> = Object.fromEntries(Object.entries(context).filter(([key]) => key !== 'signal'));
+          const state = buildState(redact({ ...action, raw: undefined }, secrets, policy), redact(stateContext, secrets, policy), policy);
+          // Redaction can expand a complete write beyond the final visibility bound.
+          if (state.action.content_truncated) verdict = base('block', 'content-truncated');
+          else {
             const source = Object.fromEntries(Object.entries(action).filter(([key]) => key !== 'raw'));
             const key = cacheKey({ identity, state, action_digest: cacheKey(source), content_digest: action.content_digest,
               path_context: cacheKey({ home_dir: context.home_dir, userprofile: context.userprofile }) });
@@ -207,6 +210,7 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
               if (cacheable) cache.set(key, cloneVerdict(verdict));
             }
           }
+        }
       }
     } catch {
       // Caller cancellation is not provider failure and can never fail open.
