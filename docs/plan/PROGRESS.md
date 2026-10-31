@@ -2,7 +2,7 @@
 
 ## Status and evidence
 
-- **CURRENT C15 ACTIVE — 七根因最终修复CLOSED/六个FinalCodeSlice全CLEAN，Parent批准恢复P2-1/3/4/7/8、P6-2、P8-4审计隐私；只准备安全修复green checkpoint，不关闭C15。** bg76/80失败原证据保留；bg81 G6/51files2580/coverage98.63/docs/cleanup PASS；bg88实际HTTP29cases/两backend/87启用日志13340B和bg86真实BUILT tail JSON+shell三凭证/两历史行/闭环均PASS。最终bg84 SOURCE0395/BUILTa7aa离线safetyPASS但accuracyFAIL/liveUnverified/NOreceipt，engine不同；旧c12.1与135b/a97保持STALE原字节。bg84第四步metadata仍实际REFUSED、无selection，closed-hardlink私有修正/新完整Safety/freshadopt与当前Native/PTY实测待完成。真实provider/GUI/cache/p95/HTTPS/publish/组合mixed全门槛未完成；无Git执行/目标启动授权。
+- **CURRENT C15 ACTIVE — 仅本地绿色证据/文档checkpoint，非C15关闭。** d5e439/G81（51files2580）、bg88 HTTP29case、bg86 BUILTtail与0395/a7aa离线safetyPASS/accuracyFAIL/liveUnverified/NOreceipt均保留，不重跑确认。**bg_14 rewrite自身局部VERIFIED：** AD0D/2FB6+Parent独立采用73ab的selected --rewrite-only，EXIT0/3.17s；真实CLI2.1.312全11输入/11完成=3denial8normal/末5normal，protected rewrite typed-denial+marker/exact-replay严格检查3/3，genuineBash11/11/实际SF1/11、deny3/rewriteaudit3/Nativeaudit0、SDK工具调用/结果/执行0、完整raw/history/capture/cleanup，无deadline/overflow/parsererror。此为rewrite文本拒绝/marker回放，**不是Native input delivery证明**；NativeDeliveryFALSE/paired22FALSE，bg_2 Native顺序2FAIL/第三reason mismatch仍UNMET，bg_7 callerSTOP与455/a97原证据/snapshot不重评。**当前仍DOABLE是TTY已知运行control分类与下一步Parent批准：** queryalias5470/804A/1E36/F140经SAME conditionalCLEAN后，bg_16已实际FINISHED EXIT1/2.92s，RUN_LOOP first unsupported_osc、statusFALSE，owned cleanup/allEOF/captureTRUE、cleanupIOFALSE/无deadline；A只读分类中，不是RESOURCE_WAIT/排队中。无/status、NativeUI/三次分别人工probe/escalation/provider/cache/HTTPS或全矩阵成功；27条自身账及原checkbox保持，C15 ACTIVE，无Git许可。
 - **Historical C14 closure checkpoint (committed as `e84c52e0c30cce31baeb14bbd161e4fa2f75ea46`) after green implementation `8e2b27e4f60263f0d787ae7c17dc63dc16b56978`.** Main approved closure after all3 scoped formal reviews and SAME final accounting review CLEAN/new[], parent G2494/docs-check/causal checker proof, actual private staging and genuine Claude2.1.312 README mock connection, P8-5 own-criterion approval with explicit harness disclosures, and exact five temporary SOURCE removals/absence. Full P8-3 `PR 上 CI 绿色；打 tag 后镜像可拉取` stays UNCHECKED for unverified authorized hosted/publication/current trusted full-provider report/independent-receipt/trust-root prerequisites. All actual reports/raw QA/failed evidence are preserved; bg62 remains unclassified and bg64 is not retroactively relabeled. C13/P8-1/P8-4/RUNTIME001 closure unchanged; full public HTTPS/live criteria remain pending. C15 was unselected at that checkpoint; the later Main selection is recorded above.
 - **CURRENT C13 LOCALLY CLOSED by this final docs-only tracker checkpoint after green `cfd846ca8ee541fcbe64379f87eb335b3cf1b934`.** Parent authorized local closure after ALL THREE formal correction reviews CLEAN/new[]: `C13RuntimeFixReview` HIGH-confidence C13-RUNTIME-001 CLOSED, `C13PackageFixReview` CLEAN, `C13AccountingFixReview` CLEAN/no omitted doable local criteria. Current bg51 2026-10-29 09:43:35 type/lint/44files2449tests/build PASS (CLI335.22KB/map630.58KB/96ms/full28.93s), immutable F108 BEFORE1115→AFTER1116 disclosure TRUE→FALSE in BOTH real-HTTP phases with exact prefix/failure/cancellation/withholding preserved, actual repaired-code E21D/bg52/artifact1120 package+all commands+valid HTTP PASS and6282/bg53/artifact1121 actual two-phase Docker PASS. P8-1/P8-4 own criteria CHECKED; all reachable LOCAL implementation/proofs/review/owned cleanup complete. Full P8-2 remains UNCHECKED/BLOCKED by scoped external public-deployment prerequisites, not omitted local work. Source/tests/package/corpus/templates/reports unchanged by final closure. No public HTTPS/real-provider/R8 release/native/whole-goal acceptance; C14 remains unselected until parent rereads this committed tracker.
 - **自身标准最新状态，不擦除历史闭环：** C15审计隐私曾重开P8-4，现在经最终AFTER/SAME和bg86/b88真实消费者证明由Parent批准恢复。C13RUNTIME001/Pino/startup/token/413/ACL/bounds/dependency历史证明始终保留，旧checkpoint文字不冒充新问题已提前覆盖；当前task复选框按下述最终C15证据恢复，全球外部门槛仍未关闭。
@@ -716,9 +716,9 @@ All three actual `eval/reports/*.json` archives, artifact988/audit sample, actua
 
 **Own criteria恢复与全局边界：** Parent基于最终G/六slice SAME/实际HTTP+BUILT CLI消费者批准恢复P2-1/3/4/7/8、P6-2、P8-4审计隐私；G/HTTP matrix/本地mock性能/离线子部分/本地composed privacy按实际证据checked。P2-2/P3-2/P3-3/P3-6/P3-7/P6-1/P4-3/P8-1/5/6既有自身标准及C13RUNTIME001保留。完整可信EACH-provider+ordered-chain/独立receipt、真实SDK/native+rewrite mixed/GUI各≥5turn/cache/tool-tail p95/publicHTTPS/域名与宿主80/443/hosted PR-tag-image-pull仍UNCHECKED；不缩小任何原任务。
 
-**当前版本观察器/私有QA：** 新公共317–726 raw23907bytes/SHA489db3580ca9d9fec9a67c9cfa4b49947c644ad5a30b9ad076577f6b510ef6a9/fullhelperf5a26686b309d8daaeb650ed0a50a8cf1d2c0a21ea1dda56d669919ae7e52a9b已通过unit/SAME；私有副本逐字迁移，toolUses仅完整闭合有效生命周期，native完整raw input deep equality/缺map失败、rewrite原owner exact两文本块，无join/subsequence/coalescing旧路径。旧24ae及误含54-byte reader-footer的df60不是当前权威，317FAIL/349原观察器PASS不重评。当前2.1.312 Native/status仍可做、尚未实际执行；bg84第四步metadata实际REFUSED（固定安全JSON/exit1/target未launch/无selection）。只读公共元数据找到两个可见闭合nlink2安装器组，是当前strict-singlelink的充分拒绝见证，不冒称已追溯唯一历史首因；opaque缓存零下探/无重跑确认。Parent已批准私有闭合硬链接核算+status消费者同步，public Origin A5BF/三opaque mask1876与实际digest adoption仍独立；新代码须完整SAME SourceSafety→Parent新inventory→实际采用digest→资源及单独目标release。元数据/源码准备不是UI/SDK/provider证明。
+**实际当前版本QA与保持边界：** 强观察器public317–726 raw23907/SHA489d/fullf5a及私有A0C6/5BDD/4A36/EB4E/7DDD完整SourceSafety经Parent采用，旧24ae/reader-footer df60不为权威，317FAIL/349原观察器PASS不重评。bg84原strict nlink拒绝永久保留；closed-group修正4A36后bg90实际EXIT0/2.79s，selection=/tmp/c15-native-public-input-yxw7hn5k/selection.json，1770223B/root0:0600/0700dir、347project/237installed/110optional/linked0/7794visible/masks3/closedgroups2；实际FILE SHA243295f1ac32996ac2c89a6141da45863d05ea24421a988e0fc7a3821cbe10e2由Parent独立hash+adopt于local://c15-adopted-public-selection.txt，不是helper自批/registry byte-auth。随后bg91 Native实际EXIT1/3.91s、无timeout/overflow、全后代reaped+EOF/cleanupIO无错，ROOT=/tmp/c15-native-mixed-vhea4rmx。真实第一original/upstream model各1、原SF/Bash各1、probe1/mockDecisionDeny1/nativeaudit1/SDK erroredresult1/success0；完整capture/toolUses/input/marker有效、omitted0，system.permission_denied的decision_reason与完整proxy explanation相等，但其message为STRING1184而私有通用schema要求object，触发client-record-schema-invalid/CLI143。strong observer唯一原因immediate_next_model_request_missing、strictverified0/completed0/rewrite未启动；classifier HTTP0，CLI reason_type classifier不是fallback/UI证明。安全投影artifact://1381与1382保留，无rawbody/excerpt泄露，不将bg91重标PASS或SDK兼容失败。Parent已授权仅该已观察typed信封+当前session/issuedBashprobe/fullreason的私有诊断解析修正，保护489d不改；未知/坏记录/control/login/approval仍fatal，通知不计turn/success/strict信用。改helper字节将使243的helper绑定过时，须新完整Safety+fresh inventory/Parent actualadopt+资源/目标许可。bg92 FIRSTstatus-only实际EXIT1/ownedcleanupTRUE，仅generic driverfailed；未保留可判stage/cause，renderedAuto/status未观察。两archives/71files/1excluded只证明staging，不证明imports；A自有诊断提案另审。任何新目标均无worker启动。
 
-**精确green checkpoint所有权21路径（scope artifact3397，执行另行授权）：** Gate4：src/gate/normalize/workbuddy.ts、src/gate/decide.ts、test/gate/normalize.test.ts、test/gate/decide.test.ts；HardDeny4：src/policy/hard-deny.ts、src/policy/constants.ts、test/policy/shell-rules.test.ts、test/gate/hard-deny-boundaries.test.ts；Privacy5：src/policy/redact.ts、src/audit/record.ts、src/server/app.ts、test/security/encoded-secrets.test.ts、test/integration/audit-hints.test.ts；Manual2：test/manual/claude-smoke.ts、test/manual/claude-smoke.test.ts；I4：AGENTS.md、docs/plan/DESIGN.md、docs/plan/CHECKLIST.md、docs/plan/PROGRESS.md；B2两份：docs/verification.md、docs/compat.md。仅NEW三条：test/gate/hard-deny-boundaries.test.ts、test/security/encoded-secrets.test.ts、test/integration/audit-hints.test.ts；其他18必须原已tracked。Package/lock/deps/corpus/templates/thresholds、dist/coverage/report/privatecode/data都不在scope。所有writer最终tags通过handoff冻结，不能用git status/diff代替审批。尚无本checkpoint Git执行/commit/push/C15关闭授权。
+**已执行green checkpoint21范围（3397+Parent独立critical-window release）：** Gate4：src/gate/normalize/workbuddy.ts、src/gate/decide.ts、test/gate/normalize.test.ts、test/gate/decide.test.ts；HardDeny4：src/policy/hard-deny.ts、src/policy/constants.ts、test/policy/shell-rules.test.ts、test/gate/hard-deny-boundaries.test.ts；Privacy5：src/policy/redact.ts、src/audit/record.ts、src/server/app.ts、test/security/encoded-secrets.test.ts、test/integration/audit-hints.test.ts；Manual2：test/manual/claude-smoke.ts、test/manual/claude-smoke.test.ts；I4：AGENTS.md、docs/plan/DESIGN.md、docs/plan/CHECKLIST.md、docs/plan/PROGRESS.md；B2：docs/verification.md、docs/compat.md。仅NEW3为hard-deny-boundaries/encoded-secrets/audit-hints上述精确路径，18原tracked，16attr库存/三有效查询全EMPTY/配置names-only admission均通过；exact add/commit--only/postHEAD rc0，实际4386096941ca6c540ea14e183dbe93aed15bdb44→d5e439dec9726c6108889c169434cbbc1ab12f17，固定原始JSON artifact://1372:raw。未status/diff/re-audit/push、未stage任何private/dist/report/coverage/lock/corpus；没有C15关闭。此后获准的bg90/91/92记账修改尚未提交，需新doc/readiness审与Parent执行许可，不复用旧critical授权。
 
 **以下保留HISTORICAL4386/c12.1 core checkpoint原记录，不是最终修复验收或当前报告。**
 
@@ -743,6 +743,192 @@ All three actual `eval/reports/*.json` archives, artifact988/audit sample, actua
 - Final accounting additionally rejects stale policy/provider/injection reports under R8 and distinguishes exact dangerous-string inert proof from additional safe live denial; unexercised original external acceptance never silently deleted or greened.
 - Risk/rollback: flaky timing, hidden external gap, lessons fabricated from docs; record failed/outstanding portions precisely, do not green source tasks. Stop release if mandatory gate fails; committed local implementation may remain complete with external acceptance pending, but do not call entire source plan done.
 
+#### 当前全部未勾选原任务：精确标题与 DOABLE / BLOCKED 自身条件（C15现状，不是新计划）
+
+以下逐字引用当前 `CHECKLIST.md` 的全部 **24个顶层未勾选标题＋3个嵌套OWN未完成条目，共27条**；原checkbox/原验收/外部要求/历史失败均不改。`DOABLE（局部）`不表示整项可勾选，`BLOCKED`仅指该项自己的尚缺前提或已实际未满足合同；不借邻居条件阻塞、不把mock/subset/离线/文档检查当完整真实验收。原有已勾选项目（含P8-1/P8-4/P8-5自身标准与C15核心本地检查）保持；这份精确剩余账不宣布C15全关。
+
+**当前已完成与仍可行动：** bg_14/73ab独立rewrite原完整11输入/3 protected typed-denial+marker/exact-replay严格检查已VERIFIED，不再待跑，也不是Native input delivery证明。当前TTY queryalias5470/804A/1E36/F140已SAME conditionalCLEAN并由Parent以receipt45790实际运行bg_16；**该任务已结束，不再排队/RESOURCE_WAIT**：EXIT1/2.92s、RUN_LOOP unsupported_osc firstfailure/statusFALSE。当前local DOABLE是A只读分类该实际runtime control，然后由Parent决定下一步，尚无新fix/Enter/status许可。完整P3-4仍需真实/status及三次分别人工probe等原条件；后续escalation依赖真实status解读，不从rewrite、Theme菜单或readiness推断。每个外部BLOCKED仍只按其OWN前提记账，不称全部永久阻塞。
+
+**历史实际观察不可重评：** bg_2/455真实Native首次两条immediately-next API owner marker-before-tool（input完整但严格顺序FAIL），第三fullreason mismatch后STOP/无第三nextrequest，classifierHTTP0/conditional fallback UNTRIGGERED。bg_7/a97 selected schema/flag正确、1输入/有效text-only denial0+exactmarker1/deny1/rewriteaudit1/nativeaudit0/CLI工具0/completed0，caller未知system.informational warning STOP导致strict0唯一missingNext；已捕获result success也未推进，不能把该历史称为SDK rewrite FAIL。455与a97关联五源码分别保留owner-only snapshot，原raw/summary不改。随后bg_14是新独立selected rewrite实际成功，不恢复Native/paired22。每条真实请求继续保存实际opt-in，当前真实统计1/11而非制造all11 SF。
+
+**最小静态修正与随后实际证明：** SAME INFO001只涉及未执行caller的issued-state条件；privateRelay真正发出probe后expectProbe清FALSE，诊断需已有issued ID且false，不能把等待发出的TRUE当已发出。Parent仅授权反转该条件；AD0D/2FB6/coupled说明经同审查者CLOSED/current5 CLEAN/findings[]，Stage1 CLEAN/selected target CONDITIONALCLEAN，949原admission/状态、Native handler/原观察器不变。9154未target执行，不造其runtime/snapshot；旧a78/347A/a97/455/243均未被用来授权新helper。Parent随后fresh实际采用73ab并执行bg_14，才取得下面rewrite自身VERIFIED；静态闭合本身不是运行成功。
+
+**CURRENT bg_14 rewrite自身VERIFIED（非Native/combined/全矩阵）：** root `/tmp/c15-native-rewrite-only-25rz5pro`；Parent authoritative final1444 schema amp.c15-rewrite-only-parent.v1/scenario rewrite-only/passedTRUE/EXIT0/3.17s/sourceOnlyTRUE/nativeDeliveryFALSE/paired22FALSE/nativecontractunmet-bg_2，anchor0/ECHILD/ALL EOF/cleanupIOFALSE，无deadline/overflow。完整fake-secret预脱敏只读投影：CLI2.1.312、original/upstream11/11、sent/completed11、denial3/normal8/finalnormal5、strictPASS/verified3/failures0；这3项是 **protected rewrite typed denial+marker及exact ordered replay检查，不是Native工具input交付**。genuineBash11/11、actualoptin1/11、providerDecisions/deny/rewriteaudit3/3/3、Nativeaudit0；SDK工具调用/结果/拒绝结果/成功结果0，CLI0/errors0/parserdiagFALSE、classifier0/aux0、raw/capture/historyexact/directcleanupTRUE。success result11/control0/stderr0；唯一warning严格8字段/knownwarning/isMetaFALSE/ISO/UUID/bounded4096，与actual preceding init同freshsession；11个init记录仅1会话。诊断无成功/continuation信用，11条actual result才推进。无正文/IDs/配置/模型/异常输出；不冒充UI/native/provider/cache/HTTPS，core2580仍是历史G81。
+
+**当前TTY可精确续接的实际记录（非运行授权）：** Parent `bg_16` 已FINISHED，scope `c15.status-only.appearance-once.v1`，owned root `/tmp/c15-pty-status-ha1iar5d`。冻结source4为 `/tmp/c15-pty-status-driver.py` **5470**、`/tmp/c15-pty-status-runner.py` **804A**、`/tmp/c15-pty-status-service.ts` **1E36**、`/tmp/c15-pty-status-usage.txt` **F140**；SAME conditionalCLEAN/findings[]，Parent实际receipt `45790e8099473a4de2d6f8c12feda46b188a4a1d3a822139c8f8c98273556658`，其四源码/runtime/455既有绑定均由Parent匹配。实际EXIT1/2.92s、firstfailure RUN_LOOP/unsupported_osc；statusFALSE、ordinary_exitFALSE/status_panelFALSE，physicalcleanup/allEOF/captureTRUE、cleanupIOFALSE/no deadline。A正在只读分类OSC number/query shape/计数，未授权sourcefix/输入/重跑；当前不再是资源等待，未声称任何精确Gate队列时长或将Gate观察当性能。
+
+Parent确认下列为bg_16实际完整argv，**仅历史DATA，非重跑指令/新授权**：
+
+```text
+/root/.omp/bin/heavy-gate -m 6G -- /usr/bin/env -i PATH=/usr/bin:/bin HOME=/nonexistent TMPDIR=/tmp LC_ALL=C /usr/bin/python3.14 -I -S -B /tmp/c15-pty-status-runner.py --admission-sha256 45790e8099473a4de2d6f8c12feda46b188a4a1d3a822139c8f8c98273556658
+```
+
+SourceScoped/NoSeed条件仍完整：fresh empty HOME/profile、无onboarding/trust/approval/Auto/entitlement/cache预置，不借真实认证；tool-free、唯一activation→关联response→fresh /status→合格普通input的/exit，至多既有精确认识的cosmetic Enter，不点过login/permission/unknownmodal。服务route-wide rewrite/请求auto不是Native资格或Enabled证明；后续输入或连续升级另需Parent授权。Native5仍AD0D/2FB6冻结；原455/a97证据不动。I4只是供独立DOC checkpoint审查与后续绿色checkpoint提交的事实冻结，不是最终验收或C15closure，不含Git/commit许可。
+
+**外部前提口径：** 既有presence-only审计仅覆盖精确selected default config与七个文档ENV名/selected部署文件/DOMAIN；不声称穷尽home/keychain/所有配置或credentials。真实endpoint/model/key、host/DNS/入站权限、独立trusted-run授权/receipt及公开发布权限均只在实际建立后才算可用；不得借root OAuth、扫描用户stores、制造receipt、push/tag/publish或改host sandbox来“消除阻塞”。以下同名行保留其OWN标准，重复出现的性能/Desktop子条件不增减原任务。
+
+**1. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P1-5 Anthropic Messages 适配器（直通阶段）
+
+自身尚缺真实 Claude Code 经代理第二轮 cache_read_input_tokens>0；需要安全显式真实 Anthropic/中转端点、可缓存模型与凭证及真实 cache 计费/usage 观察。fixture/HTTP/当前文档一致性已验证，不用邻居 Desktop、发布或 Native mixed 条件阻塞本项。
+
+**2. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P2-5 System One 决策适配器
+
+自身真实 provider 的 check 成功尚未观察；需要安全显式 System One endpoint/model/credential。mock URL/信封/超时/重试和真实 built-loopback check 不等于该真实 canary。
+
+**3. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P2-6 调查：OpenRouter 与 Cloudflare 的请求细节
+
+自身 OpenRouter 两个原定模型/端点 canary、Cloudflare 实际概率/信封观察尚未建立安全授权的真实 credential/account/gateway/endpoint；不能猜测 accepted model/path/envelope。官方请求调查与 mock 支持不能替代两家实际 check。
+
+**4. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P3-1 `safeguards` 处理与 `safeguard_results` 注入
+
+实现/fixtures/HTTP 注入已验证；当前原 Native 实机/严格 mixed 合同仍未满足：保留317失败及bg_2首次两条实际 next-request marker-before-tool、第三 fullreason 不匹配且无第三 next-request。需要可满足原合同的真实 vendor/client 条件或用户明确改变验收；不得改观察器、制造 flags、改原请求、把 rewrite 当 Native 或盲目重跑。
+
+**5. CHECKLIST原项 — VERIFIED（rewrite局部）＋DOABLE（TTY/status）＋BLOCKED（完整）**
+
+> - [ ] P3-4 调查：Claude Code 实机行为
+
+rewrite自身bg_14/73ab全11输入、protected rewrite typed-denial+marker/exact-replay严格3/3、3denial8normal5tail/零SDK调用结果执行/Nativeaudit已VERIFIED，不是Native input delivery。TTY source4/receipt45790经SAME conditionalCLEAN后bg_16已实际EXIT1，RUN_LOOP unsupported_osc/statusFALSE，完整owned cleanup/capture；当前DOABLE是只读control分类及下一步Parent批准，不是reviewpending或排队，也无新输入/fix许可。P3-4原Native严格合同/真实status/三次分别人工probe/说明回传及条件fallback仍未完成，classifier0 UNTRIGGERED，不造missing-key理由或将整项勾选。
+
+**6. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P3-5 调查：改写模式的 preserved thinking 与 beta 头
+
+自身真实中转改写≥5轮含拦截、preserved thinking/signature/prefix 与 beta strip/preserve 的实际结果需要安全显式真实 relay/model/credential；尚无该可用前提。原400分支仅在真实触发后处理受影响轮次，不能预 strip、改默认或以当前 fake-only rewrite11轮代替。
+
+**7. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P4-1 OpenAI Decisions 决策适配器
+
+自身真实 Vercel openai/gpt-6-luna-decisions check 未观察；需要安全显式 AI Gateway endpoint/model/key 的真实访问，不从旧 scoped ENV=false 推断所有凭证源均不存在，也不从 mock 推断模型可用。
+
+**8. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P4-2 LLM 二审适配器
+
+自身真实 OpenRouter Haiku5.5 有效 JSON canary 未观察；需要安全显式 endpoint/model/key。结构化/400 fallback/畸形 JSON 的 loopback 已验证；真实模型/目录可用性未知，不能改成别的模型以冒充原标准。
+
+**9. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P5-1 Responses 流式拦截与改写
+
+P5-1唯一自身剩余是真实 Jev/Clef tool-tail p95≤1.5s/≤0.5s 的真实访问与测量。当前 mock1000-text 性能已完成；不追加 Desktop/cache 邻居条件，也不把 Gate等待、raw suffix drain 或 mock percentile 当真实 provider p95。
+
+**10. CHECKLIST原项 — BLOCKED**
+
+>   - [ ] P5-1整项仅OWN真实Jev/Clef tool-tail p95未验证：“真实 provider p95 ≤1.5s Jev/≤0.5s Clef-flash 未测，不得以 mock/C08 成绩代替。” 未建立安全显式真实provider endpoint/model/credential访问；不是Desktop/cache邻居条件，也不是尚有localtiming任务。
+
+这是上一项同一 OWN 未完成子条件，原文阈值不变。缺安全显式真实 Jev/Clef endpoint/model/credential 与实际 tool-tail 样本；不是未做的本地 timing 工作。
+
+**11. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P5-2 调查：Codex 实机与回放一致性
+
+本项 CLI两模式/无害拒绝/严格 replay/正常 mock轮次已验证。自身尚缺 Desktop 两模式实际接入/拒绝/replay 的合规 vendor-sandbox host（已实际 kernel userns/AppArmor DENIED、无获准私有 remedy），以及显式真实 relay/model/credential 的≥5轮。reasoning错误分支尚未触发，不能预 strip；不禁 sandbox/改 host policy/绕 auth/盲重试。
+
+**12. CHECKLIST原项 — BLOCKED**
+
+>   - [ ] OWN pending：Desktop两模式实际接入/拒绝/replay的HOSTsafevendor-sandbox前提外部受阻（实际FATAL+kernel userns/AppArmorDENIED cap21，Node缺陷已修复，未观察auth）；只读诊断/targetcleanup资格已完成，无合规私有remedy，不改hostpolicy/禁sandbox/替换vendor/绕auth或retry。真实>=5upstream仍需显式realrelay配置+credential/model安全审计；reasoning错误分支未触发不预strip。CLI mock成功不替代这些自己的完整条件。
+
+OWN 子条件原样保留：真实 Desktop safe-sandbox HOST 与≥5轮真实 relay 接入前提未获准；Node/broker ready修复不是 UI/auth/接入证明。两者均为本项自身条件，不以别项 cache 或发布阻塞。
+
+**13. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P5-3 Codex 接入文档
+
+本项仅剩自己的 Desktop-from-zero 接入成功；config/init/fresh CLI-from-zero已验证。实际 vendor sandbox HOST 拒绝且没有获准合规私有 remedy，未观察 GUI/traffic/auth。不能借 P5-2 的≥5真实轮次或邻居 cache 阻塞本项。
+
+**14. CHECKLIST原项 — BLOCKED**
+
+>   - [ ] OWN pending仅Desktop-from-zero成功：Nodefix有实际brokerready/appspawn证明，但vendor sandboxHOST前提由kernel相关拒绝证实且无获准私有remedy；未见UI/Codexsurface/traffic/auth。P5-3因此自己的Desktop条件外部待安全hostprovisioning，不借P5-2模式/real>=5或邻居cache阻止它；禁止不安全绕过，parentapprovalFALSE。
+
+OWN Desktop-from-zero 原条件完整保留；需要提供合规 vendor-sandbox host/授权运行表面，不能关 sandbox、改 AppArmor、替换 vendor、借认证或从 app spawn推断接入。parentapprovalFALSE历史不改。
+
+**15. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P6-3 调查与接入文档：WorkBuddy 实机
+
+自身缺可访问且获准的 genuine WorkBuddy artifact/operator GUI host：既有精确官方 Linux x64 DEB/RPM metadata GET404、scoped未见现有 app。待该具体前提后才能实际观察原定自定义 Chat接入、工具调用、AI智能审批=自动审批且非完全访问、拒绝/无执行、实际 auxiliary头有无；不泛称 Linux不支持/认证失败，也不换 CodeBuddy CLI/Enterprise/online/DefaultPermissions。≥5正常轮次仍按原全局 QA 原文保留。
+
+**16. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P7-2 评测运行器
+
+自身真实 Jev report及R8完整 EACH可信provider+ordered-chain/full-accuracy/授权独立receipt仍未观察。当前最终 SOURCE/BUILT离线 baseline150+wrap279 已实际 safetyPASS但accuracyFAIL（danger93/93、safeFalse54/57、rawgray134/150、wrapAllows0/errors0）；不能隐藏数值失败。已审计 selected default config/七个ENV 的 scope中前提不可用，不是穷尽所有配置/credential源；需要合法真实 endpoint/model/key/独立审计运行与receipt。
+
+**17. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P7-3 注入套件
+
+自身完整当前 EACH配置可信provider+ordered-chain injection corpus/wrappers与R8可信provenance未验证；离线 wrapped dangerous allows0及flips0/186 已观察，但不替代真实全集/100%/≤5%/errors0。保持150标签/279包装/模板/阈值/分母和旧 archives 不变，不新增 corpus特判以制造绿。
+
+**18. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P8-2 Docker 与 Compose
+
+自身 local实际两阶段Docker/Caddy/proxy/HTTPSmock+127-only健康证明已完成。原 public https://$DOMAIN/healthz200 与host仅Caddy80/443外露仍需明确授权 public domain/DNS/host/入站80/443/真实TLS部署；scoped selected deploy ENV/config缺失与DOMAIN unset 不代表所有部署均不存在，所有权/权限未知。不能用本地fakeTLS/loopback publication代替。
+
+**19. CHECKLIST原项 — BLOCKED**
+
+> - [ ] P8-3 CI/CD
+
+本项本地 workflow/actionlint/release-closed-path安全消费已实现并验证，不等于实际 hosted PR CI/tag image pull。尚需用户授权 PR/tag/registry操作、repo/token权限、当前 EACH可信provider+ordered-chain full-accuracy report及授权独立receipt；NPM_TOKEN仅决定可选npm发布，不能越过所有发布门禁。当前未获准 push/createPR/tag/npmPublish/registryPush，不为勾框擅自执行。
+
+**20. CHECKLIST原项 — BLOCKED**
+
+> - [ ] SSE 透传性能：mock 上游 1000 事件流经代理，首事件额外延迟 < 50 ms，纯文本总额外延迟 < 5 ms/事件；带 tool call 的响应末尾等待 p95 ≤ 1.5 s（Jev）或 ≤ 0.5 s（Clef-flash）。
+
+自身三协议 mock1000-event 9pairs 已实际满足首事件/每text最大额外耗时阈值（3.573410ms /0.04410577ms）；剩余唯一本项真实 Jev/Clef tool-tail p95≤1.5s/≤0.5s 需要安全显式真实 provider访问和测量。不以 mock p95/平均值替代。
+
+**21. CHECKLIST原项 — VERIFIED（rewrite自身局部）＋BLOCKED（完整Native/combined）**
+
+> - [ ] C08 ordered-content barrier：tool0→text1 实际 native/rewrite mixed regression 原严格观察器通过（captured event order + immediately-next-request ordered blocks/exact explanation）；早期/纯文本 <5 ms 不变，后缀等待单列。多个 tool/部分拒绝、thinking/signature 子集与总量、未知有状态后缀、ping/error 即时、慢判定/背压、ID/EOF/超时/取消、nonstream parity、raw nonblocking shadow 均覆盖。计划定向 re-review green 是生产补丁前置，不是修复或实机通过证据。
+
+selected rewrite自身bg_14/73ab全量VERIFIED：11输入/11完成、protected rewrite typed-denial+marker/exact ordered replay严格3/3、3denial8normal5tail、完整history/raw/capture/cleanup、SDK工具调用/结果/执行与Nativeaudit0。**不称Native input delivery通过**。bg_7 caller warning STOP/missingNext原样保留，不回填SDK失败或成功；Native原合同bg_2两条immediate-next owner顺序FAIL/第三reason mismatch无next仍UNMET，317/349及455/a97原证据/snapshot不重评。rewrite不获paired22/native，原combined checkbox继续未勾选。
+
+**22. CHECKLIST原项 — BLOCKED**
+
+> - [ ] 评测门槛：`auto-mode-proxy eval` 对配置链 拦截率 100%、误拦 ≤ 5%、注入翻转后危险放行数 0；报告归档于 `eval/reports/`。
+
+自身完整配置链真实评测100%危险拦截/≤5%安全误拦/包装危险放行0与当前归档尚未取得。离线安全绿、数值准确率54/57安全误拦失败必须分别记账；需要安全显式真实 provider全集/ordered chain、真实完整报告和独立可信运行receipt，不以mock/subset/rules-only放行。
+
+**23. CHECKLIST原项 — VERIFIED（Claude rewrite局部）＋DOABLE（TTY/status）＋BLOCKED（完整矩阵）**
+
+> - [ ] 实机 QA（记录到 `docs/compat.md`）：Claude Code CLI（原生 `safeguard_results` 路径与改写路径各一次）、Claude Desktop、Codex CLI 与桌面版（`--yolo` 与 Approve for me）、WorkBuddy（自动审批开启）各完成一次注入拦截验证与一次 ≥ 5 轮正常对话。
+
+Claude rewrite自身bg_14完整11/3已VERIFIED，3项指protected rewrite typed-denial+marker/exact replay而非Native input delivery。当前local DOABLE是bg_16实际RUN_LOOP unsupported_osc的只读control分类与下一步Parent批准；任务已FINISHED EXIT1、statusFALSE/cleanup与capture完整，不是RESOURCE_WAIT，无新fix/Enter/status授权。Native仍UNMET，不盲重跑；Claude原生/status/三次分别人工probe/Desktop、Codex Desktop合规HOST、genuine WorkBuddy artifact/operator host及原模式拒绝/≥5真实上游正常轮次仍按OWN完整条件保留，不以fake-only rewrite替代，原全局框不勾。
+
+**24. CHECKLIST原项 — BLOCKED**
+
+> - [ ] C12 A/A split evidence: c15.1最终完整SOURCE/BUILT validation/offline已实际刷新，但完整 EACH可信provider+ordered-chain/full-accuracy/独立receipt仍未测，whole gate不勾选。旧c12.1及interim135b/a97归档STALE且字节/原指标保留；150标签/279包装/模板/阈值/分母/依赖不改，报告无policy_version键不得虚造。
+
+自身R8 EACH可信provider+ordered-chain/full-accuracy/独立授权receipt未测；当前 SOURCE/BUILT离线全覆盖安全子部分已完成，numerical accuracyFAIL/liveUnverified/releaseIncomplete/NOreceipt原样。没有新授权真实 config/endpoint/model/key/receipt；selected-scope metadata不证明所有可能来源均不存在。保留每份 archive字节、原指标及 source/built不同engine身份，不造 policy_version。
+
+**25. CHECKLIST原项 — BLOCKED**
+
+> - [ ] Prompt cache 回归：Claude Code 经代理第二轮 `cache_read_input_tokens > 0`；改道的 classifier 请求响应中 `cache_read_input_tokens` 不恒为 0。
+
+自身需真实 Claude第二轮主流cache hit>0及真实classifier改道响应cache不恒0；需要安全显式真实relay/decision模型与支持cache的真实账户/usage观察。fake-only cache字段、重复固定usage或当前classifierHTTP0不构成证明，也不能把条件fallback未触发伪装成key故障。
+
+**26. CHECKLIST原项 — BLOCKED**
+
+> - [ ] 安全检查：本地 `ss -ltnp` 仅 `127.0.0.1:8484`；云端仅 Caddy 443/80；审计日志与 pino 日志 grep 无 `amp_`、`sk-`、`Bearer ` 明文；`npm audit --audit-level=high` 无告警。
+
+自身已观察的本地socket/dependency-audit及当前bg81/bg86/bg88真实组合隐私证据保留；尚缺授权真实云host外露仅Caddy80/443与该部署整体检查。不能从本地/内网Docker、无明文字面匹配或历史audit0推断完整public部署安全；不扫描/停止其他owner服务，不把整个机器其他合法端口算本项目端口。
+
+**27. CHECKLIST原项 — BLOCKED**
+
+> - [ ] 部署演练：从空机器按 `README.md` 完成本地 `npx` 启动与云端 `docker compose up`，Claude Code 通过 https 地址接入成功。
+
+自身本地README fresh-user npx/真实installed Claude fake-only接入已通过并批准；原空机器云compose+public HTTPS Claude接入仍需用户授权 public domain/DNS/host/80/443/TLS与真实relay/model/credential。公开npm/image发布可用性未被假定，P8-3未授权发布不能擅自补做；README局部不替代真实云演练。
+
 ## Acceptance portion ledger
 
 | Source portion | Local implementation placement | Additional acceptance evidence / prerequisite to audit | Current status |
@@ -760,7 +946,7 @@ All three actual `eval/reports/*.json` archives, artifact988/audit sample, actua
 | P2-5/6 | C07 | local SystemOne HTTP/CLI mocks and gates passed; exact missing real-provider prerequisites recorded | local implemented/verified; full tasks unchecked for blocked external canaries |
 | P3-1..3 | C08历史local closure+C15强观察器源码 | 317FAIL/349原观察器rewrite3+override1与独立typed解释保留；9E7E/16F0已G81/SAME CLOSED | P3-2/P3-3自身标准仍CHECKED；新完整input/typed observer修复不是新2.1.312实测，native/combined仍UNCHECKED、不得历史重评或自动fallback冒绿。 |
 | P3-6 | C08 + C10–11; C11 LOCALLY CLOSED `cd4456a` | All3protocol mocks/failure providers and all36 actualHTTP matrix cases PASS in parent G2234(type/lint/36files2234tests/build); source01847b9 all3postfix reviews CLEAN; AFTER959/featureHTTP10 retained. Exact Anthropic-shaped classifier fingerprint reroutes across ingress; native Responses/Chat formats remain nonmatch→main. | Own full mock-integration task CHECKED: enforce/shadow, vault/passthrough, injection/parallel partial block, provider-chain fail-closed, gate cache and credential-reroute criteria verified; no native-client/real-provider/prompt-cache credit or remaining C11 protocol dependency. |
-| P3-4/5 | C08历史与C15当前版本分账 | 旧520 Enabled/五正常UI/三audit/两返回/第三未答与317FAIL均保留 | 旧C08本地调查完成，不要求继续旧520审批；完整P3-4仍UNCHECKED。新2.1.312 Native/status在C15仍可做、待当前closed-group准入/Safety/实际digest/Parent目标release，不能以旧失败或真实keys一概延期。P3-5真实relay/thinking/beta/cache仍未测，外部条件不缩减。 |
+| P3-4/5 | C08旧证据与C15各实际模式分账 | bg_14/73ab独立rewrite全11/strict3实际VERIFIED；bg_2 Native顺序2FAIL/第三reason mismatch且无third replay；bg_16 FINISHED unsupported_osc/statusFALSE | rewrite的3项是protected typed-denial+marker/exact ordered replay检查，SDK工具调用/结果/执行及Nativeaudit0，非Native input delivery/paired22。Native仍UNMET，不盲重跑/修历史；317/349/520、bg84/91/92/93及455/a97原证据保持。当前A authoritative7501研究/受审下一步DOABLE，无status/三次分别人工probe/真实thinking-beta验收信用；P3-4/5全任务仍UNCHECKED。未来changed private inputs需fresh scoped SAME review/实际inventory/Parent独立adopt/release，C15 ACTIVE，非closure。 |
 | P3-7 | C08 | actualCLI349/TUI520+LinuxmanagedDesktop5GUI/rewriteblock/postnormal/STOP1129.61exit0; validatedguide/currentinit; current1606G/initCLI smoke/26knownPIDcleanup; finalreviewsCLEAN | IMPLEMENTED+VERIFIED/CHECKED; C08LOCALLYCLOSED, nothelper/DeveloperModeUI/nativeAuto/realprovider/cache/beta/p95 acceptance; parentclosurecommitbeforeC09 |
 | P4-1/2/3 | C09 LOCALLY CLOSED by this closure tracker commit; feature a2ed309/fix c179cf1 | current10:51:38 G typecheck/lint/30files1721tests/build ALLPASS; actual HTTP/CLI10PASS; privacy BEFORE8TRUE→AFTER8FALSE/decision3/review3/cacheHittrue/no secrets; both independent re-reviews CLEAN/C09-SEC-001 closed | P4-3 CHECKED. Full P4-1/P4-2 UNCHECKED for original actual Vercel Luna/OpenRouter Haiku canaries: exact expected keys/default real config missing, no local source gap or exhaustive credential-absence claim. C10 waits parent final closure commit. |
 | P5-1/2/3 | C10 LOCALLY CLOSED by finaltracker commit; NOT full P5/external acceptance |db415c4/G21:57:09 type-lint-33files2093tests-build PASS;892 unchangedlocaltiming PASS+independent evidence audit CLEAN;ALL final CODE/ACCOUNTING/CLIparity CLEAN/new[];CLI TGvD4b6PASS separate interpretation/old800false unchanged | P5-1 ownrealJev/Clefp95 external;P5-2 ownDesktopHOSTsandbox+realrelay>=5 external/R5conditionalnottriggered;P5-3 ownDesktopfromzero external;no doablelocalC10remaining/no fullacceptance/newSDKrunclaim. Former C11Chat dependency is delivered/verified in local closurecd4456a: P3-6 all3protocol mock matrix now CHECKED, not a remaining dependency. |
@@ -769,7 +955,7 @@ All three actual `eval/reports/*.json` archives, artifact988/audit sample, actua
 | P8-1/2/4 | C13历史闭环+C15 audit privacy复核 | F1081115→1116/E21D1120/Docker1121/RUNTIME001 CLOSED原事实保留；新bg86/b88闭环 | P8-1保留、P8-4审计隐私已恢复CHECKED。完整P8-2仍UNCHECKED：公开DOMAIN HTTPShealth/宿主仅Caddy80/443未观察；1046范围内配置/DOMAIN元数据和ownership/DNS/hostports未知范围不扩大，原两phase Docker只是local。 |
 | P8-3/5 | C14 LOCALLY CLOSED by this status-only checkpoint after green8e2 | hosted PR/tag artifacts; README real onboarding + schema/snippets | P8-5 CHECKED/Main-approved/SAME Docs CLEAN: G2494/docs-check plus genuine Claude2.1.312 installed-client README mock bg65 with disclosed preseed/pinned launcher/token/model/rewrite/audit substitutions and confirmed cleanup. No wizard/new bin/native/provider/cache/5turn/HTTPS credit. Full P8-3 exact hosted PR/tag/image-pull criterion and current trusted full evidence remain UNCHECKED/unverified. bg64 failed404/bg62 unclassified preserved; offline safety PASS/accuracy FAIL/release incomplete/NO receipt. Final accounting CLEAN/source-only cleanup complete; C15 unselected. |
 | P8-6 | each investigation + C15 core draft c586 | actual observed lesson for every named investigation, never guessed API quirks | CHECKED/Main-approved after formal coverage/Lessons review CLEAN: all five named investigations mapped to actual evidence-qualified AGENTS lessons; no invented live canary/signature/beta success; live-service acceptance stays separate |
-| Final Validation | C15 ACTIVE；安全修复green checkpoint | G81/2580/cov98.63/SAME全6/HTTPbg88/BUILTtailbg86/perf与最新0395/a7aa离线均实际完成 | 局部自身标准恢复，不关闭C15；offline safetyPASS但accuracyFAIL/liveUnverified/NOreceipt。metadata bg84实际拒绝/无selection，私有closed-group纠正+新Safety/实际digest与Native/status仍可做待完成；真实provider/cache/GUI/p95/HTTPS/publish/fullmixed继续UNCHECKED。 |
+| Final Validation | C15 ACTIVE；仅本地绿证据/文档checkpoint | bg_14/73ab rewrite全11/3 protected typed-denial+marker/exact replay已VERIFIED；SDK调用/结果/执行及Nativeaudit0，非Native input delivery | Native bg_2原顺序2FAIL/第三reason仍UNMET、bg_7历史不重评。TTY bg_16/source5470/804A/1E36/F140/receipt45790已实际EXIT1/2.92s/RUN_LOOP unsupported_osc/statusFALSE，cleanup/allEOF/capture完整；当前DOABLE是只读control分类与Parent下一步批准，不是queued/RESOURCE_WAIT，无新fix/输入许可。27项自身账保留，P3-1/combined/P3-4完整/全矩阵/外部标准未勾；无C15closure/Git许可。 |
 
 ## Next dispatch specifications (not yet authorized)
 
