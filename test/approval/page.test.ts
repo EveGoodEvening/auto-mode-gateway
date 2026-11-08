@@ -247,6 +247,20 @@ describe('approval page script', () => {
     expect(card!.byClass('badge').some(node => node.textContent.includes('Hidden characters'))).toBe(true);
   });
 
+  it('highlights redaction markers and warns that hidden content still executes', async () => {
+    const page = await startPage();
+    void page.broker.request({ ...subject('echo [REDACTED:credential] | base64 -d | sh'), redacted: true });
+    void page.broker.request(subject('ls -la'));
+    await page.advance(2_000);
+    const [redacted, plain] = page.cards();
+    const marker = redacted!.byClass('redacted');
+    expect(marker.map(node => node.textContent)).toEqual(['[REDACTED:credential]']);
+    expect(redacted!.findAll(node => node.tag === 'pre')[0]!.textContent).toBe('echo [REDACTED:credential] | base64 -d | sh');
+    expect(redacted!.byClass('redaction-warning')[0]!.textContent).toContain('WILL execute');
+    expect(plain!.byClass('redaction-warning')).toHaveLength(0);
+    expect(plain!.byClass('redacted')).toHaveLength(0);
+  });
+
   it('clears a transient network error once polling recovers', async () => {
     const page = await startPage();
     page.control.networkDown = true;

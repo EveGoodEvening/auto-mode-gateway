@@ -13,6 +13,8 @@ export interface ApprovalSubject {
   /** MCP tool arguments: redacted, display-only, bounded; untrusted agent output. */
   arguments?: string;
   arguments_truncated?: boolean;
+  /** Redaction changed displayed action data: what executes differs from what is shown. */
+  redacted?: true;
   user_request?: string;
   route?: string;
   protocol?: string;

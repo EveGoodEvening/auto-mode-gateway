@@ -88,21 +88,37 @@ function toolArguments(raw: unknown): unknown {
  * runs on the complete value (sensitive keys and literals) before the display bound, so a
  * pretruncated excerpt never retains a partial credential. Never enters model state or cache keys.
  */
-function approvalArguments(action: Action, secrets: readonly string[], policy: EffectivePolicy): Pick<ApprovalSubject, 'arguments' | 'arguments_truncated'> {
+function approvalArguments(action: Action, secrets: readonly string[], policy: EffectivePolicy): Pick<ApprovalSubject, 'arguments' | 'arguments_truncated' | 'redacted'> {
   if (action.kind !== 'mcp') return {};
   const value = toolArguments(action.raw);
   if (value === undefined) return {};
   let text: string;
-  try { text = typeof value === 'string' ? value : JSON.stringify(redact(value, secrets, policy), null, 2) ?? ''; }
-  catch { return {}; }
+  let original: string;
+  try {
+    original = typeof value === 'string' ? value : JSON.stringify(value, null, 2) ?? '';
+    text = typeof value === 'string' ? value : JSON.stringify(redact(value, secrets, policy), null, 2) ?? '';
+  } catch { return {}; }
   text = redactText(text, secrets, policy);
+  const redacted = text !== original ? { redacted: true as const } : {};
   return text.length > APPROVAL_ARGUMENTS_MAX_CHARS
-    ? { arguments: text.slice(0, APPROVAL_ARGUMENTS_MAX_CHARS), arguments_truncated: true } : { arguments: text };
+    ? { arguments: text.slice(0, APPROVAL_ARGUMENTS_MAX_CHARS), arguments_truncated: true, ...redacted } : { arguments: text, ...redacted };
+}
+
+/**
+ * Whether redaction changed anything the approver sees that also determines execution. A
+ * policy replacement need not look like `[REDACTED:…]`, so compare against an unredacted
+ * projection rather than searching for markers. The plain projection is compared in memory only.
+ */
+function displayRedacted(action: Action, state: DecisionState, context: Omit<GateContext, 'signal'>, redactedContext: Omit<GateContext, 'signal'>, policy: EffectivePolicy): boolean {
+  // buildState applies policy patterns itself; disable them for the plain comparison only.
+  const plain = buildState({ ...action, raw: undefined }, context, { ...policy, redaction_patterns: [], redaction_sensitive_keys: /(?!)/ });
+  const shown = (value: DecisionState) => JSON.stringify([value.action.command, value.action.url, value.action.path, value.action.workdir, value.action.content_excerpt, value.user_request]);
+  return shown(plain) !== shown(state) || context.session_id !== redactedContext.session_id || context.route !== redactedContext.route;
 }
 
 /** Only redacted, bounded data reaches a human: decision state plus display-only MCP arguments. */
 function approvalSubject(action: Action, state: DecisionState, context: Omit<GateContext, 'signal'>, escalation: Escalation,
-  probabilities: Answers, reviewerReason: string | undefined, secrets: readonly string[], policy: EffectivePolicy): ApprovalSubject {
+  probabilities: Answers, reviewerReason: string | undefined, secrets: readonly string[], policy: EffectivePolicy, redactedDisplay: boolean): ApprovalSubject {
   const subject: ApprovalSubject = { tool: state.action.tool, kind: action.kind, paths: [...(state.action.path ?? [])], escalation, probabilities: { ...probabilities },
     ...approvalArguments(action, secrets, policy) };
   if (state.action.command !== undefined) subject.text = state.action.command;
@@ -114,6 +130,7 @@ function approvalSubject(action: Action, state: DecisionState, context: Omit<Gat
   if (context.protocol !== undefined) subject.protocol = context.protocol;
   if (context.session_id !== undefined) subject.session_id = context.session_id;
   if (reviewerReason !== undefined) subject.reviewer_reason = reviewerReason;
+  if (redactedDisplay) subject.redacted = true;
   return subject;
 }
 
@@ -277,7 +294,9 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
                 // The model deadline bounds model stages only; the human wait is bounded by
                 // human_approval.timeout_ms and caller cancellation.
                 clearTimeout(timer);
-                const subject = approvalSubject(action, state, redact(stateContext, secrets, policy), escalation, result.answers, reviewerReason, secrets, policy);
+                const redactedContext = redact(stateContext, secrets, policy);
+                const subject = approvalSubject(action, state, redactedContext, escalation, result.answers, reviewerReason, secrets, policy,
+                  displayRedacted(action, state, stateContext, redactedContext, policy));
                 const humanStarted = now();
                 stats.human_pending! += 1;
                 let human: ApprovalResult;

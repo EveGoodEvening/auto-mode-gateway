@@ -191,6 +191,24 @@ describe('gray without reviewer escalates to a human', () => {
     expect(seen[1]!.arguments).toBeUndefined();
   });
 
+  it('flags redaction of displayed data, including custom replacements that do not look like markers', async () => {
+    const approvals = broker();
+    const seen: ApprovalSubject[] = [];
+    const cfg = config({ policy: { redaction_patterns: [{ type: 'hex', pattern: { source: 'deadbeef[0-9a-f]{8}', flags: 'g' }, replacement: '***' }] } });
+    const gate = createGate(cfg, { providers: [provider()], audit, approvals });
+    const command = (text: string): Action => ({ kind: 'command', tool: 'Bash', text, argv: text.split(' '), paths: [], content_truncated: false, raw: {} });
+    answer(approvals, 'block', seen);
+    await gate.decide(command('echo deadbeef01234567 | sh'), ctx);
+    answer(approvals, 'block', seen);
+    await gate.decide(command('echo hello'), ctx);
+    answer(approvals, 'block', seen);
+    await gate.decide({ kind: 'mcp', tool: 'mcp__x__y', paths: [], content_truncated: false, raw: { input: { token: 'abc' } } }, ctx);
+    answer(approvals, 'block', seen);
+    await gate.decide({ kind: 'mcp', tool: 'mcp__x__y', paths: [], content_truncated: false, raw: { input: { q: 'plain' } } }, ctx);
+    expect(seen[0]!.text).toBe('echo *** | sh');
+    expect(seen.map(item => item.redacted)).toEqual([true, undefined, true, undefined]);
+  });
+
   it('never caches an escalated verdict: an identical action escalates again', async () => {
     const approvals = broker();
     const p = provider();

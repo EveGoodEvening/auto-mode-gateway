@@ -201,6 +201,8 @@ button:disabled { opacity:.5; cursor:default; }
 .empty, .status, .meta { color:var(--muted); }
 .meta { font-size:12px; margin-top:2px; }
 .meta.warn, .note.warn, .badge.warn { color:var(--warn); border-color:var(--warn); }
+.redacted { color:var(--warn); border:1px dashed var(--warn); border-radius:3px; padding:0 2px; font-weight:600; }
+.redaction-warning { margin:6px 0; padding:6px 8px; border:1px solid var(--warn); border-radius:6px; color:var(--warn); font-weight:600; }
 .note { margin-top:8px; font-weight:600; }
 .note.allow { color:var(--allow); } .note.block { color:var(--block); }
 .card.done { opacity:.75; }
@@ -270,6 +272,18 @@ button:disabled { opacity:.5; cursor:default; }
     else text = text.replace(/\\n/g, '⟨\\\\n⟩');
     return text;
   };
+  // Redaction markers stand in for content that still executes; make each one stand out.
+  const MARKER = /\\[REDACTED:[^\\]\\n]{0,64}\\]/g;
+  const fill = (node, text) => {
+    let last = 0;
+    for (const match of text.matchAll(MARKER)) {
+      if (match.index > last) node.appendChild(document.createTextNode(text.slice(last, match.index)));
+      node.appendChild(el('span', 'redacted', match[0]));
+      last = match.index + match[0].length;
+    }
+    if (last < text.length) node.appendChild(document.createTextNode(text.slice(last)));
+    return node;
+  };
   const field = (dl, label, value, pre) => {
     if (value === undefined || value === null || value === '' || (Array.isArray(value) && value.length === 0)) return;
     const raw = String(value);
@@ -277,12 +291,12 @@ button:disabled { opacity:.5; cursor:default; }
     const dd = el('dd');
     if (pre) {
       const shown = visible(raw, true);
-      dd.appendChild(el('pre', '', shown));
+      dd.appendChild(fill(el('pre'), shown));
       const lines = raw.split('\\n').length;
       const meta = lines + ' lines · ' + raw.length + ' chars · ' + lines + ' 行 · ' + raw.length + ' 字符';
       const long = shown.split('\\n').length > 16 || shown.length > 1500;
       dd.appendChild(el('div', long ? 'meta warn' : 'meta', long ? meta + ' — scroll to read all · 请滚动查看全部' : meta));
-    } else dd.textContent = visible(raw, false);
+    } else fill(dd, visible(raw, false));
     dl.appendChild(dd);
   };
   const probabilities = (p) => {
@@ -376,6 +390,8 @@ button:disabled { opacity:.5; cursor:default; }
     const expiry = el('span', 'expiry', remaining(item.expires_at));
     head.appendChild(expiry);
     card.appendChild(head);
+    if (s.redacted === true) card.appendChild(el('div', 'redaction-warning',
+      'Redacted: some content is hidden here but WILL execute as the agent sent it. Approve only if the visible part is acceptable whatever the hidden part contains. · 已脱敏：部分内容在此被隐藏，但会按 agent 原样执行。仅当无论隐藏部分是什么、可见部分都可接受时才批准。'));
     card.appendChild(el('div', 'status', 'Requested · 请求时间 ' + fmtTime(item.created_at)));
     card.appendChild(details(s));
     const note = el('div', 'note');
