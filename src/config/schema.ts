@@ -194,6 +194,17 @@ export const configSchema = z.strictObject({
     upstream_connect_timeout_ms: positiveInteger.default(10_000),
     upstream_read_timeout_ms: positiveInteger.default(30_000),
   }).prefault({}),
+  // Gray-area escalation to a human; disabled preserves the gray-block contract.
+  human_approval: z.strictObject({
+    enabled: z.boolean().default(false),
+    host: nonempty.default('127.0.0.1'),
+    port: z.number().int().min(1).max(65535).default(8485),
+    // Optional Bearer token for the approval UI/API; required off loopback. Header
+    // tokens cannot carry whitespace or non-ASCII, so reject values that could never match.
+    token: z.string().regex(/^[\x21-\x7e]+$/, 'Approval token must be visible ASCII without whitespace').optional(),
+    timeout_ms: positiveInteger.max(86_400_000).default(240_000),
+    max_pending: positiveInteger.max(10_000).default(100),
+  }).prefault({}),
 }).superRefine((config, context) => {
   const issue = (path: (string | number)[], message: string) => {
     context.addIssue({ code: 'custom', path, message });
@@ -236,6 +247,15 @@ export const configSchema = z.strictObject({
   });
   if (config.classifier_reroute.enabled && !config.decision.second_stage) {
     issue(['classifier_reroute', 'provider'], 'Enabled classifier reroute requires decision.second_stage');
+  }
+  const human = config.human_approval;
+  if (human.enabled) {
+    if (!isLoopback(human.host) && human.token === undefined) {
+      issue(['human_approval', 'token'], 'Non-loopback approval listeners require a token');
+    }
+    if (human.host === config.listen.host && human.port === config.listen.port) {
+      issue(['human_approval', 'port'], 'Approval listener must not share the gateway listen address');
+    }
   }
   if (config.policy.thresholds.risk_allow >= config.policy.thresholds.risk_block) {
     issue(['policy', 'thresholds', 'risk_allow'], 'Allow threshold must be below block threshold');

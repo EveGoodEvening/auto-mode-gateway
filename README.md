@@ -99,7 +99,11 @@ Under **Settings → Models → Add model → Custom**, set the full Chat Comple
 
 ## How it decides
 
-Hard-deny rules, unavailable or malformed execution and truncated writes block first. Then come sensitive-path checks, content reads (which need approval even inside the project), bounded metadata exemptions and direct-allow for genuine `other` and Task/Todo, and finally the trusted provider chain. Gray results without a reviewer block, invalid reviewer verdicts block, and provider failure blocks by default. Text before or without tool calls is not held back; incomplete, oversized, timed-out or cancelled responses never release a withheld call. Details: [threat model](docs/threat-model.md#rule-precedence-and-fail-closed-behavior).
+Hard-deny rules, unavailable or malformed execution and truncated writes block first. Then come sensitive-path checks, content reads (which need approval even inside the project), bounded metadata exemptions and direct-allow for genuine `other` and Task/Todo, and finally the trusted provider chain. Gray results without a reviewer block (unless human approval is on), invalid reviewer verdicts block, and provider failure blocks by default. Text before or without tool calls is not held back; incomplete, oversized, timed-out or cancelled responses never release a withheld call. Details: [threat model](docs/threat-model.md#rule-precedence-and-fail-closed-behavior).
+
+### Human approval
+
+Optional: set `human_approval: { enabled: true }` (enforce only) and open `http://127.0.0.1:8485/`. Gray actions without a reviewer, and actions the reviewer marks `uncertain`, wait there for **Approve / Deny**; timeout (default 4 min), cancellation or a full queue block. Human decisions are never cached. The agent's response is held meanwhile (streams get keepalive pings), so client timeouts must exceed the wait. The UI trusts whoever can reach it: keep it on loopback, or set `token` (required off loopback). Displayed content comes from the agent and is untrusted. See [configuration](docs/config.md#human-approval-flow).
 
 Illustrative estimate, not a quote: about $0.003 per 100 decisions and $0.0002 per gray second-stage review. See [audit cost aggregation](docs/tuning.md#reading-audit-records-and-utc-daily-estimates).
 
@@ -113,6 +117,6 @@ Illustrative estimate, not a quote: about $0.003 per 100 decisions and $0.0002 p
 - `gate.on_provider_failure: allow` deliberately weakens the boundary.
 - Unknown tools with hidden capabilities, wrong `tool_map` entries and hidden Task delegation are residual risks.
 - [deploy/](deploy/) files need your own domain, DNS and TLS; public HTTPS is not verified.
-- No manual approval UI, multi-tenant isolation, Cloudflare Workers runtime or hook integration.
+- No multi-user approval authorization, multi-tenant isolation, Cloudflare Workers runtime or hook integration.
 
 MIT licensed.

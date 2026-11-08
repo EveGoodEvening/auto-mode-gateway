@@ -57,7 +57,7 @@ const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const amount = z.number().nonnegative().nullable();
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const stageSchema = z.strictObject({
-  stage: z.enum(['decision', 'review']), provider: z.string().nullable(), latency_ms: amount,
+  stage: z.enum(['decision', 'review', 'human']), provider: z.string().nullable(), latency_ms: amount,
   input_tokens: count.nullable(), output_tokens: count.nullable(), cost_usd: amount,
   final_response: z.strictObject({ input_tokens: count.nullable(), output_tokens: count.nullable(), cost_usd: amount }).optional(),
 });

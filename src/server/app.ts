@@ -2,12 +2,14 @@ import { createHmac, randomBytes } from 'node:crypto';
 import type { HttpBindings } from '@hono/node-server';
 import { Hono } from 'hono';
 
+import type { ApprovalBroker } from '../approval/broker.js';
 import type { Config } from '../config/schema.js';
 import { createAuditLogger } from '../audit/logger.js';
 import { createGate } from '../gate/decide.js';
 import { normalizeToolCall } from '../gate/normalize/index.js';
 import type { GateContext } from '../gate/types.js';
 import { resolvePolicy } from '../policy/effective.js';
+import { DECISION_TIMEOUT_MS } from '../protocols/anthropic/safety.js';
 import { anthropicAdapter, createClaudeDeliveryState, prepareAnthropicRequest } from '../protocols/anthropic/adapter.js';
 import { isClassifierRequest, isSuspectedClassifierRequest, prepareClassifierTarget } from '../protocols/anthropic/classifier-fingerprint.js';
 import { responsesAdapter } from '../protocols/openai-responses/adapter.js';
@@ -58,12 +60,24 @@ async function boundedBody(request: Request, limit: number): Promise<Uint8Array<
   return bytes;
 }
 
+export interface AppOptions {
+  /** Shared human-approval queue; the approval UI listener decides on the same instance. */
+  approvals?: ApprovalBroker;
+}
+
 /** Authenticated transport with protocol-specific gates on implemented generation endpoints. */
-export function createApp(config: Config) {
+export function createApp(config: Config, options: AppOptions = {}) {
   const app = new Hono<{ Bindings: HttpBindings }>();
   const policy = resolvePolicy(config.policy);
   const audit = createAuditLogger(config, { policy });
-  const gate = createGate(config, { policy, audit: audit.append });
+  const gate = createGate(config, { policy, audit: audit.append, approvals: options.approvals });
+  // A held human decision extends only the whole-turn decision deadline. Shadow
+  // mode never escalates, and upstream completion/idle bounds are unchanged.
+  // Matches createGate: an injected broker is consulted only in enforce mode.
+  const humanWait = config.gate.mode === 'enforce' && options.approvals !== undefined;
+  const decisionTimeoutMs = humanWait ? DECISION_TIMEOUT_MS + config.human_approval.timeout_ms : DECISION_TIMEOUT_MS;
+  // Every further call in the same turn may also wait a full human budget.
+  const decisionExtensionMs = humanWait ? config.human_approval.timeout_ms : 0;
   const observations = new Set<Promise<void>>();
   const status = createStatus(config, gate.stats);
   const deliveryState = createClaudeDeliveryState();
@@ -255,6 +269,8 @@ export function createApp(config: Config) {
       mode: config.gate.mode,
       delivery,
       holdKeepaliveMs: config.gate.hold_keepalive_ms,
+      decisionTimeoutMs,
+      decisionExtensionMs,
       onNativeDelivered: () => deliveryState.nativeDelivered(scope),
       trackObservation(work) {
         const settled = work.then(() => {}, () => {});

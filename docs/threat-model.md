@@ -20,7 +20,7 @@ Decision-provider routing and credentials must be independent of the attacked re
 2. Sensitive-path checks next, including reads of credentials/control files and review of outside-project writes. Paths are lexical and interpreted in trusted **client** context; a nonmatch is not proof of file safety, and symlinks/junctions are not resolved on the remote client.
 3. Known **content-reading** shell/native tools require trusted approval even for ordinary project files or seemingly approving user wording. Read/Grep capability markers are not exemptions. `cat`, `head`, `rg` and similar programs do not become safe because only a filename/count/stdin form is requested.
 4. Only bounded audited metadata forms and management exemptions can directly allow. For example, Git's deterministic subset is restricted `git --no-pager rev-parse` metadata flags, not general diff/status/log. Membership settings cannot authorize arbitrary executables or helper-capable forms.
-5. Other review actions use the configured ordered provider failover chain. Valid gray results use an optional trusted Anthropic second stage; **no reviewer means gray blocks** even if availability fail-open is selected. Invalid/ambiguous reviewer output blocks. Truly unavailable configured providers/reviewer follow `gate.on_provider_failure`, default **block**. Choosing `allow` weakens this boundary deliberately.
+5. Other review actions use the configured ordered provider failover chain. Valid gray results use an optional trusted Anthropic second stage; **no reviewer means gray blocks** even if availability fail-open is selected. Invalid/ambiguous reviewer output blocks. Truly unavailable configured providers/reviewer follow `gate.on_provider_failure`, default **block**. Choosing `allow` weakens this boundary deliberately. With `human_approval` enabled (enforce only), gray-without-reviewer and reviewer-`uncertain` instead wait for a human; timeout, cancellation and a full queue block, and human verdicts are never cached. Invalid reviewer output and provider unavailability do not escalate.
 
 **Residual direct-allow risk:** genuine generic `Action.kind=other`, explicit `tool_map: other`, and Task/Todo management exemptions retain direct-allow semantics. Recognizable execution/write/URL/MCP and content-read clues cannot be erased by those mappings, but an unknown tool with hidden capability, a wrong mapping or **invisible Task delegation** can escape model review. Subsequent visible tool calls remain subject to the gate. Maintain actual tool declarations/mappings; do not advertise blanket unknown-tool review or sandbox protection.
 
@@ -28,13 +28,19 @@ Buffers are bounded: 1 MiB per tool/incomplete SSE frame, 8 MiB shared retained 
 
 **Shadow is not protection.** It forwards original bytes without waiting for hypothetical verdicts, including upstream results. Use it only in a separately safe environment; a shadow audit block is not evidence that the client was denied.
 
+## Human approval UI
+
+The optional approval listener (default `127.0.0.1:8485`, separate from `listen`) **trusts anyone who can reach it**: any such caller can approve a held action. Keep it on literal loopback or a private network you control; non-loopback requires `human_approval.token`, which is defense in depth, not multi-user authorization (use HTTPS in front of it remotely). Without a token, requests whose `Host` is not an IP literal, `localhost` or the configured host are refused (DNS rebinding). The API also rejects cross-site `Sec-Fetch-Site`/mismatched `Origin` and non-JSON posts, and the page sends strict CSP, `no-store` and frame denial.
+
+Every displayed field—command, paths, write excerpt, user request, reviewer reason—is **agent- or relay-derived and untrusted**: it may be crafted to persuade the approver. It is rendered as text only and comes from the same redacted state sent to decision providers, so a write excerpt may be truncated (truncated writes block before review anyway). A human approval is an operator decision, not proof of safety, and is never cached or replayed for a repeat action.
+
 ## Explicit non-goals
 
 - **Not a sandbox**, OS isolation mechanism, executable integrity check or client-filesystem authorization system. Approved commands can still have effects dependent on repository hooks, environment, executable replacement, symlinks or external state.
 - **Does not prevent text tampering** by the relay. Changed assistant prose, deceptive advice, hidden instructions, data corruption and actions a human takes after reading text are outside this tool-call boundary. The original conversation can still be disclosed to the relay.
 - Does not prevent every prompt injection, data disclosure, hidden delegated action, model mistake, account compromise, unsafe client plugin/hook or network request outside the configured routes.
 - No guarantee of correct native replay, automatic fallback, real-provider prompt caching, latency, billing or full client compatibility without the corresponding observed evidence. Local mocks do not establish these.
-- No manual approval UI, multi-tenant security isolation, Cloudflare Workers runtime, hook-based local integration or end-to-end cryptographic verification of relay content.
+- No multi-user approval authorization, multi-tenant security isolation, Cloudflare Workers runtime, hook-based local integration or end-to-end cryptographic verification of relay content.
 
 ## Privacy and zero data retention
 

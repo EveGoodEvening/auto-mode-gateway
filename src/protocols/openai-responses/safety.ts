@@ -1,5 +1,5 @@
 import type { ToolCall } from '../types.js';
-export { MAX_TOOL_BYTES, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES, IDLE_TIMEOUT_MS, COMPLETION_TIMEOUT_MS, DECISION_TIMEOUT_MS, bounded, blockedText, decide, shadowStream, record, unique, encodeEvent } from '../anthropic/safety.js';
+export { MAX_TOOL_BYTES, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES, IDLE_TIMEOUT_MS, COMPLETION_TIMEOUT_MS, DECISION_TIMEOUT_MS, decisionTimeout, turnDecisionTimeout, bounded, blockedText, decide, shadowStream, record, unique, encodeEvent } from '../anthropic/safety.js';
 import { record, MAX_TOOL_BYTES } from '../anthropic/safety.js';
 const EXECUTION_FIELDS = ['type', 'id', 'call_id', 'name', 'namespace', 'arguments', 'input', 'action', 'encrypted_function_args'] as const;
 

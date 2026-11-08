@@ -1,3 +1,4 @@
+import type { ApprovalBroker, ApprovalResult, ApprovalSubject } from '../approval/broker.js';
 import type { Config } from '../config/schema.js';
 import { createAuditLogger } from '../audit/logger.js';
 import { collectConfigSecrets, type AuditSink, type AuditStage } from '../audit/record.js';
@@ -9,7 +10,7 @@ import { hardDeny } from '../policy/hard-deny.js';
 import { isReadonlyCommand } from '../policy/readonly-allowlist.js';
 import { redact } from '../policy/redact.js';
 import { sensitivePaths } from '../policy/sensitive-paths.js';
-import { buildState } from '../policy/state-builder.js';
+import { buildState, type DecisionState } from '../policy/state-builder.js';
 import { cacheKey, DecisionCache } from './cache.js';
 import type { Action, Gate, GateContext, GateStats, Outcome, Verdict } from './types.js';
 
@@ -22,6 +23,8 @@ export interface GateOptions {
   audit?: AuditSink;
   now?: () => number;
   policy?: EffectivePolicy;
+  /** Shared human-approval queue. Used only in enforce mode; shadow never asks a human. */
+  approvals?: ApprovalBroker;
 }
 
 export interface DeterministicResult {
@@ -66,6 +69,33 @@ function cloneVerdict(verdict: Verdict): Verdict {
   return cloned;
 }
 
+type Escalation = ApprovalSubject['escalation'];
+
+/** Only already-redacted, bounded decision state reaches a human; never raw tool input. */
+function approvalSubject(action: Action, state: DecisionState, context: Omit<GateContext, 'signal'>, escalation: Escalation,
+  probabilities: Answers, reviewerReason: string | undefined): ApprovalSubject {
+  const subject: ApprovalSubject = { tool: state.action.tool, kind: action.kind, paths: [...(state.action.path ?? [])], escalation, probabilities: { ...probabilities } };
+  if (state.action.command !== undefined) subject.text = state.action.command;
+  if (state.action.url !== undefined) subject.url = state.action.url;
+  if (state.action.workdir !== undefined) subject.workdir = state.action.workdir;
+  if (state.action.content_excerpt !== undefined) subject.content_excerpt = state.action.content_excerpt;
+  if (state.user_request) subject.user_request = state.user_request;
+  if (context.route !== undefined) subject.route = context.route;
+  if (context.protocol !== undefined) subject.protocol = context.protocol;
+  if (context.session_id !== undefined) subject.session_id = context.session_id;
+  if (reviewerReason !== undefined) subject.reviewer_reason = reviewerReason;
+  return subject;
+}
+
+function humanRule(result: ApprovalResult, callerAborted: boolean): { outcome: 'allow' | 'block'; rule: string } {
+  switch (result.status) {
+    case 'decided': return result.decision === 'allow' ? { outcome: 'allow', rule: 'human-approved' } : { outcome: 'block', rule: 'human-denied' };
+    case 'timeout': return { outcome: 'block', rule: 'human-timeout' };
+    case 'aborted': return { outcome: 'block', rule: callerAborted ? 'caller-aborted' : 'human-approval-aborted' };
+    default: return { outcome: 'block', rule: 'human-approval-unavailable' };
+  }
+}
+
 export function createGate(config: Config, options: GateOptions = {}): Gate {
   const policy = options.policy ?? resolvePolicy(config.policy);
   const secrets = collectConfigSecrets(config);
@@ -74,7 +104,10 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
   const logger = options.audit ? undefined : createAuditLogger(config, { policy });
   const audit: AuditSink = options.audit ?? ((input) => logger!.append(input));
   const pendingAudit = new Set<Promise<void>>();
-  const stats: GateStats = { decisions: 0, allow: 0, block: 0, uncertain: 0, cache_hits: 0, provider_failures: 0, provider_health: {} };
+  const stats: GateStats = { decisions: 0, allow: 0, block: 0, uncertain: 0, cache_hits: 0, provider_failures: 0, provider_health: {},
+    human_pending: 0, human_approved: 0, human_denied: 0, human_timeout: 0 };
+  // Shadow keeps the hypothetical gray-block/reviewer verdict and never waits for a human.
+  const approvals = config.gate.mode === 'enforce' ? options.approvals : undefined;
   let reviewer = options.reviewer;
   const reviewConfig = config.decision.second_stage ? structuredClone(config.decision.second_stage) : undefined;
   const configuredProviders = options.providers ?? config.decision.chain.map((id): DecisionProvider => {
@@ -174,12 +207,15 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
                 ...(result.usage.input_tokens !== undefined ? { input_tokens: result.usage.input_tokens } : {}),
                 ...(result.usage.output_tokens !== undefined ? { output_tokens: result.usage.output_tokens } : {}),
               };
+              let escalation: Escalation | undefined;
+              let reviewerReason: string | undefined;
+              if (rawOutcome === 'uncertain' && !reviewer && !reviewConfig && approvals) escalation = 'gray-no-reviewer';
               if (rawOutcome === 'uncertain' && (reviewer || reviewConfig)) {
                 const reviewStarted = now();
                 try {
                   if (!reviewer) {
                     if (!reviewConfig) throw new Error('Reviewer unavailable');
-                    reviewer = new LlmReviewProvider(reviewConfig, { credentials: secrets, policy });
+                    reviewer = new LlmReviewProvider(reviewConfig, { credentials: secrets, policy }, { allowUncertain: approvals !== undefined });
                   }
                   const reviewed = await Promise.race([
                     reviewer.review(state, result.answers, { signal: controller.signal, deadline_ms: Date.now() + Math.max(0, DECISION_DEADLINE_MS - (now() - started)) }),
@@ -189,17 +225,46 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
                   stages.push({ stage: 'review', provider: reviewed.provider, latency_ms: reviewed.latency_ms,
                     cost_usd: reviewed.cost_usd, input_tokens: reviewed.usage.input_tokens ?? null, output_tokens: reviewed.usage.output_tokens ?? null,
                     ...(reviewed.final_response ? { final_response: { ...reviewed.final_response } } : {}) });
-                  verdict.outcome = reviewed.verdict;
-                  verdict.rule = reviewed.invalid_response ? 'llm-review-invalid' : 'llm-review';
-                  cacheable = !reviewed.invalid_response;
+                  // An uncertain verdict is valid only when a human can resolve it; otherwise
+                  // it is an invalid review (explicit block), never an escalation.
+                  const invalid = reviewed.invalid_response === true || (reviewed.verdict === 'uncertain' && !approvals)
+                    || !['allow', 'block', 'uncertain'].includes(reviewed.verdict);
+                  verdict.outcome = invalid || reviewed.verdict === 'uncertain' ? 'block' : reviewed.verdict;
+                  verdict.rule = invalid ? 'llm-review-invalid' : 'llm-review';
+                  cacheable = !invalid;
                   // Provider text is never a diagnostic; audit sanitizes the full reason.
-                  verdict.reasons = [redact(reviewed.reason, secrets, policy)];
+                  reviewerReason = redact(reviewed.reason, secrets, policy);
+                  verdict.reasons = [reviewerReason];
+                  if (!invalid && reviewed.verdict === 'uncertain') escalation = 'reviewer-uncertain';
                 } catch {
                   stats.provider_failures += 1;
                   stages.push({ stage: 'review', provider: 'second_stage', latency_ms: Math.max(0, now() - reviewStarted),
                     cost_usd: null, input_tokens: null, output_tokens: null });
                   throw new Error('Reviewer unavailable');
                 }
+              }
+              if (escalation && approvals) {
+                // The model deadline bounds model stages only; the human wait is bounded by
+                // human_approval.timeout_ms and caller cancellation.
+                clearTimeout(timer);
+                const subject = approvalSubject(action, state, redact(stateContext, secrets, policy), escalation, result.answers, reviewerReason);
+                const humanStarted = now();
+                stats.human_pending! += 1;
+                let human: ApprovalResult;
+                try { human = await approvals.request(subject, controller.signal); }
+                catch { human = { status: 'rejected' }; }
+                finally { stats.human_pending! -= 1; }
+                stages.push({ stage: 'human', provider: 'human', latency_ms: Math.max(0, now() - humanStarted), input_tokens: 0, output_tokens: 0, cost_usd: 0 });
+                const decided = humanRule(human, context.signal?.aborted === true);
+                if (decided.rule === 'human-approved') stats.human_approved! += 1;
+                else if (decided.rule === 'human-denied') stats.human_denied! += 1;
+                else if (decided.rule === 'human-timeout') stats.human_timeout! += 1;
+                verdict.outcome = decided.outcome;
+                verdict.rule = decided.rule;
+                verdict.reasons = [decided.rule, escalation, ...(reviewerReason !== undefined ? [reviewerReason] : [])];
+                // A cached human verdict would silently answer repeats; neither it nor the
+                // pre-human reviewer result is cached.
+                cacheable = false;
               }
               verdict.stages = stages;
               verdict.cost_usd = stages.every((stage) => stage.cost_usd !== null) ? stages.reduce((sum, stage) => sum + stage.cost_usd!, 0) : null;

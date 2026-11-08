@@ -1,7 +1,7 @@
 import type { AdapterOptions, RequestContext, ToolCall } from '../types.js';
 import type { Verdict } from '../../gate/types.js';
 import { classifySseRetention, parseSse, pingKeepalive, type SseFrame } from '../sse.js';
-import { ResponsesResponseError, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES, MAX_TOOL_BYTES, IDLE_TIMEOUT_MS, COMPLETION_TIMEOUT_MS, DECISION_TIMEOUT_MS, bounded, blockedText, execution, callFor, record, blockedMessage, same, sameExecution, utf8Bytes, jsonBytes, encodeEvent, shadowStream } from './safety.js';
+import { ResponsesResponseError, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES, MAX_TOOL_BYTES, IDLE_TIMEOUT_MS, COMPLETION_TIMEOUT_MS, turnDecisionTimeout, bounded, blockedText, execution, callFor, record, blockedMessage, same, sameExecution, utf8Bytes, jsonBytes, encodeEvent, shadowStream } from './safety.js';
 import { parsedBound } from './nonstream.js';
 import { ResponseBudget, type ResponseAccounting, type ResponseReservation } from '../response-budget.js';
 
@@ -38,6 +38,8 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
   let currentFrame: SseFrame | undefined;
   let completionDeadline = Infinity;
   let decisionDeadline = Infinity;
+  let decisionStarted = 0;
+  let decisionCalls = 0;
   let decisionTimer: NodeJS.Timeout | undefined;
   let completionTimer: NodeJS.Timeout | undefined;
   let abortListener: (() => void) | undefined;
@@ -162,9 +164,15 @@ export function transformResponsesStream(source: ReadableStream<Uint8Array>, con
     if (final.type === 'function_call' && typeof final.arguments === 'string') reserve(parsedBound(final.arguments));
     reserve(512);
     item.call = callFor(final); item.final = final; items.set(index, item);
-    if (decisionDeadline === Infinity) {
-      decisionDeadline = Date.now() + DECISION_TIMEOUT_MS;
-      decisionTimer = setTimeout(() => abort.abort(new ResponsesResponseError('Decision deadline exceeded')), DECISION_TIMEOUT_MS);
+    // One whole-turn deadline, extended per additional call so sequential human waits
+    // each keep their own budget.
+    if (decisionCalls === 0) decisionStarted = Date.now();
+    decisionCalls++;
+    const extended = decisionStarted + turnDecisionTimeout(options, decisionCalls);
+    if (extended !== decisionDeadline) {
+      decisionDeadline = extended;
+      clearTimeout(decisionTimer);
+      decisionTimer = setTimeout(() => abort.abort(new ResponsesResponseError('Decision deadline exceeded')), Math.max(0, decisionDeadline - Date.now()));
     }
     item.decision = decisionChain.then(async () => {
       if (signal.aborted) throw new ResponsesResponseError('Response cancelled');

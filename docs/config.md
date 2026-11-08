@@ -114,7 +114,7 @@ Provider/upstream identifiers start with an ASCII letter/digit followed by lette
 | `decision.providers.*.pricing` | Optional strict per-million-token price object; missing prices remain unknown, not zero (recognized Jev input/output defaults are adapter-specific estimates). |
 | `decision.providers.*.pricing.input_usd_per_million` | Optional nonnegative number. |
 | `decision.providers.*.pricing.output_usd_per_million` | Optional nonnegative number. |
-| `decision.second_stage` | Optional strict trusted Anthropic Messages reviewer. Only gray results invoke it; absent reviewer leaves gray blocked. |
+| `decision.second_stage` | Optional strict trusted Anthropic Messages reviewer. Only gray results invoke it; absent reviewer leaves gray blocked unless human approval is enabled. |
 | `decision.second_stage.kind` | Literal `anthropic-messages`; default same. |
 | `decision.second_stage.base_url` | Required HTTP(S) Messages base, not a blindly duplicated `/messages` suffix; known-host restrictions below. |
 | `decision.second_stage.api_key` | Required nonempty trusted reviewer/gateway credential. |
@@ -145,6 +145,18 @@ Provider/upstream identifiers start with an ASCII letter/digit followed by lette
 | `limits.request_body_bytes` | Positive integer; `64000000` (decimal 64 MB). Oversized inbound requests return 413. |
 | `limits.upstream_connect_timeout_ms` | Positive integer; `10000`. |
 | `limits.upstream_read_timeout_ms` | Positive integer; `30000`. |
+
+### Human approval
+
+| Key | Type / default / behavior |
+| --- | --- |
+| `human_approval` | Object; defaults below. Disabled keeps the gray-block/binary-reviewer contract exactly. Enforce only; shadow never asks a human or starts the UI. |
+| `human_approval.enabled` | Boolean; `false`. Escalates gray-without-reviewer and reviewer-`uncertain` actions to the approval UI. |
+| `human_approval.host` | Nonempty string; `127.0.0.1`. Separate approval UI/API listener. Non-loopback requires `token`; (host, port) must differ from `listen`. |
+| `human_approval.port` | Integer 1–65535; `8485`. |
+| `human_approval.token` | Optional Bearer secret for `/api/*` of visible ASCII without whitespace (`0x21`–`0x7e`); required off loopback. Redacted like other configured credentials. |
+| `human_approval.timeout_ms` | Positive integer ≤86400000; `240000` (4 min, below Codex's default 300000 stream idle timeout). Per-action human wait; expiry blocks (`human-timeout`). Also extends the whole-turn decision deadline once per tool call in the turn, so sequential escalations each get a full wait. Keep it below client stream idle timeouts (Codex: 300000 by default). |
+| `human_approval.max_pending` | Positive integer ≤10000; `100`. Queue bound; a full queue (or a request arriving during shutdown) blocks immediately (`human-approval-unavailable`). |
 
 ### Effective policy
 
@@ -282,6 +294,14 @@ Classifier rerouting requires second_stage and matches an Anthropic-shaped syste
 
 Compare risk thresholds first, then intent mismatch, then allow boundaries; remaining valid probabilities are gray. Without second_stage gray blocks even with availability fail-open. Invalid/ambiguous reviewer output blocks; genuinely unavailable configured stages use `on_provider_failure`. Missing/non-finite/refused probabilities are not zero risk. Retried/failed stages with incomplete usage retain unknown cost, not free calls.
 
-Fixed response bounds are not configurable schema keys: 1 MiB per tool/incomplete SSE frame, 8 MiB shared retained representations, 4 MiB reasoning subset; collection/idle/decision deadlines 60/30/60 seconds. Whole-turn identity checks, incomplete EOF, timeout/cancel and resource failure block unapproved execution. Anthropic/Responses ordered stateful suffixes may wait after a withheld execution; early/pure text is not globally buffered. Shadow does not wait/enforce.
+### Human approval flow
+
+With `human_approval.enabled` in enforce: gray without second_stage escalates to a human (`gray-no-reviewer`); with second_stage the reviewer may also answer `uncertain`, which escalates (`reviewer-uncertain`). Reviewer allow/block stay final; invalid/ambiguous reviewer output still blocks and unavailability still follows `on_provider_failure`—neither escalates. Approve → `human-approved`; deny → `human-denied`; expiry, caller cancellation/shutdown of a pending request, and a full queue or a request after shutdown began block (`human-timeout`, `caller-aborted`/`human-approval-aborted`, `human-approval-unavailable`). Nothing fails open. Human-escalated verdicts, and the reviewer result preceding them, are never cached. Audit adds a zero-cost `human` stage; `/_amp/status` counters add `human_pending/approved/denied/timeout`.
+
+Open `http://<human_approval.host>:<port>/` (default `http://127.0.0.1:8485/`) to see pending actions with their redacted action, user request, route/session, escalation reason, probabilities, reviewer reason and expiry, plus recent decisions. Only already-redacted decision state is shown. The UI assumes only its operator can reach it; without `token` it rejects non-IP/localhost/configured `Host` values. If a token is set the page prompts once and keeps it in session storage. Agent-derived text is untrusted and rendered as text only; control, bidi and zero-width characters are shown as `⟨U+XXXX⟩`, long blank/space runs are collapsed into visible markers, and line/character counts flag content that needs scrolling. Cards stay in place while the page polls: a request that settles elsewhere is marked no longer pending (dismiss it explicitly) and freshly shifted or new buttons are briefly disabled, so a click cannot land on a different action.
+
+The agent's response is **held** while waiting: streams keep receiving `gate.hold_keepalive_ms` pings, nonstream requests stay open. Client/proxy idle or request timeouts shorter than `timeout_ms` cancel the turn, which blocks. Responses and Chat Completions streams can only send SSE comment keepalives (`: ping`), which do not reset clients that time out on missing events: Codex aborts after `model_providers.<id>.stream_idle_timeout_ms` (default 300000), so either set that above `timeout_ms + 60000` or keep `timeout_ms` below about 240000. Anthropic streams receive real `ping` events. The approval listener failing to start fails `serve`.
+
+Fixed response bounds are not configurable schema keys: 1 MiB per tool/incomplete SSE frame, 8 MiB shared retained representations, 4 MiB reasoning subset; collection/idle/decision deadlines 60/30/60 seconds (the decision deadline grows by `human_approval.timeout_ms` per tool call in the turn when human approval is enabled in enforce). Whole-turn identity checks, incomplete EOF, timeout/cancel and resource failure block unapproved execution. Anthropic/Responses ordered stateful suffixes may wait after a withheld execution; early/pure text is not globally buffered. Shadow does not wait/enforce.
 
 Cache TTL 600 seconds and LRU 10000 are implementation bounds, not YAML knobs. Cache identity binds effective policy/provider configuration, normalized action and actual redacted decision context; a cache hit is not evidence of provider prompt caching. Audit logs and init stdout can still be sensitive; redact does not make arbitrary command content public. For manual UTC estimates with unknown totals retained as null, see [daily aggregation](tuning.md#reading-audit-records-and-utc-daily-estimates).

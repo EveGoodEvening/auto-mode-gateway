@@ -285,3 +285,29 @@ describe('numeric, URL and strict object boundaries', () => {
     expect(configSchema.parse({ ...validInput(), policy }).policy).toMatchObject(policy);
   });
 });
+
+describe('human approval configuration', () => {
+  it('defaults to disabled loopback settings', () => {
+    expect(configSchema.parse(validInput()).human_approval).toEqual({ enabled: false, host: '127.0.0.1', port: 8485, timeout_ms: 240_000, max_pending: 100 });
+  });
+  it('requires a token off loopback only when enabled', () => {
+    expectIssue({ ...validInput(), human_approval: { enabled: true, host: '0.0.0.0' } }, ['human_approval', 'token']);
+    expect(configSchema.safeParse({ ...validInput(), human_approval: { enabled: false, host: '0.0.0.0' } }).success).toBe(true);
+    expect(configSchema.safeParse({ ...validInput(), human_approval: { enabled: true, host: '0.0.0.0', token: 'approval-token' } }).success).toBe(true);
+    expect(configSchema.safeParse({ ...validInput(), human_approval: { enabled: true, host: '::1' } }).success).toBe(true);
+  });
+  it('rejects sharing the gateway listen address and invalid bounds', () => {
+    expectIssue({ ...validInput(), listen: { host: '127.0.0.1', port: 9000 }, human_approval: { enabled: true, port: 9000 } }, ['human_approval', 'port']);
+    expectIssue({ ...validInput(), human_approval: { timeout_ms: 86_400_001 } }, ['human_approval', 'timeout_ms']);
+    expectIssue({ ...validInput(), human_approval: { max_pending: 10_001 } }, ['human_approval', 'max_pending']);
+    expectIssue({ ...validInput(), human_approval: { port: 0 } }, ['human_approval', 'port']);
+    expectIssue({ ...validInput(), human_approval: { token: ' ' } }, ['human_approval', 'token']);
+    expectIssue({ ...validInput(), human_approval: { unknown: true } }, ['human_approval']);
+  });
+  it('rejects approval tokens that could never match a Bearer header', () => {
+    for (const token of ['correct horse battery', ' approval-token', 'approval-token ', 'approval\ttoken', 'tök3n-ünicode', 'line\nbreak', '']) {
+      expectIssue({ ...validInput(), human_approval: { token } }, ['human_approval', 'token']);
+    }
+    expect(configSchema.parse({ ...validInput(), human_approval: { token: 'Ab1-_.~!+/=' } }).human_approval.token).toBe('Ab1-_.~!+/=');
+  });
+});

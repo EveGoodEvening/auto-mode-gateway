@@ -12,6 +12,31 @@ export const MAX_REASONING_BYTES = 4 * 1024 * 1024;
 export const IDLE_TIMEOUT_MS = 30_000;
 export const COMPLETION_TIMEOUT_MS = 60_000;
 export const DECISION_TIMEOUT_MS = 60_000;
+/** Node timers overflow above this value and would fire immediately. */
+const MAX_TIMER_MS = 2_147_483_647;
+
+/** Effective whole-turn decision deadline; invalid overrides fall back to the 60s default. */
+export function decisionTimeout(options: Pick<AdapterOptions, 'decisionTimeoutMs'>): number {
+  const value = options.decisionTimeoutMs;
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return DECISION_TIMEOUT_MS;
+  return Math.min(Math.floor(value), MAX_TIMER_MS);
+}
+
+/** Per-additional-call extension of the whole-turn deadline; invalid values add nothing. */
+export function decisionExtension(options: Pick<AdapterOptions, 'decisionExtensionMs'>): number {
+  const value = options.decisionExtensionMs;
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(Math.floor(value), MAX_TIMER_MS);
+}
+
+/**
+ * Whole-turn deadline for `calls` tool decisions. Sequential human waits each get
+ * their own extension, so a later escalation is not starved by an earlier one.
+ */
+export function turnDecisionTimeout(options: Pick<AdapterOptions, 'decisionTimeoutMs' | 'decisionExtensionMs'>, calls: number): number {
+  const extra = Math.max(0, Math.floor(calls) - 1) * decisionExtension(options);
+  return Math.min(decisionTimeout(options) + extra, MAX_TIMER_MS);
+}
 
 export class AnthropicResponseError extends Error {
   readonly blocked = true;
@@ -76,10 +101,12 @@ export async function decide(calls: readonly ToolCall[], context: RequestContext
   if (!calls.length) return results;
   const deadline = new AbortController();
   const signal = AbortSignal.any([options.signal, deadline.signal]);
-  const timer = setTimeout(() => deadline.abort(new AnthropicResponseError('Decision deadline exceeded')), DECISION_TIMEOUT_MS);
+  const timeout = turnDecisionTimeout(options, calls.length);
+  const timer = setTimeout(() => deadline.abort(new AnthropicResponseError('Decision deadline exceeded')), timeout);
   try {
-    // Sequential work bounds in-flight providers and shares a single whole-turn deadline.
-    for (const call of calls) results.set(call.id, await bounded(Promise.resolve().then(() => options.onToolCall(call, context, signal)), DECISION_TIMEOUT_MS, signal));
+    // Sequential work bounds in-flight providers and shares a single whole-turn deadline
+    // that grows by one human budget per additional call.
+    for (const call of calls) results.set(call.id, await bounded(Promise.resolve().then(() => options.onToolCall(call, context, signal)), timeout, signal));
     return results;
   } finally {
     clearTimeout(timer);
@@ -88,6 +115,11 @@ export async function decide(calls: readonly ToolCall[], context: RequestContext
 
 export function explanation(verdict: Verdict): string {
   if (verdict.rule === 'provider-unavailable' || verdict.rule === 'decision-timeout') return '[auto-mode-proxy] decision providers unavailable';
+  // Fixed human-facing text; reviewer/agent-derived reasons are not echoed for human outcomes.
+  if (verdict.rule === 'human-denied') return '[auto-mode-proxy] a human reviewer denied this action';
+  if (verdict.rule === 'human-timeout') return '[auto-mode-proxy] human approval timed out; the action was not approved';
+  if (verdict.rule === 'human-approval-unavailable') return '[auto-mode-proxy] human approval unavailable (queue full or gateway shutting down); the action was blocked';
+  if (verdict.rule === 'human-approval-aborted') return '[auto-mode-proxy] human approval was cancelled; the action was blocked';
   let text = '';
   const append = (value: string): void => {
     text += value.slice(0, Math.max(0, 4096 - text.length));

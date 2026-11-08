@@ -12,7 +12,7 @@ export interface AuditContext {
   delivery?: AuditDelivery;
 }
 export interface AuditStage {
-  stage: 'decision' | 'review';
+  stage: 'decision' | 'review' | 'human';
   provider: string | null;
   latency_ms: number | null;
   input_tokens: number | null;
@@ -47,6 +47,7 @@ export type AuditSink = (input: AuditInput) => void | Promise<void>;
 export function collectConfigSecrets(config: Config): readonly string[] {
   const values = [...config.auth.client_tokens];
   if (config.auth.admin_token) values.push(config.auth.admin_token);
+  if (config.human_approval.token) values.push(config.human_approval.token);
   for (const upstream of Object.values(config.upstreams)) {
     if (upstream.api_key) values.push(upstream.api_key);
     values.push(...Object.values(upstream.extra_headers ?? {}));

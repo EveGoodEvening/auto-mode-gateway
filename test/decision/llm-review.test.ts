@@ -260,3 +260,34 @@ describe('review cancellation, availability and honest accounting', () => {
     else expect(result.cost_usd).toBeCloseTo(cost);
   });
 });
+
+describe('three-way reviewer for human approval', () => {
+  function capture(text: string) {
+    const bodies: Record<string, unknown>[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: URL, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return response(wire(text));
+    }));
+    return bodies;
+  }
+  it('binary by default: schema/prompt exclude uncertain and an uncertain verdict is invalid', async () => {
+    const bodies = capture('{"verdict":"uncertain","reason":"Cannot tell"}');
+    expect(await new LlmReviewProvider(config(), { credentials: [], policy: DEFAULT_POLICY }).review(state, answers)).toMatchObject({ verdict: 'block', invalid_response: true });
+    expect(bodies[0]?.system).toContain('When uncertain, block.');
+    expect(bodies[0]?.output_config).toMatchObject({ format: { schema: { properties: { verdict: { enum: ['allow', 'block'] } } } } });
+  });
+  it('allowUncertain admits uncertain in the schema, prompt and parser', async () => {
+    const bodies = capture(`{"verdict":"uncertain","reason":"Cannot tell review-secret-sentinel"}`);
+    const result = await new LlmReviewProvider(config(), { credentials: [], policy: DEFAULT_POLICY }, { allowUncertain: true }).review(state, answers);
+    expect(result).toMatchObject({ verdict: 'uncertain', provider: 'second_stage' });
+    expect(result.invalid_response).toBeUndefined();
+    expect(result.reason).not.toContain('review-secret-sentinel');
+    expect(bodies[0]?.system).not.toContain('When uncertain, block.');
+    expect(bodies[0]?.system).toContain('"uncertain"');
+    expect(bodies[0]?.output_config).toMatchObject({ format: { schema: { properties: { verdict: { enum: ['allow', 'block', 'uncertain'] } } } } });
+  });
+  it.each(['{"verdict":"maybe","reason":"x"}', '{"verdict":"uncertain","verdict":"allow"}', '{"verdict":"uncertain","reason":"  "}'])('allowUncertain still rejects invalid output %s', async (text) => {
+    capture(text);
+    expect(await new LlmReviewProvider(config(), { credentials: [], policy: DEFAULT_POLICY }, { allowUncertain: true }).review(state, answers)).toMatchObject({ verdict: 'block', invalid_response: true });
+  });
+});

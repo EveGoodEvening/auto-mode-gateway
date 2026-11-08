@@ -99,7 +99,11 @@ Codex 0.164.0 仅支持 Responses，不要设置 `wire_api = "chat"`。选择支
 
 ## 判定方式
 
-硬拒绝规则、不可用或畸形的执行、截断写入首先阻断。然后依次是敏感路径检查、内容读取（即使在项目内也需审批）、有界元数据豁免与 genuine `other`、Task/Todo 的直接允许，最后是可信判定链。没有二审时灰区阻断，二审结果非法也阻断，提供方故障默认阻断。工具调用之前或不含工具调用的文本不会被扣留；不完整、超限、超时或取消的响应绝不会放出被扣留的调用。详见[威胁模型](docs/threat-model.md#rule-precedence-and-fail-closed-behavior)。
+硬拒绝规则、不可用或畸形的执行、截断写入首先阻断。然后依次是敏感路径检查、内容读取（即使在项目内也需审批）、有界元数据豁免与 genuine `other`、Task/Todo 的直接允许，最后是可信判定链。没有二审时灰区阻断（启用人工审批时除外），二审结果非法也阻断，提供方故障默认阻断。工具调用之前或不含工具调用的文本不会被扣留；不完整、超限、超时或取消的响应绝不会放出被扣留的调用。详见[威胁模型](docs/threat-model.md#rule-precedence-and-fail-closed-behavior)。
+
+### 人工审批
+
+可选：设置 `human_approval: { enabled: true }`（仅 enforce 模式），打开 `http://127.0.0.1:8485/`。没有二审的灰区动作、以及二审判为 `uncertain` 的动作会在此等待 **批准 / 拒绝**；超时（默认 4 分钟）、取消或队列已满均阻断。人工决定从不缓存。等待期间 agent 的响应被扣留（流式响应持续收到 keepalive ping），客户端超时需长于等待时间。UI 信任任何能访问它的人：保持在 loopback，或设置 `token`（非 loopback 时必需）。显示的内容来自 agent，不可信。见[配置](docs/config.md#human-approval-flow)。
 
 仅供说明的估算，不是报价：每 100 次判定约 $0.003，每次灰区二审约 $0.0002。见[审计成本聚合](docs/tuning.md#reading-audit-records-and-utc-daily-estimates)。
 
@@ -113,6 +117,6 @@ Codex 0.164.0 仅支持 Responses，不要设置 `wire_api = "chat"`。选择支
 - `gate.on_provider_failure: allow` 会有意削弱该边界。
 - 具有隐藏能力的未知工具、错误的 `tool_map` 条目、隐藏的 Task 委派是残余风险。
 - [deploy/](deploy/) 中的文件需要自有域名、DNS 与 TLS；公网 HTTPS 未经验证。
-- 不提供人工审批 UI、多租户隔离、Cloudflare Workers 运行时或 hooks 集成。
+- 不提供多用户审批授权、多租户隔离、Cloudflare Workers 运行时或 hooks 集成。
 
 MIT 许可。

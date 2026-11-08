@@ -39,7 +39,14 @@ export function createStatus(config: Config, stats?: () => GateStats) {
         gate_mode: config.gate.mode,
         routes,
         provider_health: providerHealth,
-        counters: { allow: current?.allow ?? 0, block: current?.block ?? 0, uncertain: current?.uncertain ?? 0 },
+        counters: {
+          allow: current?.allow ?? 0, block: current?.block ?? 0, uncertain: current?.uncertain ?? 0,
+          // Human-approval counters appear only when the feature is enabled.
+          ...(config.human_approval.enabled ? {
+            human_pending: current?.human_pending ?? 0, human_approved: current?.human_approved ?? 0,
+            human_denied: current?.human_denied ?? 0, human_timeout: current?.human_timeout ?? 0,
+          } : {}),
+        },
         decisions: current?.decisions ?? 0,
         cache_hits: current?.cache_hits ?? 0,
         provider_failures: current?.provider_failures ?? 0,

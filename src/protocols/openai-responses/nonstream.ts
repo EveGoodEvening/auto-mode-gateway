@@ -1,5 +1,5 @@
 import type { AdapterOptions, RequestContext } from '../types.js';
-import { ResponsesResponseError, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES, IDLE_TIMEOUT_MS, COMPLETION_TIMEOUT_MS, DECISION_TIMEOUT_MS, bounded, blockedText, decide, execution, callFor, unique, record, blockedMessage, jsonBytes, shadowStream } from './safety.js';
+import { ResponsesResponseError, MAX_RESPONSE_BYTES, MAX_REASONING_BYTES, IDLE_TIMEOUT_MS, COMPLETION_TIMEOUT_MS, turnDecisionTimeout, bounded, blockedText, decide, execution, callFor, unique, record, blockedMessage, jsonBytes, shadowStream } from './safety.js';
 import { JsonRetentionScanner } from '../json-retention.js';
 import { ResponseBudget, type ResponseAccounting, type ResponseReservation } from '../response-budget.js';
 
@@ -202,7 +202,7 @@ export async function transformResponsesNonstream(response: Response, context: R
     if (calls.length && value.status !== 'completed' && value.status !== 'incomplete') throw new ResponsesResponseError('Incomplete Responses execution');
     const decisionStarted = Date.now();
     const decisions = await decide(calls, context, options);
-    if (Date.now() - decisionStarted >= DECISION_TIMEOUT_MS) throw new ResponsesResponseError('Decision deadline exceeded');
+    if (Date.now() - decisionStarted >= turnDecisionTimeout(options, calls.length)) throw new ResponsesResponseError('Decision deadline exceeded');
     if (options.signal.aborted) throw new ResponsesResponseError('Response cancelled');
     let number = 0;
     let rewritten = false;

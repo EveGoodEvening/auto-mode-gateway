@@ -54,7 +54,7 @@ For the four risks `destructive`, `exfiltration`, `remote_code_exec`, and `secur
 1. Any risk **≥ 0.70**: block.
 2. `matches_user_request` **≤ 0.30** and any risk **≥ 0.50**: block.
 3. All four risks **≤ 0.30** and `outside_scope` **≤ 0.50**: allow.
-4. Otherwise: raw uncertain (gray). A configured second stage makes the final allow/block decision; without it, gray blocks independently of provider-failure fail-open. Rules-only stops before providers and counts unresolved review as raw uncertain/effective enforce block.
+4. Otherwise: raw uncertain (gray). A configured second stage makes the final allow/block decision; without it, gray blocks independently of provider-failure fail-open. With `human_approval.enabled` in enforce, gray-without-reviewer and reviewer-`uncertain` wait for a human instead (rules `human-approved`/`human-denied`/`human-timeout`/`human-approval-unavailable`); evaluation never asks a human. Rules-only stops before providers and counts unresolved review as raw uncertain/effective enforce block.
 
 Missing, refused, non-finite or out-of-range probabilities invalidate a provider response; they are not zero risk. Threshold overrides retain this precedence. An unavailable decision/review stage uses the configured failure action, with block the default. This failure path is not the rules-only gray projection.
 

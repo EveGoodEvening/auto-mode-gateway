@@ -74,6 +74,11 @@ export interface GateStats {
   cache_hits: number;
   provider_failures: number;
   provider_health: Record<string, { successes: number; failures: number }>;
+  /** Human approval (present when the gate was created; zero when disabled). */
+  human_pending?: number;
+  human_approved?: number;
+  human_denied?: number;
+  human_timeout?: number;
 }
 
 export interface Gate {

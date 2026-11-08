@@ -37,6 +37,17 @@ export interface AdapterOptions {
   mode?: 'enforce' | 'shadow';
   delivery?: 'native' | 'rewrite';
   holdKeepaliveMs?: number;
+  /**
+   * Whole-turn tool decision deadline. Defaults to DECISION_TIMEOUT_MS (60s);
+   * extended when a human may hold a decision. Upstream completion/idle bounds
+   * remain independent and never run while decisions are awaited after EOF.
+   */
+  decisionTimeoutMs?: number;
+  /**
+   * Added to the whole-turn decision deadline for every tool call after the
+   * first, so each sequential human wait has its own budget. Defaults to 0.
+   */
+  decisionExtensionMs?: number;
   onNativeDelivered?: () => void;
   /** Register detached shadow work so shutdown can drain its eventual audit. */
   trackObservation?: (work: Promise<void>) => void;
