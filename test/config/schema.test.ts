@@ -288,13 +288,44 @@ describe('numeric, URL and strict object boundaries', () => {
 
 describe('human approval configuration', () => {
   it('defaults to disabled loopback settings', () => {
-    expect(configSchema.parse(validInput()).human_approval).toEqual({ enabled: false, host: '127.0.0.1', port: 8485, timeout_ms: 240_000, max_pending: 100 });
+    expect(configSchema.parse(validInput()).human_approval).toEqual({ enabled: false, host: '127.0.0.1', port: 8485, timeout_ms: 240_000, max_pending: 100, require_token: true });
   });
-  it('requires a token off loopback only when enabled', () => {
+  it('requires a token by default when enabled, even on loopback', () => {
+    for (const host of ['127.0.0.1', '::1']) {
+      const result = configSchema.safeParse({ ...validInput(), human_approval: { enabled: true, host } });
+      expect(result.success).toBe(false);
+      if (result.success) throw new Error('Expected schema rejection');
+      const issue = result.error.issues.find(item => item.path.join('.') === 'human_approval.token');
+      expect(issue?.message).toContain('auto-mode-proxy token new');
+      expect(issue?.message).toContain('require_token: false');
+    }
+    expectIssue({ ...validInput(), human_approval: { enabled: true, require_token: true } }, ['human_approval', 'token']);
+    expect(configSchema.safeParse({ ...validInput(), human_approval: { enabled: true, token: 'approval-token' } }).success).toBe(true);
+  });
+  it('rejects an approval token that reuses a client or admin token', () => {
+    for (const auth of [{ client_tokens: ['shared-token-value'] }, { admin_token: 'shared-token-value' }]) {
+      const result = configSchema.safeParse({ ...validInput(), auth, human_approval: { enabled: true, token: 'shared-token-value' } });
+      expect(result.success).toBe(false);
+      expect(result.error?.issues.some((issue) => issue.path.join('.') === 'human_approval.token' && issue.message.includes('differ'))).toBe(true);
+    }
+    expect(configSchema.safeParse({ ...validInput(), auth: { client_tokens: ['client-token-value'] }, human_approval: { enabled: true, token: 'approval-token-value' } }).success).toBe(true);
+  });
+
+  it('allows tokenless loopback only with an explicit require_token: false', () => {
+    expect(configSchema.parse({ ...validInput(), human_approval: { enabled: true, require_token: false } }).human_approval)
+      .toMatchObject({ enabled: true, require_token: false });
+    expect(configSchema.safeParse({ ...validInput(), human_approval: { enabled: true, host: '::1', require_token: false } }).success).toBe(true);
+    expectIssue({ ...validInput(), human_approval: { enabled: true, require_token: 'false' } }, ['human_approval', 'require_token']);
+  });
+  it('always requires a token off loopback; require_token: false does not weaken it', () => {
     expectIssue({ ...validInput(), human_approval: { enabled: true, host: '0.0.0.0' } }, ['human_approval', 'token']);
-    expect(configSchema.safeParse({ ...validInput(), human_approval: { enabled: false, host: '0.0.0.0' } }).success).toBe(true);
+    expectIssue({ ...validInput(), human_approval: { enabled: true, host: '0.0.0.0', require_token: false } }, ['human_approval', 'token']);
     expect(configSchema.safeParse({ ...validInput(), human_approval: { enabled: true, host: '0.0.0.0', token: 'approval-token' } }).success).toBe(true);
-    expect(configSchema.safeParse({ ...validInput(), human_approval: { enabled: true, host: '::1' } }).success).toBe(true);
+  });
+  it('adds no token requirement while disabled', () => {
+    expect(configSchema.safeParse(validInput()).success).toBe(true);
+    expect(configSchema.safeParse({ ...validInput(), human_approval: { enabled: false } }).success).toBe(true);
+    expect(configSchema.safeParse({ ...validInput(), human_approval: { enabled: false, host: '0.0.0.0' } }).success).toBe(true);
   });
   it('rejects sharing the gateway listen address and invalid bounds', () => {
     expectIssue({ ...validInput(), listen: { host: '127.0.0.1', port: 9000 }, human_approval: { enabled: true, port: 9000 } }, ['human_approval', 'port']);

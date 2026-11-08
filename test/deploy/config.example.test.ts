@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,5 +68,28 @@ describe('deployment example consumed by the application', () => {
     const env = environment('/app/audit/audit.jsonl');
     delete env.RELAY_A_KEY;
     await expect(loadConfig(example, env)).rejects.toThrow('Missing environment variable RELAY_A_KEY');
+  });
+  it('validates the commented human approval block only with its token', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'amp-deploy-approval-'));
+    try {
+      const source = await readFile(example, 'utf8');
+      const block = /^# human_approval:\n(?:# {3}.*\n)+/m.exec(source)?.[0];
+      expect(block).toBeDefined();
+      const enabled = source.replace(block!, block!.replace(/^# /gm, ''));
+      expect(enabled).toMatch(/^human_approval:\n {2}enabled: true$/m);
+      const path = join(directory, 'config.yaml');
+      await writeFile(path, enabled);
+      const env = { ...environment(join(directory, 'audit.jsonl')), AMP_APPROVAL_TOKEN: 'C13_FAKE_APPROVAL' };
+      const config = await loadConfig(path, env);
+      expect(config.human_approval).toMatchObject({ enabled: true, host: '0.0.0.0', token: 'C13_FAKE_APPROVAL', require_token: true });
+      // Off loopback, the tokenless opt-out cannot remove the token requirement.
+      const tokenless = enabled.replace(/^ {2}token: .*\n/m, '').replace(/^ {2}# require_token: false.*$/m, '  require_token: false');
+      expect(tokenless).toMatch(/^ {2}require_token: false$/m);
+      expect(tokenless).not.toContain('AMP_APPROVAL_TOKEN');
+      await writeFile(path, tokenless);
+      await expect(loadConfig(path, env)).rejects.toThrow('Invalid configuration at human_approval.token (custom)');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

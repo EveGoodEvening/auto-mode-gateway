@@ -64,7 +64,7 @@ async function flush(): Promise<void> {
   for (let round = 0; round < 20; round++) await new Promise(resolve => setImmediate(resolve));
 }
 
-async function startPage(token?: string) {
+async function startPage(token?: string, hash = '') {
   const broker = new ApprovalBroker({ timeout_ms: 60_000, max_pending: 10 });
   brokers.push(broker);
   const app = createApprovalApp(broker, { host: '127.0.0.1', ...(token === undefined ? {} : { token }) });
@@ -98,6 +98,9 @@ async function startPage(token?: string) {
   const calls: FetchCall[] = [];
   const control = { networkDown: false };
   const storage = new Map<string, string>();
+  const location = { pathname: '/', search: '', hash };
+  const replaced: { url: string }[] = [];
+  const history = { replaceState: (_state: unknown, _title: string, url: string) => { replaced.push({ url }); location.hash = ''; } };
   const fetch = async (url: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}) => {
     calls.push({ url, method: init.method ?? 'GET', headers: { ...(init.headers ?? {}) }, ...(init.body === undefined ? {} : { body: init.body }) });
     if (control.networkDown) throw new TypeError('Failed to fetch');
@@ -114,6 +117,8 @@ async function startPage(token?: string) {
     setInterval: (run: () => void, every: number) => { timers.push({ due: clock.now + every, every, run }); return timers.length; },
     setTimeout: (run: () => void, delay: number) => { timers.push({ due: clock.now + delay, run }); return timers.length; },
     Date: FakeDate,
+    location,
+    history,
   };
   runInNewContext(script, sandbox);
   await flush();
@@ -133,10 +138,40 @@ async function startPage(token?: string) {
   }
   const cards = () => pendingRoot.byClass('card');
   const button = (card: FakeNode, cls: string) => card.findAll(node => node.tag === 'button' && node.className === cls)[0]!;
-  return { broker, nodes, calls, control, storage, advance, cards, button, pendingRoot };
+  return { broker, nodes, calls, control, storage, advance, cards, button, pendingRoot, location, replaced };
 }
 
 describe('approval page script', () => {
+  it('takes a #token= fragment into session storage, clears the fragment and sends it only as a header', async () => {
+    const page = await startPage('tok/frag+=', '#token=tok%2Ffrag%2B%3D');
+    expect(page.replaced).toEqual([{ url: '/' }]);
+    expect(page.location.hash).toBe('');
+    expect(page.storage.get('amp-approval-token')).toBe('tok/frag+=');
+    expect(page.nodes.get('auth')!.hidden).toBe(true);
+    expect(page.calls.length).toBeGreaterThan(0);
+    for (const call of page.calls) {
+      expect(call.headers.Authorization).toBe('Bearer tok/frag+=');
+      expect(call.url).not.toContain('token');
+      expect(call.url).not.toContain('tok');
+    }
+  });
+
+  it('clears an empty or malformed token fragment and falls back to the prompt', async () => {
+    for (const hash of ['#token=', '#token=%E0%A4%A']) {
+      const page = await startPage('tok-123', hash);
+      expect(page.replaced).toEqual([{ url: '/' }]);
+      expect(page.storage.has('amp-approval-token')).toBe(false);
+      expect(page.nodes.get('auth')!.hidden).toBe(false);
+      for (const call of page.calls) expect(call.headers.Authorization).toBeUndefined();
+    }
+  });
+
+  it('leaves unrelated fragments alone', async () => {
+    const page = await startPage(undefined, '#section');
+    expect(page.replaced).toEqual([]);
+    expect(page.location.hash).toBe('#section');
+  });
+
   it('prompts for a token on 401, clears the prompt status and posts an authenticated JSON decision', async () => {
     const page = await startPage('tok-123');
     expect(page.nodes.get('auth')!.hidden).toBe(false);

@@ -66,7 +66,7 @@ function config(base: string, provider: string, overrides: Record<string, unknow
     },
     log_level: 'silent',
     audit: { path: auditPath },
-    human_approval: { enabled: true, timeout_ms: 30_000 },
+    human_approval: { enabled: true, timeout_ms: 30_000, token: 'disposable-approval' },
     ...overrides,
   });
 }
@@ -79,18 +79,22 @@ function send(app: ReturnType<typeof createApp>) {
 }
 
 describe('createApp with a shared approval broker', () => {
-  it.each(['allow', 'block'] as const)('holds a gray action for the web UI to %s', async (decision) => {
-    const settings = config(await relay(), await grayProvider());
+  it.each([
+    ['allow', true], ['block', true], ['allow', false], ['block', false],
+  ] as const)('holds a gray action for the web UI to %s (token: %s)', async (decision, tokened) => {
+    const settings = config(await relay(), await grayProvider(), tokened ? {} : { human_approval: { enabled: true, timeout_ms: 30_000, require_token: false } });
+    const auth: Record<string, string> = tokened ? { authorization: 'Bearer disposable-approval' } : {};
     const approvals = new ApprovalBroker({ timeout_ms: settings.human_approval.timeout_ms, max_pending: settings.human_approval.max_pending });
     cleanups.push(async () => approvals.close());
     const app = createApp(settings, { approvals });
     const web = createApprovalApp(approvals, settings.human_approval);
     const pending = send(app);
     await vi.waitFor(() => expect(approvals.size).toBe(1), { timeout: 5_000 });
-    const listed = await (await web.request('/api/pending', { headers: { host: '127.0.0.1:8485' } })).json() as { pending: { id: string; subject: { tool: string } }[] };
+    if (tokened) expect((await web.request('/api/pending', { headers: { host: '127.0.0.1:8485' } })).status).toBe(401);
+    const listed = await (await web.request('/api/pending', { headers: { host: '127.0.0.1:8485', ...auth } })).json() as { pending: { id: string; subject: { tool: string } }[] };
     expect(listed.pending[0]!.subject.tool).toBe('Bash');
     const decided = await web.request(`/api/approvals/${listed.pending[0]!.id}`, {
-      method: 'POST', headers: { host: '127.0.0.1:8485', 'content-type': 'application/json' }, body: JSON.stringify({ decision }),
+      method: 'POST', headers: { host: '127.0.0.1:8485', 'content-type': 'application/json', ...auth }, body: JSON.stringify({ decision }),
     });
     expect(decided.status).toBe(200);
     const response = await pending;
@@ -131,7 +135,7 @@ describe('createApp with a shared approval broker', () => {
     ['enforce without broker', 'enforce', false, 60_000],
     ['shadow with broker', 'shadow', true, 60_000],
   ] as const)('passes the whole-turn decision deadline (%s)', async (_name, mode, withBroker, expected) => {
-    const settings = config(await relay(), await grayProvider(), { gate: { mode }, human_approval: { enabled: true, timeout_ms: 30_000 } });
+    const settings = config(await relay(), await grayProvider(), { gate: { mode }, human_approval: { enabled: true, timeout_ms: 30_000, require_token: false } });
     const approvals = withBroker ? new ApprovalBroker({ timeout_ms: 30_000, max_pending: 10 }) : undefined;
     // Answer immediately so the held turn completes in either mode.
     if (approvals) {

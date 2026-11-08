@@ -94,4 +94,15 @@ describe('documentation configuration contract', () => {
     // Only a boolean can enter assertion diagnostics; emitted tokens stay private.
     expect(rejected).toBe(true);
   });
+
+  it('pairs every documented #token= approval link with the browser-history caveat', async () => {
+    const files = ['../../README.md', '../../README.zh-CN.md', '../../docs/config.md', '../../docs/threat-model.md'];
+    for (const file of files) {
+      const text = await readFile(new URL(file, import.meta.url), 'utf8');
+      expect(text, file).toContain('#token=');
+      expect(/history|历史记录/.test(text), file).toBe(true);
+      expect(/autocomplete|自动补全/.test(text), file).toBe(true);
+      expect(/paste the token|粘贴令牌/.test(text), file).toBe(true);
+    }
+  });
 });

@@ -15,7 +15,7 @@ function config(extra: Record<string, unknown> = {}) {
     routes: [{ prefix: '/', protocol: 'anthropic-messages', upstream: 'mock' }],
     upstreams: { mock: { base_url: 'http://127.0.0.1:1234', api_key: 'literal-upstream-credential' } },
     decision: { chain: ['one'], providers: { one: { kind: 'systemone', base_url: 'http://127.0.0.1:1235', model: 'inert', api_key: CREDENTIAL } } },
-    human_approval: { enabled: true, timeout_ms: 1000 },
+    human_approval: { enabled: true, timeout_ms: 1000, require_token: false },
     ...extra,
   });
 }

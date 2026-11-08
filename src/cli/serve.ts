@@ -1,6 +1,7 @@
 import type { Socket } from 'node:net';
 import { serve } from '@hono/node-server';
 import { Command, Option } from 'commander';
+import type { DestinationStream } from 'pino';
 import { createLogger } from '../util/log.js';
 
 import { loadConfig } from '../config/load.js';
@@ -14,11 +15,17 @@ export interface RunServerOptions {
   signal?: AbortSignal;
   /** Shared broker to use instead of a fresh one; consulted only when enabled in enforce. */
   approvals?: ApprovalBroker;
+  /** Startup/shutdown log sink; defaults to stderr. */
+  logDestination?: DestinationStream;
+}
+
+function approvalUrl(host: string, port: number): string {
+  return `http://${host.includes(':') ? `[${host}]` : host}:${port}/`;
 }
 
 /** Own only this listener and its sockets; never terminate another process. */
 export async function runServer(config: Config, options: RunServerOptions = {}): Promise<void> {
-  const logger = createLogger(config);
+  const logger = createLogger(config, options.logDestination);
   const human = config.human_approval;
   // One process-local queue shared by the gate and the approval listener.
   const approvals = human.enabled && config.gate.mode === 'enforce'
@@ -97,7 +104,13 @@ export async function runServer(config: Config, options: RunServerOptions = {}):
     approvalServer = serve({ fetch: approvalApp.fetch, hostname: human.host, port: human.port }, () => {
       // Shutdown raced startup: close the late listener instead of keeping the process alive.
       if (closing) approvalServer!.close(() => approvalClosed.resolve());
-      else logger.info('Approval UI listening');
+      else {
+        // Never put the token in the logged URL; operators append #token=... themselves.
+        logger.info({ url: approvalUrl(human.host, human.port) }, 'Approval UI listening');
+        if (human.token === undefined) {
+          logger.warn('Approval UI has no token (require_token: false): any local process, including gated agents, can approve held actions');
+        }
+      }
     });
     approvalServer.on('connection', (socket: Socket) => {
       approvalSockets.add(socket);

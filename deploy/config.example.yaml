@@ -108,13 +108,17 @@ classifier_reroute:
   model_map:
     claude-haiku-5-5: anthropic/claude-haiku-5.5
 # Optional human approval for gray/reviewer-uncertain actions (enforce only).
-# The UI trusts anyone who can reach it; non-loopback hosts require a token.
+# A token is required by default: a gated agent on the same host can reach
+# loopback too, so without one it could approve its own held actions.
+# Generate one with `auto-mode-proxy token new`; open the UI as
+# http://<host>:8485/#token=<token> (the fragment is never sent to the server).
 # Publish it only to 127.0.0.1 or a private network you control.
 # human_approval:
 #   enabled: true
 #   host: 0.0.0.0
 #   port: 8485
 #   token: "${AMP_APPROVAL_TOKEN}"
+#   # require_token: false  # loopback-only opt-out; any local process could approve
 #   timeout_ms: 240000
 #   max_pending: 100
 audit:

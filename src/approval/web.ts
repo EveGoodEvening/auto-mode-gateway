@@ -29,9 +29,12 @@ function hostName(host: string): string {
 }
 
 /**
- * Without a token, the only protection is reachability. Restrict Host to IP
- * literals, localhost and the configured host so DNS-rebinding pages (whose
- * Origin would equal the rebound Host) cannot read or decide approvals.
+ * Without a token (explicit require_token: false), the only protection is
+ * reachability. Restrict Host to IP literals, localhost and the configured host so
+ * DNS-rebinding pages (whose Origin would equal the rebound Host) cannot read or
+ * decide approvals. With a token the check is skipped: a rebound origin cannot read
+ * the token from this origin's sessionStorage, and operators may legitimately reach
+ * a tokened listener through a hostname or reverse proxy.
  */
 function hostAllowed(host: string | undefined, configured: string): boolean {
   if (!host) return false;
@@ -108,8 +111,9 @@ function json(context: Context, status: 200 | 400 | 401 | 403 | 404 | 413 | 415 
 /**
  * Local approval UI/API. All subject fields are agent-derived and untrusted; the
  * page renders them with textContent only. The UI is assumed to be reachable only
- * by its operator; headers, CSRF checks and the optional token are cheap
- * defense in depth, not a multi-user authorization model. Action content is never logged.
+ * by its operator. The token (required by default) is the credential that keeps
+ * other local processes, including gated agents, from deciding approvals; headers
+ * and CSRF checks are defense in depth, not a multi-user authorization model. Action content is never logged.
  */
 export function createApprovalApp(broker: ApprovalBroker, config: ApprovalConfig) {
   const app = new Hono<{ Variables: { nonce: string } }>();
@@ -234,6 +238,23 @@ button:disabled { opacity:.5; cursor:default; }
   const GUARD_MS = 800;
   let token = '';
   try { token = sessionStorage.getItem(KEY) || ''; } catch (e) { token = ''; }
+  // Convenience link form: #token=<value>. Fragments never reach the server or its
+  // logs; the value moves into per-tab storage and the fragment is removed at once.
+  try {
+    const hash = typeof location === 'object' && location ? String(location.hash || '') : '';
+    const match = /^#(?:.*&)?token=([^&]*)/.exec(hash);
+    if (match) {
+      let value = '';
+      try { value = decodeURIComponent(match[1]).trim(); } catch (e) { value = ''; }
+      if (typeof history === 'object' && history && typeof history.replaceState === 'function') {
+        history.replaceState(null, '', String(location.pathname || '/') + String(location.search || ''));
+      }
+      if (value) {
+        token = value;
+        try { sessionStorage.setItem(KEY, token); } catch (e) { /* Per-tab memory only. */ }
+      }
+    }
+  } catch (e) { /* Fall back to the prompt. */ }
   let offset = 0;
   let statusKind = '';
   let armedAt = 0;

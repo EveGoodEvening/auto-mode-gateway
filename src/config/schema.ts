@@ -199,11 +199,14 @@ export const configSchema = z.strictObject({
     enabled: z.boolean().default(false),
     host: nonempty.default('127.0.0.1'),
     port: z.number().int().min(1).max(65535).default(8485),
-    // Optional Bearer token for the approval UI/API; required off loopback. Header
+    // Bearer token for the approval UI/API. Required unless require_token is false,
+    // and always off loopback: a gated agent on this host can reach loopback too. Header
     // tokens cannot carry whitespace or non-ASCII, so reject values that could never match.
     token: z.string().regex(/^[\x21-\x7e]+$/, 'Approval token must be visible ASCII without whitespace').optional(),
     timeout_ms: positiveInteger.max(86_400_000).default(240_000),
     max_pending: positiveInteger.max(10_000).default(100),
+    // Opt-out for tokenless loopback access; any local process could then decide approvals.
+    require_token: z.boolean().default(true),
   }).prefault({}),
 }).superRefine((config, context) => {
   const issue = (path: (string | number)[], message: string) => {
@@ -250,8 +253,16 @@ export const configSchema = z.strictObject({
   }
   const human = config.human_approval;
   if (human.enabled) {
-    if (!isLoopback(human.host) && human.token === undefined) {
-      issue(['human_approval', 'token'], 'Non-loopback approval listeners require a token');
+    if (human.token === undefined) {
+      if (!isLoopback(human.host)) {
+        issue(['human_approval', 'token'], 'Non-loopback approval listeners require a token');
+      } else if (human.require_token) {
+        issue(['human_approval', 'token'], 'Human approval requires human_approval.token (generate one with `auto-mode-proxy token new`, or interpolate ${ENV_VAR}); set human_approval.require_token: false to allow tokenless loopback access');
+      }
+    }
+    // Agents present client tokens on every request; reusing one would hand them approval authority.
+    if (human.token !== undefined && (config.auth.client_tokens.includes(human.token) || human.token === config.auth.admin_token)) {
+      issue(['human_approval', 'token'], 'Approval token must differ from client and admin tokens');
     }
     if (human.host === config.listen.host && human.port === config.listen.port) {
       issue(['human_approval', 'port'], 'Approval listener must not share the gateway listen address');

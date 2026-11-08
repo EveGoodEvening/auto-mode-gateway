@@ -103,7 +103,7 @@ Codex 0.164.0 仅支持 Responses，不要设置 `wire_api = "chat"`。选择支
 
 ### 人工审批
 
-可选：设置 `human_approval: { enabled: true }`（仅 enforce 模式），打开 `http://127.0.0.1:8485/`。没有二审的灰区动作、以及二审判为 `uncertain` 的动作会在此等待 **批准 / 拒绝**；超时（默认 4 分钟）、取消或队列已满均阻断。人工决定从不缓存。等待期间 agent 的响应被扣留（流式响应持续收到 keepalive ping），客户端超时需长于等待时间。UI 信任任何能访问它的人：保持在 loopback，或设置 `token`（非 loopback 时必需）。显示的内容来自 agent，不可信。见[配置](docs/config.md#human-approval-flow)。
+可选（仅 enforce 模式）：用 `auto-mode-proxy token new` 生成令牌，设置 `human_approval: { enabled: true, token: "${AMP_APPROVAL_TOKEN}" }`，打开 `http://127.0.0.1:8485/` 并在提示框中粘贴令牌。也可使用 `#token=<令牌>` 链接（片段不会发送到服务器；页面按标签页保存后立即清除），但浏览器仍可能把完整链接保存在磁盘上的历史记录和自动补全中，因此只应在被管控 agent 无法读取的浏览器配置文件或主机上使用。没有二审的灰区动作、以及二审判为 `uncertain` 的动作会在此等待 **批准 / 拒绝**；超时（默认 4 分钟）、取消或队列已满均阻断。人工决定从不缓存。等待期间 agent 的响应被扣留（流式响应持续收到 keepalive ping），客户端超时需长于等待时间。默认必须设置令牌，因为 loopback 无法阻止同一主机上被管控的 agent 批准自己的动作；`require_token: false` 仅在 loopback 上可关闭此要求（启动时告警），非 loopback 始终需要令牌。显示的内容来自 agent，不可信。见[配置](docs/config.md#human-approval-flow)。
 
 仅供说明的估算，不是报价：每 100 次判定约 $0.003，每次灰区二审约 $0.0002。见[审计成本聚合](docs/tuning.md#reading-audit-records-and-utc-daily-estimates)。
 
