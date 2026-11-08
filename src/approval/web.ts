@@ -297,6 +297,7 @@ button:disabled { opacity:.5; cursor:default; }
     field(dl, 'Paths · 路径', Array.isArray(s.paths) ? s.paths.join('\\n') : undefined, true);
     field(dl, 'Workdir · 工作目录', s.workdir);
     field(dl, 'Content · 内容摘录', s.content_excerpt, true);
+    field(dl, s.arguments_truncated ? 'Arguments (truncated) · 参数（已截断）' : 'Arguments · 参数', s.arguments, true);
     field(dl, 'User request · 用户请求', s.user_request, true);
     field(dl, 'Route · 路由', [s.route, s.protocol].filter(Boolean).join(' · '));
     field(dl, 'Session · 会话', s.session_id);
@@ -305,7 +306,7 @@ button:disabled { opacity:.5; cursor:default; }
     field(dl, 'Reviewer · 复审理由', s.reviewer_reason, true);
     return dl;
   };
-  const strings = (s) => [s.tool, s.kind, s.text, s.url, s.workdir, s.content_excerpt, s.user_request, s.route, s.session_id, s.reviewer_reason]
+  const strings = (s) => [s.tool, s.kind, s.text, s.url, s.workdir, s.content_excerpt, s.arguments, s.user_request, s.route, s.session_id, s.reviewer_reason]
     .concat(Array.isArray(s.argv) ? s.argv : [], Array.isArray(s.paths) ? s.paths : []).filter((v) => typeof v === 'string');
   const updateButtons = () => {
     const now = Date.now();

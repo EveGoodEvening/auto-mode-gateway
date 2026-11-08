@@ -10,6 +10,9 @@ export interface ApprovalSubject {
   url?: string;
   workdir?: string;
   content_excerpt?: string;
+  /** MCP tool arguments: redacted, display-only, bounded; untrusted agent output. */
+  arguments?: string;
+  arguments_truncated?: boolean;
   user_request?: string;
   route?: string;
   protocol?: string;

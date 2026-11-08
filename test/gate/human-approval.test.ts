@@ -4,7 +4,7 @@ import { collectConfigSecrets, createAuditRecord, type AuditInput } from '../../
 import { configSchema } from '../../src/config/schema.js';
 import type { Answers, DecisionResult } from '../../src/decision/types.js';
 import type { ReviewProvider, ReviewResult } from '../../src/decision/llm-review.js';
-import { createGate, DECISION_DEADLINE_MS } from '../../src/gate/decide.js';
+import { APPROVAL_ARGUMENTS_MAX_CHARS, createGate, DECISION_DEADLINE_MS } from '../../src/gate/decide.js';
 import type { Action, GateContext } from '../../src/gate/types.js';
 import { explanation } from '../../src/protocols/anthropic/safety.js';
 import { createStatus } from '../../src/server/status.js';
@@ -151,6 +151,44 @@ describe('gray without reviewer escalates to a human', () => {
     expect(serialized).not.toContain('RAW_RESULT');
     expect(seen[0]?.argv).toBeUndefined();
     expect(seen[0]?.reviewer_reason).toContain('reviewer says uncertain');
+  });
+
+  it.each([
+    ['anthropic input', (input: Record<string, unknown>) => ({ type: 'tool_use', id: 't1', name: 'mcp__db__query', input, justification: 'RAW_JUSTIFICATION' })],
+    ['responses arguments', (input: Record<string, unknown>) => ({ type: 'function_call', call_id: 't1', name: 'mcp__db__query', arguments: JSON.stringify(input), justification: 'RAW_JUSTIFICATION' })],
+    ['chat function.arguments', (input: Record<string, unknown>) => ({ id: 't1', type: 'function', function: { name: 'mcp__db__query', arguments: JSON.stringify(input) }, justification: 'RAW_JUSTIFICATION' })],
+  ])('MCP subject shows redacted arguments from %s', async (_label, raw) => {
+    const approvals = broker();
+    const seen: ApprovalSubject[] = [];
+    answer(approvals, 'block', seen);
+    const gate = createGate(config(), { providers: [provider()], audit, approvals });
+    const mcp: Action = { kind: 'mcp', tool: 'mcp__db__query', paths: [], content_truncated: false,
+      raw: raw({ sql: 'DROP TABLE users', note: `uses ${CREDENTIAL}`, nested: { api_key: 'sensitive-key-value-123' } }) };
+    await gate.decide(mcp, ctx);
+    expect(seen).toHaveLength(1);
+    const shown = seen[0]!.arguments!;
+    expect(shown).toContain('DROP TABLE users');
+    expect(shown).toContain('[REDACTED:credential]');
+    expect(shown).not.toContain(CREDENTIAL);
+    expect(shown).not.toContain('sensitive-key-value-123');
+    expect(JSON.stringify(seen)).not.toContain('RAW_JUSTIFICATION');
+    expect(seen[0]!.arguments_truncated).toBeUndefined();
+  });
+
+  it('MCP arguments are redacted before the display bound, and only MCP actions carry them', async () => {
+    const approvals = broker();
+    const seen: ApprovalSubject[] = [];
+    answer(approvals, 'block', seen);
+    const gate = createGate(config(), { providers: [provider()], audit, approvals });
+    // The credential straddles the display bound: truncating first would leave a recognizable prefix.
+    const filler = 'x'.repeat(APPROVAL_ARGUMENTS_MAX_CHARS - 20);
+    await gate.decide({ kind: 'mcp', tool: 'mcp__x__y', paths: [], content_truncated: false, raw: { input: { a: filler + CREDENTIAL } } }, ctx);
+    expect(seen[0]!.arguments).toHaveLength(APPROVAL_ARGUMENTS_MAX_CHARS);
+    expect(seen[0]!.arguments_truncated).toBe(true);
+    expect(seen[0]!.arguments).not.toContain(CREDENTIAL.slice(0, 10));
+    answer(approvals, 'block', seen);
+    await gate.decide(action, ctx);
+    expect(seen[1]!.arguments).toBeUndefined();
   });
 
   it('never caches an escalated verdict: an identical action escalates again', async () => {

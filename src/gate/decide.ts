@@ -8,7 +8,7 @@ import { LlmReviewProvider, type ReviewProvider } from '../decision/llm-review.j
 import { resolvePolicy, type EffectivePolicy } from '../policy/effective.js';
 import { hardDeny } from '../policy/hard-deny.js';
 import { isReadonlyCommand } from '../policy/readonly-allowlist.js';
-import { redact } from '../policy/redact.js';
+import { redact, redactText } from '../policy/redact.js';
 import { sensitivePaths } from '../policy/sensitive-paths.js';
 import { buildState, type DecisionState } from '../policy/state-builder.js';
 import { cacheKey, DecisionCache } from './cache.js';
@@ -70,11 +70,41 @@ function cloneVerdict(verdict: Verdict): Verdict {
 }
 
 type Escalation = ApprovalSubject['escalation'];
+export const APPROVAL_ARGUMENTS_MAX_CHARS = 8192;
 
-/** Only already-redacted, bounded decision state reaches a human; never raw tool input. */
+/** The tool's own arguments from the protocol block: Anthropic input, Responses arguments/input, Chat function.arguments. */
+function toolArguments(raw: unknown): unknown {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const block = raw as Record<string, unknown>;
+  const fn = block.function;
+  const value = Object.hasOwn(block, 'input') ? block.input : Object.hasOwn(block, 'arguments') ? block.arguments
+    : fn !== null && typeof fn === 'object' && !Array.isArray(fn) ? (fn as Record<string, unknown>).arguments : undefined;
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value) as unknown; } catch { return value; }
+}
+
+/**
+ * Display-only rendering of MCP arguments, which decision state does not carry. Redaction
+ * runs on the complete value (sensitive keys and literals) before the display bound, so a
+ * pretruncated excerpt never retains a partial credential. Never enters model state or cache keys.
+ */
+function approvalArguments(action: Action, secrets: readonly string[], policy: EffectivePolicy): Pick<ApprovalSubject, 'arguments' | 'arguments_truncated'> {
+  if (action.kind !== 'mcp') return {};
+  const value = toolArguments(action.raw);
+  if (value === undefined) return {};
+  let text: string;
+  try { text = typeof value === 'string' ? value : JSON.stringify(redact(value, secrets, policy), null, 2) ?? ''; }
+  catch { return {}; }
+  text = redactText(text, secrets, policy);
+  return text.length > APPROVAL_ARGUMENTS_MAX_CHARS
+    ? { arguments: text.slice(0, APPROVAL_ARGUMENTS_MAX_CHARS), arguments_truncated: true } : { arguments: text };
+}
+
+/** Only redacted, bounded data reaches a human: decision state plus display-only MCP arguments. */
 function approvalSubject(action: Action, state: DecisionState, context: Omit<GateContext, 'signal'>, escalation: Escalation,
-  probabilities: Answers, reviewerReason: string | undefined): ApprovalSubject {
-  const subject: ApprovalSubject = { tool: state.action.tool, kind: action.kind, paths: [...(state.action.path ?? [])], escalation, probabilities: { ...probabilities } };
+  probabilities: Answers, reviewerReason: string | undefined, secrets: readonly string[], policy: EffectivePolicy): ApprovalSubject {
+  const subject: ApprovalSubject = { tool: state.action.tool, kind: action.kind, paths: [...(state.action.path ?? [])], escalation, probabilities: { ...probabilities },
+    ...approvalArguments(action, secrets, policy) };
   if (state.action.command !== undefined) subject.text = state.action.command;
   if (state.action.url !== undefined) subject.url = state.action.url;
   if (state.action.workdir !== undefined) subject.workdir = state.action.workdir;
@@ -247,7 +277,7 @@ export function createGate(config: Config, options: GateOptions = {}): Gate {
                 // The model deadline bounds model stages only; the human wait is bounded by
                 // human_approval.timeout_ms and caller cancellation.
                 clearTimeout(timer);
-                const subject = approvalSubject(action, state, redact(stateContext, secrets, policy), escalation, result.answers, reviewerReason);
+                const subject = approvalSubject(action, state, redact(stateContext, secrets, policy), escalation, result.answers, reviewerReason, secrets, policy);
                 const humanStarted = now();
                 stats.human_pending! += 1;
                 let human: ApprovalResult;

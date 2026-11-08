@@ -234,6 +234,19 @@ describe('approval page script', () => {
     expect(card!.byClass('badge').some(node => node.textContent.includes('Hidden characters'))).toBe(true);
   });
 
+  it('renders MCP arguments as visible preformatted text and labels truncation', async () => {
+    const page = await startPage();
+    void page.broker.request({ tool: 'mcp__db__query', kind: 'mcp', paths: [], escalation: 'gray-no-reviewer',
+      arguments: '{\n  "sql": "DROP TABLE users\u200B"\n}', arguments_truncated: true });
+    await page.advance(2_000);
+    const [card] = page.cards();
+    expect(card!.findAll(node => node.tag === 'dt').map(node => node.textContent)).toContain('Arguments (truncated) · 参数（已截断）');
+    const pre = card!.findAll(node => node.tag === 'pre')[0]!.textContent;
+    expect(pre).toContain('DROP TABLE users');
+    expect(pre).toContain('⟨U+200B⟩');
+    expect(card!.byClass('badge').some(node => node.textContent.includes('Hidden characters'))).toBe(true);
+  });
+
   it('clears a transient network error once polling recovers', async () => {
     const page = await startPage();
     page.control.networkDown = true;
